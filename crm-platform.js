@@ -13,28 +13,50 @@ const fs = require("fs");
 const path = require("path");
 const { URL } = require("url");
 
-const PORT = 10020;
+const PORT = parseInt(process.env.PORT || "10020", 10);
 
 // ═══════════════════════════════════════════════════════════
 // 1. 공통 인프라
 // ═══════════════════════════════════════════════════════════
 
 function loadEnv() {
-  // 단독 배포: 같은 폴더의 .env 우선, 없으면 기존 레이아웃(../../.env) 폴백
-  var localEnv = path.join(__dirname, ".env");
-  var parentEnv = path.join(__dirname, "..", "..", ".env");
-  var envPath = fs.existsSync(localEnv) ? localEnv : parentEnv;
-  var lines = fs.readFileSync(envPath, "utf-8").split("\n");
+  // 단독 배포: 같은 폴더의 .env 우선, 없으면 기존 레이아웃(../../.env) 폴백.
+  // Docker 등 .env 파일이 없는 환경에서는 process.env 만 사용한다(크래시 금지).
   var env = {};
-  for (var i = 0; i < lines.length; i++) {
-    var line = lines[i].trim();
-    if (!line || line.startsWith("#")) continue;
-    var idx = line.indexOf("=");
-    if (idx > 0) env[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+  try {
+    var localEnv = path.join(__dirname, ".env");
+    var parentEnv = path.join(__dirname, "..", "..", ".env");
+    var envPath = fs.existsSync(localEnv)
+      ? localEnv
+      : (fs.existsSync(parentEnv) ? parentEnv : null);
+    if (envPath) {
+      var lines = fs.readFileSync(envPath, "utf-8").split("\n");
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (!line || line.startsWith("#")) continue;
+        var idx = line.indexOf("=");
+        if (idx > 0) env[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+      }
+    } else {
+      console.log("[env] .env 파일 없음 — process.env 환경변수를 사용합니다.");
+    }
+  } catch (e) {
+    console.log("[env] .env 로드 건너뜀:", e.message);
   }
+  // 컨테이너/배포 환경에서 주입된 process.env 값이 .env 파일보다 우선한다.
+  ["DB_SERVER", "DB_PORT", "DB_USER", "DB_PASSWORD", "CRM_AUTH_USER", "CRM_AUTH_PASS", "BITLY_TOKEN", "ANTHROPIC_API_KEY"].forEach(function (k) {
+    if (process.env[k] !== undefined && process.env[k] !== "") env[k] = process.env[k];
+  });
   return env;
 }
 var env = loadEnv();
+
+// 런타임에 읽고/쓰는 데이터 파일 저장 경로.
+// Docker 컨테이너는 재배포 시 내부 파일이 초기화되므로 볼륨 경로(/app/data)를 사용한다.
+// 로컬 실행 시에는 기존과 동일하게 현재 폴더를 사용한다.
+var DATA_DIR = process.env.DATA_DIR || __dirname;
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) { /* noop */ }
+var CAMPAIGN_DATA_PATH = path.join(DATA_DIR, "crm-campaign-data.json");
 
 var dbConfig = {
   server: env.DB_SERVER,
@@ -50,7 +72,7 @@ var dbConfig = {
 var pool = null;
 var cartSchema = { available: false, memberCol: null, cardSeqCol: null };
 var campaignHistory = [];
-var CAMPAIGN_HISTORY_PATH = path.join(__dirname, "campaign-history.json");
+var CAMPAIGN_HISTORY_PATH = path.join(DATA_DIR, "campaign-history.json");
 
 function loadCampaignHistory() {
   try {
@@ -74,7 +96,7 @@ function saveCampaignHistory() {
   }
 }
 var extractionHistory = [];
-var EXTRACTION_HISTORY_PATH = path.join(__dirname, "extraction-history.json");
+var EXTRACTION_HISTORY_PATH = path.join(DATA_DIR, "extraction-history.json");
 
 function loadExtractionHistory() {
   try {
@@ -3413,7 +3435,7 @@ var wbRendered = false;
 async function renderWeeklyBest() {
   if (wbRendered) return;
   try {
-    var res = await fetch('/api/weekly-best');
+    var res = await fetch('api/weekly-best');
     var data = await res.json();
     document.getElementById('wbContent').innerHTML = data.html || 'No data';
     wbRendered = true;
@@ -3427,7 +3449,7 @@ var aiHistory = [];
 async function renderAiContext() {
   if (aiContextRendered) return;
   try {
-    var res = await fetch('/api/ai-context');
+    var res = await fetch('api/ai-context');
     var data = await res.json();
     document.getElementById('aiContextCards').innerHTML = data.html || '';
     aiContextRendered = true;
@@ -3563,7 +3585,7 @@ async function aiSend() {
   aiHistory.push({ role: 'user', content: msg });
 
   try {
-    var res = await fetch('/api/ai-analysis', {
+    var res = await fetch('api/ai-analysis', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: aiHistory, campaignData: summary })
@@ -3586,7 +3608,7 @@ async function aiSend() {
 
 async function loadCampaignDashboard() {
   if (cdLoaded) { renderDashboard(); return; }
-  var res = await fetch('/api/campaign-data');
+  var res = await fetch('api/campaign-data');
   cdData = await res.json();
   cdLoaded = true;
   var campaigns = cdData.campaigns || cdData;
@@ -3921,7 +3943,7 @@ function editSendCountCell(gIdx,td){
 async function saveSendCount(gIdx,input){
   var val=parseInt(input.value)||0;
   try{
-    var res=await fetch('/api/campaign-sendcount-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:gIdx,count:val})});
+    var res=await fetch('api/campaign-sendcount-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:gIdx,count:val})});
     var data=await res.json();
     if(data.ok){cdLoaded=false;loadCampaignDashboard();}
   }catch(e){alert('저장 실패: '+e.message);}
@@ -3937,7 +3959,7 @@ function editConvCell(gIdx,slot,td){
 async function saveConvCell(gIdx,slot,input){
   var val=parseInt(input.value)||0;
   try{
-    var res=await fetch('/api/campaign-conv-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:gIdx,slot:slot,count:val})});
+    var res=await fetch('api/campaign-conv-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:gIdx,slot:slot,count:val})});
     var data=await res.json();
     if(data.ok){cdLoaded=false;loadCampaignDashboard();}
   }catch(e){alert('저장 실패: '+e.message);}
@@ -4304,7 +4326,7 @@ async function generateBitlyUrl(){
   var st=document.getElementById('urlStatus');
   st.textContent='생성 중...';st.style.color='#1a73e8';
   try{
-    var res=await fetch('/api/bitly-shorten',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({long_url:fullUtm})});
+    var res=await fetch('api/bitly-shorten',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({long_url:fullUtm})});
     var data=await res.json();
     if(data.link){
       document.getElementById('urlBitly').value=data.link;
@@ -4341,7 +4363,7 @@ async function saveUrlRecord(){
     campaign_index:_selectedCampaignIdx
   };
   try{
-    var res=await fetch('/api/add-record',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    var res=await fetch('api/add-record',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     var data=await res.json();
     if(data.ok){
       var msgs=[];
@@ -4382,10 +4404,10 @@ async function updateClicks(limit){
   btn.disabled=true;btnOther.disabled=true;
   btn.textContent='업데이트 중... ('+urls.length+'개)';
   try{
-    var res=await fetch('/api/bitly-clicks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({urls:urls,url_dates:urlDateMap})});
+    var res=await fetch('api/bitly-clicks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({urls:urls,url_dates:urlDateMap})});
     var data=await res.json();
     if(data.clicks){
-      var res2=await fetch('/api/update-record-clicks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clicks:data.clicks})});
+      var res2=await fetch('api/update-record-clicks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clicks:data.clicks})});
       var data2=await res2.json();
       btn.textContent='완료! ('+data2.updated+'건'+(data2.campaigns_updated?', 캠페인 '+data2.campaigns_updated+'건':'')+')';btn.style.background='#166534';
       cdLoaded=false;await loadCampaignDashboard();renderRecords();
@@ -4408,7 +4430,7 @@ async function autoConvAll(){
   var btn=document.getElementById('btnAutoConvAll');
   btn.disabled=true;btn.textContent='조회 중...';
   try{
-    var res=await fetch('/api/campaign-auto-conv-all',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+    var res=await fetch('api/campaign-auto-conv-all',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
     var data=await res.json();
     if(data.ok){
       btn.textContent='완료! ('+data.updated+'건 업데이트)';btn.style.background='#166534';
@@ -4554,7 +4576,7 @@ async function populateExtractionHistory(){
   if(!sel)return;
   sel.innerHTML='<option value="">-- 추출이력 선택 (선택사항) --</option>';
   try{
-    var res=await fetch('/api/extraction-history');
+    var res=await fetch('api/extraction-history');
     var list=await res.json();
     _extractionCounts={};
     list.slice().reverse().forEach(function(h){
@@ -4628,7 +4650,7 @@ async function registerCampaign(){
     extraction_split:document.getElementById('cmExtractionSplit').value||'all'
   };
   try{
-    var res=await fetch('/api/campaign-register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    var res=await fetch('api/campaign-register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     var data=await res.json();
     if(data.ok){alert('대시보드에 등록되었습니다 (예정 상태)');cdLoaded=false;clearCompose();cdSwitchSub('overview');}
     else{alert('등록 실패: '+(data.error||''));}
@@ -4654,7 +4676,7 @@ async function openEditCampaign(gIdx){
   var edSel=document.getElementById('edExtractionId');
   edSel.innerHTML='<option value="">-- 추출이력 선택 (선택사항) --</option>';
   try{
-    var ehRes=await fetch('/api/extraction-history');
+    var ehRes=await fetch('api/extraction-history');
     var ehList=await ehRes.json();
     ehList.slice().reverse().forEach(function(h){
       var hdt=h.createdAt?(new Date(h.createdAt)).toISOString().slice(0,10):'';
@@ -4704,7 +4726,7 @@ async function uploadEdExtraction(){
     });
     var parts=String(dataUrl).split(',');
     var base64=parts.length>1?parts[1]:'';
-    var res=await fetch('/api/extraction-history/upload',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:file.name,dataBase64:base64,campaignName:file.name})});
+    var res=await fetch('api/extraction-history/upload',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:file.name,dataBase64:base64,campaignName:file.name})});
     var data=await res.json();
     if(!data.ok){throw new Error(data.error||'업로드 실패');}
     var sel=document.getElementById('edExtractionId');
@@ -4743,7 +4765,7 @@ async function saveEditCampaign(){
     extraction_split:document.getElementById('edExtractionSplit').value||'all'
   };
   try{
-    var res=await fetch('/api/campaign-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    var res=await fetch('api/campaign-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     var data=await res.json();
     if(data.ok){closeEditModal();cdLoaded=false;loadCampaignDashboard();}
     else{alert('수정 실패: '+(data.error||''));}
@@ -4755,7 +4777,7 @@ async function deleteCampaignFromEdit(){
   if(isNaN(gIdx)){alert('대상 캠페인을 찾을 수 없습니다.');return;}
   if(!confirm('이 캠페인을 완전히 삭제하시겠습니까? (복구 불가)'))return;
   try{
-    var res=await fetch('/api/campaign-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:gIdx})});
+    var res=await fetch('api/campaign-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:gIdx})});
     var data=await res.json();
     if(data.ok){closeEditModal();cdLoaded=false;loadCampaignDashboard();}
     else{alert('삭제 실패: '+(data.error||''));}
@@ -4765,7 +4787,7 @@ async function deleteCampaignFromEdit(){
 async function deleteCampaign(globalIdx){
   if(!confirm('이 캠페인을 완전히 삭제하시겠습니까? (복구 불가)'))return;
   try{
-    var res=await fetch('/api/campaign-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:globalIdx})});
+    var res=await fetch('api/campaign-delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:globalIdx})});
     var data=await res.json();
     if(data.ok){cdLoaded=false;loadCampaignDashboard();}
     else{alert('삭제 실패: '+(data.error||''));}
@@ -4775,7 +4797,7 @@ async function deleteCampaign(globalIdx){
 async function changeCampaignStatus(globalIdx,newStatus){
   if(!confirm((newStatus==='취소'?'이 캠페인을 취소하시겠습니까?':'상태를 "'+newStatus+'"로 변경하시겠습니까?')))return;
   try{
-    var res=await fetch('/api/campaign-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:globalIdx,status:newStatus})});
+    var res=await fetch('api/campaign-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:globalIdx,status:newStatus})});
     var data=await res.json();
     if(data.ok){cdLoaded=false;loadCampaignDashboard();}
     else{alert('변경 실패: '+(data.error||''));}
@@ -4806,7 +4828,7 @@ async function loadFunnelDashboard(force){
   }
   document.getElementById('funnelLoading').style.display='inline';
   try{
-    var res=await fetch('/api/funnel-data?from='+from+'&to='+to);
+    var res=await fetch('api/funnel-data?from='+from+'&to='+to);
     funnelData=await res.json();
     if(funnelData.error){alert('오류: '+funnelData.error);return;}
     renderFunnel();
@@ -5112,7 +5134,7 @@ async function doQuery() {
   btnQ.disabled = true; btnD.disabled = true; btnA.disabled = true;
   area.innerHTML = '<div class="loading"><span class="spinner"></span>조회 중...</div>';
   try {
-    var resp = await fetch('/api/query', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(getFilters()) });
+    var resp = await fetch('api/query', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(getFilters()) });
     if (!resp.ok) throw new Error((await resp.json()).error || resp.statusText);
     lastResult = await resp.json();
     renderExtResult(lastResult);
@@ -5127,7 +5149,7 @@ async function doDownload() {
   var btnD = document.getElementById('btnDownload');
   btnD.disabled = true; btnD.textContent = '다운로드 중...';
   try {
-    var resp = await fetch('/api/download', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(getFilters()) });
+    var resp = await fetch('api/download', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(getFilters()) });
     if (!resp.ok) throw new Error((await resp.json()).error || resp.statusText);
     var blob = await resp.blob();
     var url = URL.createObjectURL(blob);
@@ -5165,7 +5187,7 @@ async function doAdminDownload() {
   try {
     var filters = getFilters();
     filters.campaignName = document.getElementById('extCampaignName').value || '';
-    var resp = await fetch('/api/admin-download', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(filters) });
+    var resp = await fetch('api/admin-download', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(filters) });
     if (!resp.ok) throw new Error((await resp.json()).error || resp.statusText);
     var blob = await resp.blob();
     var url = URL.createObjectURL(blob);
@@ -5188,7 +5210,7 @@ document.getElementById('queryDate').value = new Date().toISOString().slice(0,10
 // 추출 이력 불러오기
 async function refreshExtHistory() {
   try {
-    var res = await fetch('/api/extraction-history');
+    var res = await fetch('api/extraction-history');
     extHistoryList = await res.json();
     var sel = document.getElementById('extHistorySelect');
     sel.innerHTML = '<option value="">-- 추출 이력에서 선택 (' + extHistoryList.length + '건) --</option>';
@@ -5213,7 +5235,7 @@ async function loadExtHistory() {
   var msg = document.getElementById('extHistoryMsg');
   msg.textContent = '불러오는 중...';
   try {
-    var res = await fetch('/api/extraction-history/load', {
+    var res = await fetch('api/extraction-history/load', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ id: parseInt(sel.value) })
@@ -5263,7 +5285,7 @@ async function doAnalyze() {
       inputType: document.getElementById('inputType').value,
       recipientText: document.getElementById('recipientText').value
     };
-    var res = await fetch('/api/analyze', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    var res = await fetch('api/analyze', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     var data = await res.json();
     if (data.error) throw new Error(data.error);
     currentCrmResult = data;
@@ -5414,7 +5436,7 @@ function reloadCampaign(idx) {
 
 async function loadHistory() {
   try {
-    var res = await fetch('/api/campaign-history');
+    var res = await fetch('api/campaign-history');
     var data = await res.json();
     if (Array.isArray(data) && data.length > 0) {
       savedCampaigns = data;
@@ -5436,7 +5458,7 @@ async function downloadCrmExcel() {
     inputType: document.getElementById('inputType').value,
     recipientText: document.getElementById('recipientText').value
   };
-  var res = await fetch('/api/crm-download', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  var res = await fetch('api/crm-download', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
   var blob = await res.blob();
   var a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -5468,7 +5490,7 @@ async function doGenerateTargets() {
       targetDate: document.getElementById('induceTargetDate').value,
       limit: parseInt(document.getElementById('induceLimit').value) || 5000
     };
-    var res = await fetch('/api/sample-inducement/generate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    var res = await fetch('api/sample-inducement/generate', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     var data = await res.json();
     if (data.error) throw new Error(data.error);
     // Wrap as all-stages result for unified rendering
@@ -5503,7 +5525,7 @@ async function doGenerateAll() {
       targetDate: document.getElementById('induceTargetDate').value,
       limit: parseInt(document.getElementById('induceLimit').value) || 5000
     };
-    var res = await fetch('/api/sample-inducement/generate-all', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    var res = await fetch('api/sample-inducement/generate-all', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     var data = await res.json();
     if (data.error) throw new Error(data.error);
     currentInduceResult = data;
@@ -5583,7 +5605,7 @@ async function downloadInducementExcel() {
     stage: filter === 'all' ? null : filter,
     targetDate: document.getElementById('induceTargetDate').value
   };
-  var res = await fetch('/api/sample-inducement/download', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  var res = await fetch('api/sample-inducement/download', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
   if (!res.ok) { alert('다운로드 실패'); return; }
   var blob = await res.blob();
   var a = document.createElement('a');
@@ -5601,7 +5623,7 @@ async function doTrackConversions() {
       fromDate: document.getElementById('induceTrackFrom').value,
       toDate: document.getElementById('induceTrackTo').value
     };
-    var res = await fetch('/api/sample-inducement/track', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    var res = await fetch('api/sample-inducement/track', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     var data = await res.json();
     if (data.error) throw new Error(data.error);
     if (data.totalTargets === 0) { alert(data.message || '해당 기간에 타겟이 없습니다.'); return; }
@@ -5736,7 +5758,7 @@ var abLoaded = false;
 async function loadAbTest() {
   if (abLoaded) return;
   try {
-    var res = await fetch('/api/ab-test');
+    var res = await fetch('api/ab-test');
     var data = await res.json();
     abLoaded = true;
     renderAbTest(data);
@@ -5862,7 +5884,7 @@ async function runWeeklyReview() {
   actions.style.display = 'none';
 
   try {
-    var res = await fetch('/api/weekly-review', {
+    var res = await fetch('api/weekly-review', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ reviewDate: reviewDate })
@@ -5945,6 +5967,12 @@ function checkAuth(req, res) {
 }
 
 var server = http.createServer(async function (req, res) {
+  // 헬스체크 — 인증 미들웨어보다 먼저 처리(Docker Manager 헬스체크용).
+  if (req.url === "/health" || req.url === "/health/") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok" }));
+    return;
+  }
   if (!checkAuth(req, res)) return;
   var parsedUrl = new URL(req.url, "http://" + req.headers.host);
   var pathname = parsedUrl.pathname;
@@ -6175,7 +6203,7 @@ var server = http.createServer(async function (req, res) {
     // 발송기록에 URL 레코드 추가
     if (pathname === "/api/add-record" && req.method === "POST") {
       var rBody = await parseBody(req);
-      var cdPath4 = path.join(__dirname, "crm-campaign-data.json");
+      var cdPath4 = CAMPAIGN_DATA_PATH;
       var cdData4 = fs.existsSync(cdPath4) ? JSON.parse(fs.readFileSync(cdPath4, "utf8")) : { campaigns: [], records: [] };
       if (!cdData4.records) cdData4.records = [];
       var newSeq = cdData4.records.length > 0 ? Math.max.apply(null, cdData4.records.map(function (r) { return r.seq || 0; })) + 1 : 1;
@@ -6208,7 +6236,7 @@ var server = http.createServer(async function (req, res) {
     if (pathname === "/api/update-record-clicks" && req.method === "POST") {
       var ucBody = await parseBody(req);
       var clickMap = ucBody.clicks || {};
-      var cdPath5 = path.join(__dirname, "crm-campaign-data.json");
+      var cdPath5 = CAMPAIGN_DATA_PATH;
       var cdData5 = fs.existsSync(cdPath5) ? JSON.parse(fs.readFileSync(cdPath5, "utf8")) : { campaigns: [], records: [] };
       var updated = 0;
       (cdData5.records || []).forEach(function (r) {
@@ -6274,7 +6302,7 @@ var server = http.createServer(async function (req, res) {
       var scBody = await parseBody(req);
       var scIdx = parseInt(scBody.index);
       var scCount = parseInt(scBody.count) || 0;
-      var cdPathSc = path.join(__dirname, "crm-campaign-data.json");
+      var cdPathSc = CAMPAIGN_DATA_PATH;
       var cdDataSc = fs.existsSync(cdPathSc) ? JSON.parse(fs.readFileSync(cdPathSc, "utf8")) : { campaigns: [], records: [] };
       if (!cdDataSc.campaigns || scIdx < 0 || scIdx >= cdDataSc.campaigns.length) {
         res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
@@ -6305,7 +6333,7 @@ var server = http.createServer(async function (req, res) {
       var cvIdx = parseInt(cvBody.index);
       var cvSlot = cvBody.slot;
       var cvCount = parseInt(cvBody.count) || 0;
-      var cdPathCv = path.join(__dirname, "crm-campaign-data.json");
+      var cdPathCv = CAMPAIGN_DATA_PATH;
       var cdDataCv = fs.existsSync(cdPathCv) ? JSON.parse(fs.readFileSync(cdPathCv, "utf8")) : { campaigns: [], records: [] };
       if (!cdDataCv.campaigns || cvIdx < 0 || cvIdx >= cdDataCv.campaigns.length) {
         res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
@@ -6326,7 +6354,7 @@ var server = http.createServer(async function (req, res) {
     if (pathname === "/api/campaign-update" && req.method === "POST") {
       var upBody = await parseBody(req);
       var upIdx = parseInt(upBody.index);
-      var cdPathUp = path.join(__dirname, "crm-campaign-data.json");
+      var cdPathUp = CAMPAIGN_DATA_PATH;
       var cdDataUp = fs.existsSync(cdPathUp) ? JSON.parse(fs.readFileSync(cdPathUp, "utf8")) : { campaigns: [], records: [] };
       if (!cdDataUp.campaigns || upIdx < 0 || upIdx >= cdDataUp.campaigns.length) {
         res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
@@ -6358,7 +6386,7 @@ var server = http.createServer(async function (req, res) {
     if (pathname === "/api/campaign-delete" && req.method === "POST") {
       var delBody = await parseBody(req);
       var delIdx = parseInt(delBody.index);
-      var cdPathDel = path.join(__dirname, "crm-campaign-data.json");
+      var cdPathDel = CAMPAIGN_DATA_PATH;
       var cdDataDel = fs.existsSync(cdPathDel) ? JSON.parse(fs.readFileSync(cdPathDel, "utf8")) : { campaigns: [], records: [] };
       if (!cdDataDel.campaigns || delIdx < 0 || delIdx >= cdDataDel.campaigns.length) {
         res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
@@ -6374,7 +6402,7 @@ var server = http.createServer(async function (req, res) {
 
     // 캠페인 대시보드 데이터 (발송일 지난 '예정' → '완료' 자동 전환)
     if (pathname === "/api/campaign-data" && req.method === "GET") {
-      var cdPath = path.join(__dirname, "crm-campaign-data.json");
+      var cdPath = CAMPAIGN_DATA_PATH;
       var cdData = fs.existsSync(cdPath) ? JSON.parse(fs.readFileSync(cdPath, "utf8")) : { campaigns: [], records: [] };
       var now = new Date();
       var changed = false;
@@ -6398,7 +6426,7 @@ var server = http.createServer(async function (req, res) {
     // 캠페인 등록 (메시지 작성 → 대시보드에 '예정' 캠페인 추가)
     if (pathname === "/api/campaign-register" && req.method === "POST") {
       var body = await parseBody(req);
-      var cdPath2 = path.join(__dirname, "crm-campaign-data.json");
+      var cdPath2 = CAMPAIGN_DATA_PATH;
       var cdData2 = fs.existsSync(cdPath2) ? JSON.parse(fs.readFileSync(cdPath2, "utf8")) : { campaigns: [], records: [] };
       if (!cdData2.campaigns) cdData2.campaigns = [];
       cdData2.campaigns.push({
@@ -6437,7 +6465,7 @@ var server = http.createServer(async function (req, res) {
         res.end(JSON.stringify({ error: "유효하지 않은 상태: " + newStatus }));
         return;
       }
-      var cdPath3 = path.join(__dirname, "crm-campaign-data.json");
+      var cdPath3 = CAMPAIGN_DATA_PATH;
       var cdData3 = fs.existsSync(cdPath3) ? JSON.parse(fs.readFileSync(cdPath3, "utf8")) : { campaigns: [], records: [] };
       if (!cdData3.campaigns || idx < 0 || idx >= cdData3.campaigns.length) {
         res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
@@ -6508,7 +6536,7 @@ var server = http.createServer(async function (req, res) {
     if (pathname === "/api/campaign-auto-conv" && req.method === "POST") {
       var acBody = await parseBody(req);
       var campIdx = parseInt(acBody.index);
-      var cdPathAc = path.join(__dirname, "crm-campaign-data.json");
+      var cdPathAc = CAMPAIGN_DATA_PATH;
       var cdDataAc = fs.existsSync(cdPathAc) ? JSON.parse(fs.readFileSync(cdPathAc, "utf8")) : { campaigns: [], records: [] };
       var camp = cdDataAc.campaigns && cdDataAc.campaigns[campIdx];
       if (!camp) { res.writeHead(400); res.end(JSON.stringify({ error: "캠페인을 찾을 수 없습니다" })); return; }
@@ -6602,7 +6630,7 @@ var server = http.createServer(async function (req, res) {
 
     // 전환수 일괄 자동 조회
     if (pathname === "/api/campaign-auto-conv-all" && req.method === "POST") {
-      var cdPathAll = path.join(__dirname, "crm-campaign-data.json");
+      var cdPathAll = CAMPAIGN_DATA_PATH;
       var cdDataAll = fs.existsSync(cdPathAll) ? JSON.parse(fs.readFileSync(cdPathAll, "utf8")) : { campaigns: [], records: [] };
       var results = [];
       var updated = 0;
@@ -6689,7 +6717,7 @@ var server = http.createServer(async function (req, res) {
 
     // A/B 테스트 결과 API
     if (pathname === "/api/ab-test" && req.method === "GET") {
-      var cdPathAb = path.join(__dirname, "crm-campaign-data.json");
+      var cdPathAb = CAMPAIGN_DATA_PATH;
       var cdJsonAb = fs.existsSync(cdPathAb) ? JSON.parse(fs.readFileSync(cdPathAb, "utf8")) : { campaigns: [] };
       var abCamps = (cdJsonAb.campaigns || []).filter(function(c) {
         return c.type === "완료" && c.extraction_id && c.extraction_split && c.extraction_split !== "all" && c.send_count > 0;
@@ -6851,7 +6879,7 @@ var server = http.createServer(async function (req, res) {
         return (d > 0 ? "+" : "") + d.toFixed(2) + "%p";
       }
 
-      var wrPath = path.join(__dirname, "crm-campaign-data.json");
+      var wrPath = CAMPAIGN_DATA_PATH;
       var wrJson = fs.existsSync(wrPath) ? JSON.parse(fs.readFileSync(wrPath, "utf8")) : { campaigns: [] };
       var wrAll = (wrJson.campaigns || []).filter(function (c) {
         return c.type !== "취소" && parseInt(c.send_count || 0) > 0;
@@ -7177,7 +7205,7 @@ var server = http.createServer(async function (req, res) {
 
     // 주차별 베스트 성과 API
     if (pathname === "/api/weekly-best" && req.method === "GET") {
-      var cdPath = path.join(__dirname, "crm-campaign-data.json");
+      var cdPath = CAMPAIGN_DATA_PATH;
       var cdJson = fs.existsSync(cdPath) ? JSON.parse(fs.readFileSync(cdPath, "utf8")) : { campaigns: [] };
       var camps = (cdJson.campaigns || []).filter(function(c) { return c.type !== "취소" && c.send_count > 0; });
 
@@ -7267,7 +7295,7 @@ var server = http.createServer(async function (req, res) {
 
     // AI 컨텍스트 요약 API
     if (pathname === "/api/ai-context" && req.method === "GET") {
-      var cdPathCtx = path.join(__dirname, "crm-campaign-data.json");
+      var cdPathCtx = CAMPAIGN_DATA_PATH;
       var cdJsonCtx = fs.existsSync(cdPathCtx) ? JSON.parse(fs.readFileSync(cdPathCtx, "utf8")) : { campaigns: [] };
       var campsCtx = (cdJsonCtx.campaigns || []).filter(function(c) { return c.type !== "취소" && c.send_count > 0; });
       var totalCamps = campsCtx.length, totalSent = 0, totalCost = 0;
@@ -7535,6 +7563,22 @@ var server = http.createServer(async function (req, res) {
 // ═══════════════════════════════════════════════════════════
 
 async function start() {
+  // 데이터 디렉토리 보장 + 최초 1회 시드 데이터 복사.
+  // Docker 볼륨(DATA_DIR)이 비어 있으면 저장소에 포함된 시드 파일을 복사한다.
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    var seedPath = path.join(__dirname, "crm-campaign-data.json");
+    if (
+      !fs.existsSync(CAMPAIGN_DATA_PATH) &&
+      fs.existsSync(seedPath) &&
+      path.resolve(seedPath) !== path.resolve(CAMPAIGN_DATA_PATH)
+    ) {
+      fs.copyFileSync(seedPath, CAMPAIGN_DATA_PATH);
+      console.log("[데이터] 시드 crm-campaign-data.json 복사 → " + CAMPAIGN_DATA_PATH);
+    }
+  } catch (e) {
+    console.log("[데이터] 초기화 경고:", e.message);
+  }
   loadCampaignHistory();
   loadExtractionHistory();
   pool = await sql.connect(dbConfig);

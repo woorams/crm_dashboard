@@ -23,12 +23,15 @@ cp .env.example .env
 #   → .env 를 열어 DB 접속정보·로그인 비번 등 실제 값 입력
 
 # 4. 실행
-node crm-platform.js
+npm start
+#   (= node crm-platform.js)
 #   또는 자동 재시작 루프 (Windows)
 start.bat
 ```
 
 접속: `http://<서버IP>:10020` (Basic Auth — `.env`의 `CRM_AUTH_USER`/`CRM_AUTH_PASS`)
+- 포트는 `PORT` 환경변수로 변경 가능(기본 `10020`).
+- 헬스체크: `GET /health` → `{"status":"ok"}` (인증 불필요).
 
 ## 환경변수 (.env)
 | 키 | 설명 | 필수 |
@@ -53,7 +56,16 @@ start.bat
 - 코드에 사내 DB 스키마/쿼리가 포함되므로 **반드시 비공개(private) 저장소**로 운영하세요.
 
 ## 포트
-- 기본 `10020`. 변경하려면 `crm-platform.js` 상단 `PORT` 상수 수정.
+- 기본 `10020`. `PORT` 환경변수로 변경 가능(Docker Manager가 주입하면 그 값을 사용).
+
+## 배포 (Docker Manager)
+이 앱은 Docker Manager(Nginx 리버스 프록시 + `/c/프로젝트명/` 서브패스)에 배포할 수 있도록 보완되어 있습니다.
+- **환경변수**: `.env` 파일 대신 컨테이너 환경변수로 주입 가능(`process.env` 우선). 필수: `DB_SERVER`/`DB_PORT`/`DB_USER`/`DB_PASSWORD`, `CRM_AUTH_USER`/`CRM_AUTH_PASS`.
+- **데이터 영속성**: 런타임 데이터(`crm-campaign-data.json`, 이력 JSON)는 `DATA_DIR`(기본 `/app/data`)에 저장됩니다. Docker Manager 볼륨에 `{"dm-crm-dashboard-data": "/app/data"}`를 지정하면 재배포 후에도 데이터가 유지됩니다. 최초 부팅 시 저장소에 포함된 시드 데이터가 자동 복사됩니다.
+- **헬스체크**: `GET /health` (인증 불필요, 200).
+- **DB**: 외부 Azure SQL이므로 컨테이너에서 DB 호스트(1433)로 아웃바운드가 가능해야 하며, Azure SQL 방화벽에 배포 서버 IP 허용이 필요할 수 있습니다.
+- Dockerfile / GitHub Actions / `.dockerignore`는 Docker Manager가 자동 생성하므로 직접 만들지 않습니다.
+- 자세한 코드 리뷰·보완 내역은 [`IMPROVEMENTS.md`](IMPROVEMENTS.md) 참고.
 
 ## 보조 스크립트 (선택)
 `sync-gsheet.js`, `sync-funnel.js`, `weekly-review.js` 등은 Google Sheets 연동·정기 리포트용입니다.

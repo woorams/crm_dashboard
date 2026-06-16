@@ -1,6 +1,15 @@
 {
+  "name": "crm-dashboard",
+  "version": "1.0.0",
+  "description": "바른손 CRM 대시보드 - 고객 추출 · CRM 전환 추적 · 캠페인 대시보드 · 퍼널 분석",
+  "main": "crm-platform.js",
+  "scripts": {
+    "start": "node crm-platform.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
-    "@higgsfield/client": "^0.2.1",
     "googleapis": "^171.4.0",
     "mssql": "^12.2.0",
     "xlsx": "^0.18.5"
