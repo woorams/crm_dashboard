@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "@higgsfield/client": "^0.2.1",
+    "googleapis": "^171.4.0",
+    "mssql": "^12.2.0",
+    "xlsx": "^0.18.5"
+  }
+}
