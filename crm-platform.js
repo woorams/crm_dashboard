@@ -227,6 +227,19 @@ async function discoverCartSchema(p) {
   }
 }
 
+// 시작 시 DB 콜드 커넥션이 한 번 실패/지연되면 startup의 1회성 discoverCartSchema가
+// 누락되어 장바구니 필터가 영영 비활성으로 굳는다(특히 Docker: listen 먼저 → DB 백그라운드 연결).
+// 아직 미발견이면 요청 시점에 풀을 확보해 재탐색한다. 한 번 성공하면 이후엔 즉시 반환.
+async function ensureCartSchema() {
+  if (cartSchema.available) return;
+  try {
+    if (!pool) pool = await sql.connect(dbConfig);
+    await discoverCartSchema(pool);
+  } catch (e) {
+    console.log("[CART] 지연 스키마 탐색 실패:", e.message);
+  }
+}
+
 function buildQuery(filters) {
   var inputs = [];
   var baseConditions = [];
@@ -5980,6 +5993,7 @@ var server = http.createServer(async function (req, res) {
   try {
     // 통합 HTML
     if (pathname === "/" && req.method === "GET") {
+      await ensureCartSchema();   // 미발견 상태면 재탐색(Docker 시작 타이밍 누락 보정)
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(generateHTML());
       return;
