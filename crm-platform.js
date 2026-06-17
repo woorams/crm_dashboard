@@ -6437,6 +6437,25 @@ var server = http.createServer(async function (req, res) {
       return;
     }
 
+    // 캠페인 데이터 일괄 가져오기(import) — 다른 서버에서 GET /api/campaign-data 로 받은
+    // JSON 전체로 덮어쓴다. 로컬→Docker 일회성 마이그레이션용(Basic Auth 보호됨).
+    if (pathname === "/api/campaign-data-import" && req.method === "POST") {
+      var impBody = await parseBody(req);
+      if (!impBody || !Array.isArray(impBody.campaigns)) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "campaigns 배열이 포함된 JSON이 필요합니다" }));
+        return;
+      }
+      var impData = {
+        campaigns: impBody.campaigns,
+        records: Array.isArray(impBody.records) ? impBody.records : []
+      };
+      fs.writeFileSync(CAMPAIGN_DATA_PATH, JSON.stringify(impData, null, 2), "utf-8");
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, campaigns: impData.campaigns.length, records: impData.records.length }));
+      return;
+    }
+
     // 캠페인 등록 (메시지 작성 → 대시보드에 '예정' 캠페인 추가)
     if (pathname === "/api/campaign-register" && req.method === "POST") {
       var body = await parseBody(req);
