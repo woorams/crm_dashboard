@@ -13,7 +13,7 @@ const fs = require("fs");
 const path = require("path");
 const { URL } = require("url");
 
-const PORT = parseInt(process.env.PORT || "10020", 10);
+const PORT = parseInt(process.env.PORT || "3000", 10);
 
 // ═══════════════════════════════════════════════════════════
 // 1. 공통 인프라
@@ -7581,9 +7581,8 @@ async function start() {
   }
   loadCampaignHistory();
   loadExtractionHistory();
-  pool = await sql.connect(dbConfig);
-  console.log("DB 연결 완료");
-  await discoverCartSchema(pool);
+
+  // HTTP 서버를 먼저 listen → /health 가 DB 연결과 무관하게 즉시 응답(배포 헬스체크 통과).
   server.listen(PORT, "0.0.0.0", function () {
     console.log("\n바른손 CRM 플랫폼 시작 (Basic Auth 적용)");
     console.log("  - 내부 공유: http://192.168.200.55:" + PORT);
@@ -7591,6 +7590,16 @@ async function start() {
     console.log("  - 인증:      " + AUTH_USER + " / (env: CRM_AUTH_PASS)");
     console.log("  - 탭: #extraction / #crm / #sample-inducement");
   });
+
+  // DB 연결은 백그라운드에서 수행. 실패해도 프로세스를 죽이지 않아(=헬스체크 통과)
+  // 이후 요청 시 재연결(line 6063 부근 로직)로 복구 가능.
+  try {
+    pool = await sql.connect(dbConfig);
+    console.log("DB 연결 완료");
+    await discoverCartSchema(pool);
+  } catch (e) {
+    console.error("DB 연결 실패(서버는 계속 동작, 이후 재시도):", e.message);
+  }
 }
 
 start().catch(function (err) {
