@@ -3285,7 +3285,7 @@ function dpWow(cur,prev,mode){
 }
 function dpEsc(t){return (t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function renderDailyPerf(){
- var camps=((cdData&&cdData.campaigns)||[]).filter(function(c){return c.type==='완료'&&c.send_date&&c.send_date.length>=10;});
+ var camps=((cdData&&cdData.campaigns)||[]).filter(function(c){return c.type!=='취소'&&c.send_date&&c.send_date.length>=10;});
  var agg={},msg={},minD=null,maxD=null,purSet={},segByPur={};
  camps.forEach(function(c){
    var d=c.send_date.slice(0,10),p=c.purpose||'기타',s=dpSegOf(c.target);
@@ -3342,7 +3342,7 @@ function renderDailyPerf(){
  });
  body+='</tbody>';
  document.getElementById('dpTbl').innerHTML=h1+h2+body;
- document.getElementById('dpMeta').textContent='데이터: '+(minD||'-')+' ~ '+(maxD||'-')+' · 완료 캠페인 '+camps.length+'건';
+ document.getElementById('dpMeta').textContent='데이터: '+(minD||'-')+' ~ '+(maxD||'-')+' · 캠페인 '+camps.length+'건(취소 제외)';
  if(!dpInit){dpInit=true;
    document.getElementById('dpTbl').addEventListener('click',function(e){var td=e.target.closest('td[data-i]');if(!td)return;var i=+td.getAttribute('data-i');var pop=document.getElementById('dpPop');if(pop.style.display==='block'&&pop.dataset.cur===String(i)){dpHidePop();return;}dpShowPop(i,td);});
    document.addEventListener('click',function(e){if(!e.target.closest('#dpPop')&&!e.target.closest('#dpTbl td[data-i]'))dpHidePop();});
@@ -7587,6 +7587,24 @@ var server = http.createServer(async function (req, res) {
       });
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify(list));
+      return;
+    }
+
+    // 추출이력 일괄 가져오기(import) — 다른 서버에서 받은 전체 레코드 배열(수신자 포함)로 교체.
+    // 전환수 자동조회가 동작하려면 수신자 uid 목록이 필요하므로 이 마이그레이션이 선행되어야 함.
+    if (pathname === "/api/extraction-history-import" && req.method === "POST") {
+      var ehImp = await parseBody(req);
+      var ehArr = Array.isArray(ehImp) ? ehImp : (ehImp && ehImp.history);
+      if (!Array.isArray(ehArr)) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "추출이력 배열(history)이 필요합니다" }));
+        return;
+      }
+      extractionHistory = ehArr.slice(-100);
+      saveExtractionHistory();
+      var withRcp = extractionHistory.filter(function (h) { return h.recipients && h.recipients.length; }).length;
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, count: extractionHistory.length, withRecipients: withRcp }));
       return;
     }
 
