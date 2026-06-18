@@ -2287,7 +2287,7 @@ function generateHTML() {
         #dpPop .dp-stat{font-size:11px;color:#2563eb;font-weight:700;margin-bottom:4px}
         #dpPop .dp-msg{font-size:12px;color:#374151;white-space:pre-wrap;line-height:1.45}
       </style>
-      <div class="dp-desc">가로: 일자(일~토 주간, <b>N주차</b>=WEEKNUM) · 주간 헤더 클릭 = 접기/펼치기 · "주합계" = 주간 합계 · 세로: 목적 → 세그먼트 → 지표 7종 · 작은 글씨 = 변화율(일자=직전 발송일 대비, 주합계=전주 대비) · <b>💬 발송 수 셀 클릭 = 그 날 발송 카피 보기</b></div>
+      <div class="dp-desc">가로: 일자(일~토 주간, <b>N주차</b>=WEEKNUM) · 주간 헤더 클릭 = 접기/펼치기 · "주합계" = 주간 합계 · 세로: 목적 → 세그먼트 → 지표 7종 · 작은 글씨 = WoW(일자=전주 동일요일 대비, 주합계=전주 합계 대비, 비교할 전주 데이터 없으면 생략) · <b>💬 발송 수 셀 클릭 = 그 날 발송 카피 보기</b></div>
       <div class="dp-bar"><button onclick="dpSetAll(true)">전체 펼치기</button><button onclick="dpSetAll(false)">전체 접기</button><span id="dpMeta" style="font-size:12px;color:#6b7280"></span></div>
       <div class="dp-wrap"><table class="dp" id="dpTbl"></table></div>
       <div id="dpPop"><div class="dp-ph"><span id="dpPopTitle"></span><span class="dp-x" onclick="dpHidePop()">✕</span></div><div class="dp-pb" id="dpPopBody"></div></div>
@@ -3248,13 +3248,14 @@ function dpSegOf(t){
   if(has('샘플 7일')||has('샘플7일')) return '샘플 7일차';
   if(has('D-30')||has('D30')) return '예식일 D-30';
   if(has('D-60')||has('D60')) return '예식일 D-60';
-  if(has('금주 예식')||has('지난주 예식')||has('전주 예식')) return '금주/전주 예식자';
+  if(has('금주 예식')) return '금주 예식자';
+  if(has('지난주 예식')||has('전주 예식')) return '전주 예식자';
   if(has('가입')) return '가입자';
   if(has('주문자')) return '기존 주문자';
   return '기타';
 }
 var DP_PUR=['당일 샘플 전환','원주문 전환','부가 상품 전환','답례품 전환','기타'];
-var DP_SEG=['가입자','당일 샘플 발송','샘플 2일차','샘플 7일차','예식일 D-30','예식일 D-60','금주/전주 예식자','기존 주문자','기타'];
+var DP_SEG=['가입자','당일 샘플 발송','샘플 2일차','샘플 7일차','예식일 D-30','예식일 D-60','금주 예식자','전주 예식자','기존 주문자','기타'];
 function dpConv(c){var m=0,o=c.conversions||{};for(var k in o){var v=o[k]&&o[k].count;if(v>m)m=v;}return m;}
 function dpRev(c){var r=c.revenue;if(r==null)return 0;if(typeof r==='number')return r;var m=0;for(var k in r){if(typeof r[k]==='number'&&r[k]>m)m=r[k];}return m;}
 function dpClk(c){return (c.clicks&&c.clicks.total&&c.clicks.total.count)||0;}
@@ -3301,7 +3302,6 @@ function renderDailyPerf(){
    for(var cur=new Date(st);cur<=en;cur.setDate(cur.getDate()+7)){var days=[];for(var i=0;i<7;i++){var dd=new Date(cur);dd.setDate(cur.getDate()+i);days.push(dpDS(dd));}weeks.push({days:days,label:dpMD(dpYMD(days[0]))+'~'+dpMD(dpYMD(days[6])),wn:dpWN(dpYMD(days[0]))});}}
  if(dpExpanded===null||dpExpanded.length!==weeks.length){dpExpanded=weeks.map(function(_,i){return i>=weeks.length-2;});}
  function gc(p,s,d){return (agg[p]&&agg[p][s]&&agg[p][s][d])||null;}
- function prevD(p,s,d){var o=agg[p]&&agg[p][s];if(!o)return null;var b=null;for(var k in o){if(k<d&&(b===null||k>b))b=k;}return b;}
  function sumC(p,s,days){var o=null;days.forEach(function(d){var c=gc(p,s,d);if(c){o=o||{s:0,clk:0,cv:0,rev:0,cost:0};o.s+=c.s;o.clk+=c.clk;o.cv+=c.cv;o.rev+=c.rev;o.cost+=c.cost;}});return o;}
  var purs=DP_PUR.filter(function(p){return purSet[p];}).concat(Object.keys(purSet).filter(function(p){return DP_PUR.indexOf(p)<0;}));
  dpPOP=[];var popIdx={};
@@ -3326,7 +3326,7 @@ function renderDailyPerf(){
        weeks.forEach(function(w,wi){var open=dpExpanded[wi];
          if(open){w.days.forEach(function(d,di){var c=gc(p,s,d);var cls=di===0?'dp-sep':'';
            if(!c){body+='<td class="dp-empty '+cls+'">·</td>';return;}
-           var cur=m.val(c);var pk=prevD(p,s,d);var prev=pk?m.val(agg[p][s][pk]):null;
+           var cur=m.val(c);var pdt=dpYMD(d);pdt.setDate(pdt.getDate()-7);var pc=gc(p,s,dpDS(pdt));var prev=pc?m.val(pc):null;
            if(m.copy){var items=msg[p+'|'+s+'|'+d]||[];var pi=popFor(p+'|'+s+'|'+d,p+' · '+s+' · '+d,items);
              body+='<td class="dp-copy '+cls+'" data-i="'+pi+'"><span class="dp-val">'+m.fmt(cur)+'</span>'+dpWow(cur,prev,m.wow)+'</td>';}
            else{body+='<td class="'+cls+'"><span class="dp-val">'+m.fmt(cur)+'</span>'+dpWow(cur,prev,m.wow)+'</td>';}
