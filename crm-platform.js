@@ -6366,7 +6366,16 @@ var server = http.createServer(async function (req, res) {
           try { await pool.close(); } catch(ignore) {}
           try { pool = await sql.connect(dbConfig); console.log("[Funnel] DB 풀 재접속 완료"); } catch(ignore2) {}
         }
-        res.writeHead(500, { "Cache-Control": "no-store" }); res.end(JSON.stringify({ error: e.message }));
+        // 원인 파악을 위해 상세 정보를 함께 노출(code/SQL번호/원본메시지)
+        var detail = e.message || "(메시지 없음)";
+        if (e.code) detail += " [code:" + e.code + "]";
+        if (e.number) detail += " [SQL:" + e.number + "]";
+        if (e.lineNumber) detail += " [line:" + e.lineNumber + "]";
+        if (e.originalError && e.originalError.message && e.originalError.message !== e.message) {
+          detail += " / 원본: " + e.originalError.message;
+        }
+        if (!pool || !pool.connected) detail += " [pool:disconnected]";
+        res.writeHead(500, { "Cache-Control": "no-store" }); res.end(JSON.stringify({ error: detail }));
       }
       return;
     }
