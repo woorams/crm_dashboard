@@ -180,10 +180,15 @@ function nowKstStr() {
 
 function parseBody(req) {
   return new Promise(function (resolve, reject) {
-    var body = "";
-    req.on("data", function (chunk) { body += chunk; });
+    // Buffer로 모아 마지막에 한 번만 utf8 디코딩.
+    // (chunk마다 문자열로 합치면 멀티바이트 문자가 chunk 경계에서 깨짐 → 한글 손상)
+    var chunks = [];
+    req.on("data", function (chunk) { chunks.push(chunk); });
     req.on("end", function () {
-      try { resolve(JSON.parse(body)); }
+      try {
+        var raw = Buffer.concat(chunks).toString("utf8");
+        resolve(raw ? JSON.parse(raw) : {});
+      }
       catch (e) { reject(new Error("잘못된 JSON 요청")); }
     });
     req.on("error", reject);
@@ -1869,8 +1874,8 @@ function generateHTML() {
   <h1>바른손 CRM 플랫폼</h1>
   <button class="tab-btn" data-tab="campaign-dashboard" onclick="switchTab('campaign-dashboard')">캠페인 대시보드</button>
   <button class="tab-btn active" data-tab="extraction" onclick="switchTab('extraction')">고객 추출</button>
-  <button class="tab-btn" data-tab="crm" onclick="switchTab('crm')">전환 추적</button>
-  <button class="tab-btn" data-tab="sample-inducement" onclick="switchTab('sample-inducement')">샘플 유도</button>
+  <button class="tab-btn" data-tab="crm" onclick="switchTab('crm')" style="display:none">전환 추적</button>
+  <button class="tab-btn" data-tab="sample-inducement" onclick="switchTab('sample-inducement')" style="display:none">샘플 유도</button>
   <button class="tab-btn" data-tab="funnel" onclick="switchTab('funnel')">퍼널 대시보드</button>
   <button class="tab-btn" data-tab="kanban" onclick="switchTab('kanban')">캠페인 칸반 <span style="font-size:9px;background:#f59e0b;color:#fff;padding:1px 5px;border-radius:8px;margin-left:2px">BETA</span></button>
   <button class="tab-btn" data-tab="weekly-review" onclick="switchTab('weekly-review');initWeeklyReview()">주간 리뷰</button>
@@ -6312,10 +6317,31 @@ var server = http.createServer(async function (req, res) {
           oLtCols +
           " FROM first_order GROUP BY CONVERT(varchar, first_sample_date, 23) ORDER BY sample_date DESC";
 
-        var req1 = pool.request().input("from", fFrom).input("toNext", fToNextStr);
-        var req2 = pool.request().input("from", fFrom).input("toNext", fToNextStr);
-        var r1 = await req1.query(sampleQ);
-        var r2 = await req2.query(orderQ);
+        // 무거운 쿼리 → 연결 리셋(ECONNRESET 등) 시 풀 재접속 후 1회 자동 재시도
+        async function runFunnelQueries() {
+          var rq1 = pool.request().input("from", fFrom).input("toNext", fToNextStr);
+          var rq2 = pool.request().input("from", fFrom).input("toNext", fToNextStr);
+          var a = await rq1.query(sampleQ);
+          var b = await rq2.query(orderQ);
+          return [a, b];
+        }
+        function isTransientDbError(err) {
+          var c = err && err.code;
+          if (c === 'ECONNRESET' || c === 'ESOCKET' || c === 'ETIMEOUT' || c === 'ECONNCLOSED' || c === 'ELOGIN') return true;
+          var m = (err && err.message) || '';
+          return m.indexOf('Connection') >= 0 || m.indexOf('Login failed') >= 0 || m.indexOf('reset') >= 0;
+        }
+        var rr;
+        try {
+          rr = await runFunnelQueries();
+        } catch (e1) {
+          if (!isTransientDbError(e1)) throw e1;
+          console.log("[Funnel] DB 연결 오류(" + (e1.code || e1.message) + ") → 풀 재접속 후 1회 재시도");
+          try { await pool.close(); } catch (ignore) {}
+          pool = await sql.connect(dbConfig);
+          rr = await runFunnelQueries();
+        }
+        var r1 = rr[0], r2 = rr[1];
 
         var daily = (r1.recordset || []).map(function(r) {
           var ss = {}, ds = {};
@@ -6335,11 +6361,10 @@ var server = http.createServer(async function (req, res) {
         res.end(JSON.stringify({ daily: daily, orderDaily: orderDaily }));
       } catch(e) {
         console.error("[Funnel Error]", e);
-        // 풀 끊김 시 재접속 시도
-        if (e.code === 'ELOGIN' || e.code === 'ESOCKET' || e.message.indexOf('Login failed') >= 0) {
+        // 재시도까지 실패 → 다음 요청을 위해 풀 정리/재접속(연결성 오류일 때만)
+        if (e.code === 'ECONNRESET' || e.code === 'ESOCKET' || e.code === 'ETIMEOUT' || e.code === 'ELOGIN' || (e.message||'').indexOf('Login failed') >= 0) {
           try { await pool.close(); } catch(ignore) {}
-          pool = await sql.connect(dbConfig);
-          console.log("[Funnel] DB 풀 재접속 완료");
+          try { pool = await sql.connect(dbConfig); console.log("[Funnel] DB 풀 재접속 완료"); } catch(ignore2) {}
         }
         res.writeHead(500, { "Cache-Control": "no-store" }); res.end(JSON.stringify({ error: e.message }));
       }
