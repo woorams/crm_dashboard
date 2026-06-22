@@ -1892,15 +1892,6 @@ function generateHTML() {
       <button class="cd-subtab" data-sub="compose" onclick="cdSwitchSub('compose')">메시지 작성</button>
       <button class="cd-subtab" data-sub="records" onclick="cdSwitchSub('records')">발송 기록 / URL 관리</button>
     </div>
-    <!-- 데이터 백업/복원 (배포 전 데이터 보호) -->
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;padding:8px 12px;background:#fff8e1;border:1px solid #ffe082;border-radius:6px;font-size:12px;flex-wrap:wrap">
-      <b style="color:#8a6d3b">데이터 백업 / 복원</b>
-      <span style="color:#9e8a5a">⚠ 배포(재시작) 시 데이터가 초기화될 수 있으니, 배포 전에 반드시 백업하세요.</span>
-      <button onclick="backupCampaignData()" id="btnBackupData" style="padding:5px 14px;background:#0b8043;color:#fff;border:none;border-radius:4px;font-weight:600;cursor:pointer">백업 (다운로드)</button>
-      <button onclick="document.getElementById('restoreFileInput').click()" id="btnRestoreData" style="padding:5px 14px;background:#c0392b;color:#fff;border:none;border-radius:4px;font-weight:600;cursor:pointer">복원 (업로드)</button>
-      <input type="file" id="restoreFileInput" accept="application/json,.json" style="display:none" onchange="restoreCampaignData(this)">
-      <span id="backupStatus" style="color:#666"></span>
-    </div>
     <style>
       .cd-subtab{background:none;border:none;padding:8px 16px;font-size:13px;font-weight:600;color:#666;cursor:pointer;border-radius:6px}
       .cd-subtab:hover{background:#f0f0f0}.cd-subtab.active{background:#1a73e8;color:#fff}
@@ -2448,6 +2439,17 @@ function generateHTML() {
           </div>
         </div>
       </div>
+      <!-- 데이터 백업/복원 (배포 전 데이터 보호) — 눈에 띄지 않게 발송기록 탭 하단에 배치, 기본 접힘 -->
+      <details style="margin-top:18px;font-size:11px;color:#999">
+        <summary style="cursor:pointer;color:#aaa;outline:none;list-style:none">· 데이터 백업/복원</summary>
+        <div style="display:flex;gap:6px;align-items:center;margin-top:8px;padding:8px 10px;background:#fafafa;border:1px solid #eee;border-radius:6px;flex-wrap:wrap">
+          <span style="color:#aaa">배포(재시작) 전 백업 권장.</span>
+          <button onclick="backupCampaignData()" id="btnBackupData" style="padding:3px 10px;background:#eef2ee;color:#0b8043;border:1px solid #cfe0cf;border-radius:4px;font-size:11px;cursor:pointer">백업(다운로드)</button>
+          <button onclick="document.getElementById('restoreFileInput').click()" id="btnRestoreData" style="padding:3px 10px;background:#fbeeee;color:#c0392b;border:1px solid #e6cccc;border-radius:4px;font-size:11px;cursor:pointer">복원(업로드)</button>
+          <input type="file" id="restoreFileInput" accept="application/json,.json" style="display:none" onchange="restoreCampaignData(this)">
+          <span id="backupStatus" style="color:#999"></span>
+        </div>
+      </details>
     </div>
 
     <!-- 서브: A/B 테스트 결과 -->
