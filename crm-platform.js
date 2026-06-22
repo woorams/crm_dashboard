@@ -1892,6 +1892,15 @@ function generateHTML() {
       <button class="cd-subtab" data-sub="compose" onclick="cdSwitchSub('compose')">메시지 작성</button>
       <button class="cd-subtab" data-sub="records" onclick="cdSwitchSub('records')">발송 기록 / URL 관리</button>
     </div>
+    <!-- 데이터 백업/복원 (배포 전 데이터 보호) -->
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;padding:8px 12px;background:#fff8e1;border:1px solid #ffe082;border-radius:6px;font-size:12px;flex-wrap:wrap">
+      <b style="color:#8a6d3b">데이터 백업 / 복원</b>
+      <span style="color:#9e8a5a">⚠ 배포(재시작) 시 데이터가 초기화될 수 있으니, 배포 전에 반드시 백업하세요.</span>
+      <button onclick="backupCampaignData()" id="btnBackupData" style="padding:5px 14px;background:#0b8043;color:#fff;border:none;border-radius:4px;font-weight:600;cursor:pointer">백업 (다운로드)</button>
+      <button onclick="document.getElementById('restoreFileInput').click()" id="btnRestoreData" style="padding:5px 14px;background:#c0392b;color:#fff;border:none;border-radius:4px;font-weight:600;cursor:pointer">복원 (업로드)</button>
+      <input type="file" id="restoreFileInput" accept="application/json,.json" style="display:none" onchange="restoreCampaignData(this)">
+      <span id="backupStatus" style="color:#666"></span>
+    </div>
     <style>
       .cd-subtab{background:none;border:none;padding:8px 16px;font-size:13px;font-weight:600;color:#666;cursor:pointer;border-radius:6px}
       .cd-subtab:hover{background:#f0f0f0}.cd-subtab.active{background:#1a73e8;color:#fff}
@@ -4645,6 +4654,49 @@ async function updateClicks(limit){
     btn.style.background=isAll?'#6b7280':'#34a853';
     btn.disabled=false;btnOther.disabled=false;
   }
+}
+
+// ── 데이터 백업: 현재 전체 캠페인 데이터(JSON)를 파일로 다운로드 ──
+async function backupCampaignData(){
+  var btn=document.getElementById('btnBackupData');var st=document.getElementById('backupStatus');
+  btn.disabled=true;var orig=btn.textContent;btn.textContent='백업 중...';
+  try{
+    var res=await fetch('api/campaign-data',{headers:{'Accept':'application/json'}});
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    var data=await res.json();
+    var nC=(data.campaigns||[]).length;var nR=(data.records||[]).length;
+    var d=new Date();function p(n){return (n<10?'0':'')+n;}
+    var ts=d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'-'+p(d.getHours())+p(d.getMinutes())+p(d.getSeconds());
+    var blob=new Blob([JSON.stringify(data)],{type:'application/json'});
+    var a=document.createElement('a');a.href=URL.createObjectURL(blob);
+    a.download='crm-campaign-data-backup-'+ts+'.json';
+    document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(a.href);
+    st.style.color='#0b8043';st.textContent='백업 완료: 캠페인 '+nC+'건, 발송기록 '+nR+'건 ('+ts+')';
+  }catch(e){st.style.color='#c0392b';st.textContent='백업 실패: '+e.message;}
+  btn.disabled=false;btn.textContent=orig;
+}
+
+// ── 데이터 복원: 백업 JSON 파일을 업로드하여 전체 덮어쓰기 ──
+function restoreCampaignData(input){
+  var file=input.files&&input.files[0];if(!file)return;
+  var st=document.getElementById('backupStatus');
+  var reader=new FileReader();
+  reader.onload=async function(){
+    try{
+      var parsed=JSON.parse(reader.result);
+      if(!parsed||!Array.isArray(parsed.campaigns)) throw new Error('campaigns 배열이 없는 백업 파일입니다');
+      var nC=parsed.campaigns.length;var nR=Array.isArray(parsed.records)?parsed.records.length:0;
+      if(!confirm('현재 데이터를 이 백업으로 전체 덮어씁니다.'+String.fromCharCode(10)+'캠페인 '+nC+'건, 발송기록 '+nR+'건'+String.fromCharCode(10)+String.fromCharCode(10)+'계속할까요? (현재 데이터는 사라집니다)')){input.value='';return;}
+      st.style.color='#666';st.textContent='복원 중...';
+      var res=await fetch('api/campaign-data-import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(parsed)});
+      var data=await res.json();
+      if(!res.ok||!data.ok) throw new Error(data.error||'HTTP '+res.status);
+      st.style.color='#0b8043';st.textContent='복원 완료: 캠페인 '+data.campaigns+'건, 발송기록 '+data.records+'건 — 새로고침합니다...';
+      cdLoaded=false;setTimeout(function(){location.reload();},900);
+    }catch(e){st.style.color='#c0392b';st.textContent='복원 실패: '+e.message;}
+    input.value='';
+  };
+  reader.readAsText(file);
 }
 
 // 전환수 자동 조회 (일괄)
