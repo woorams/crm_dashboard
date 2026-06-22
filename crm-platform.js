@@ -683,6 +683,53 @@ function hourDiff(sendDateStr, orderDateStr) {
   return Math.round((d - send) / 60000);
 }
 
+// Bitly 시간별 클릭 누적 윈도우 정의 (1h=0~1h, 6h=0~6h, ... 7d=0~168h)
+var CLICK_WINDOWS = [
+  { key: "1h", hours: 1 },
+  { key: "6h", hours: 6 },
+  { key: "12h", hours: 12 },
+  { key: "24h", hours: 24 },
+  { key: "48h", hours: 48 },
+  { key: "72h", hours: 72 },
+  { key: "7d", hours: 168 }
+];
+// 타임시리즈(link_clicks: [{date, clicks}])를 발송일(sendDateStr) 기준 시간 윈도우별 누적 클릭수로 환산.
+// 발송일이 유효하지 않으면 total만 합산하고 윈도우는 0으로 둔다.
+function calcWindowClicks(linkClicks, sendDateStr) {
+  var result = { "1h": 0, "6h": 0, "12h": 0, "24h": 0, "48h": 0, "72h": 0, "7d": 0, "total": 0 };
+  if (!linkClicks || !linkClicks.length) return result;
+  var validDate = sendDateStr && /^\d{4}-\d{2}-\d{2}/.test(sendDateStr);
+  if (!validDate) {
+    linkClicks.forEach(function (e) { result.total += e.clicks || 0; });
+    return result;
+  }
+  var sendTime = new Date(String(sendDateStr).replace(" ", "T") + "+09:00").getTime();
+  if (isNaN(sendTime)) { linkClicks.forEach(function (e) { result.total += e.clicks || 0; }); return result; }
+  sendTime = Math.floor(sendTime / 3600000) * 3600000;
+  var nowTime = Date.now();
+  var elapsedHours = (nowTime - sendTime) / (1000 * 60 * 60);
+  linkClicks.forEach(function (entry) {
+    var entryTime = new Date(entry.date).getTime();
+    var clicks = entry.clicks || 0;
+    if (entryTime >= sendTime) {
+      var diffHours = (entryTime - sendTime) / (1000 * 60 * 60);
+      result.total += clicks;
+      for (var wi = 0; wi < CLICK_WINDOWS.length; wi++) {
+        if (diffHours < CLICK_WINDOWS[wi].hours) result[CLICK_WINDOWS[wi].key] += clicks;
+      }
+    }
+  });
+  // 아직 도래하지 않은 윈도우(현재 진행 중 다음 구간부터)는 null로 표시
+  var firstUnreached = false;
+  CLICK_WINDOWS.forEach(function (cw) {
+    if (elapsedHours < cw.hours) {
+      if (!firstUnreached) firstUnreached = true;
+      else result[cw.key] = null;
+    }
+  });
+  return result;
+}
+
 function formatDatetime(str) {
   // DB 문자열 "2026-03-10 15:00:00" → "2026-03-10 15:00" (그대로 사용, TZ 변환 없음)
   if (!str) return null;
@@ -4582,7 +4629,7 @@ async function updateClicks(limit){
     var res=await fetch('api/bitly-clicks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({urls:urls,url_dates:urlDateMap})});
     var data=await res.json();
     if(data.clicks){
-      var res2=await fetch('api/update-record-clicks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clicks:data.clicks})});
+      var res2=await fetch('api/update-record-clicks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clicks:data.clicks,series:data.series})});
       var data2=await res2.json();
       btn.textContent='완료! ('+data2.updated+'건'+(data2.campaigns_updated?', 캠페인 '+data2.campaigns_updated+'건':'')+')';btn.style.background='#166534';
       cdLoaded=false;await loadCampaignDashboard();renderRecords();
@@ -6277,6 +6324,7 @@ var server = http.createServer(async function (req, res) {
       try {
         var https2 = require("https");
         var results = {};
+        var seriesMap = {};
         // 시간별 클릭 타임시리즈 가져오기 (/v4/bitlinks/{id}/clicks?unit=hour&units=-1)
         function fetchBitlyTimeSeries(bitlink) {
           return new Promise(function (resolve, reject) {
@@ -6285,53 +6333,6 @@ var server = http.createServer(async function (req, res) {
             });
             cReq.on("error", reject); cReq.end();
           });
-        }
-        // 타임시리즈에서 발송일 기준 시간 윈도우별 누적 클릭수 계산
-        // 누적 계산: 1h=0~1h, 6h=0~6h, 12h=0~12h, 24h=0~24h, 48h=0~48h, 72h=0~72h, 7d=0~168h
-        var cumulativeWindows = [
-          { key: "1h", hours: 1 },
-          { key: "6h", hours: 6 },
-          { key: "12h", hours: 12 },
-          { key: "24h", hours: 24 },
-          { key: "48h", hours: 48 },
-          { key: "72h", hours: 72 },
-          { key: "7d", hours: 168 }
-        ];
-        // 누적(cumulative) 방식: 1h=0~1h, 6h=0~6h, 12h=0~12h, 24h=0~24h, ...
-        function calcWindowClicks(linkClicks, sendDateStr) {
-          var result = { "1h": 0, "6h": 0, "12h": 0, "24h": 0, "48h": 0, "72h": 0, "7d": 0, "total": 0 };
-          if (!linkClicks || !linkClicks.length) return result;
-          var sendTime = new Date(sendDateStr.replace(" ", "T") + "+09:00").getTime();
-          if (isNaN(sendTime)) return result;
-          sendTime = Math.floor(sendTime / 3600000) * 3600000;
-          var nowTime = Date.now();
-          var elapsedHours = (nowTime - sendTime) / (1000 * 60 * 60);
-          linkClicks.forEach(function(entry) {
-            var entryTime = new Date(entry.date).getTime();
-            var clicks = entry.clicks || 0;
-            if (entryTime >= sendTime) {
-              var diffHours = (entryTime - sendTime) / (1000 * 60 * 60);
-              result.total += clicks;
-              // 누적: 해당 윈도우 마감시간 이내이면 해당 윈도우에 누적
-              for (var wi = 0; wi < cumulativeWindows.length; wi++) {
-                if (diffHours < cumulativeWindows[wi].hours) {
-                  result[cumulativeWindows[wi].key] += clicks;
-                }
-              }
-            }
-          });
-          // 현재 진행 중인 윈도우까지 표시, 미도래 구간은 null
-          var firstUnreached = false;
-          cumulativeWindows.forEach(function(cw) {
-            if (elapsedHours < cw.hours) {
-              if (!firstUnreached) {
-                firstUnreached = true;
-              } else {
-                result[cw.key] = null;
-              }
-            }
-          });
-          return result;
         }
         function delay(ms) { return new Promise(function(r){ setTimeout(r, ms); }); }
         for (var bi = 0; bi < urls.length; bi++) {
@@ -6342,6 +6343,8 @@ var server = http.createServer(async function (req, res) {
           var isValidDate = sendDate && /^\d{4}-\d{2}-\d{2}/.test(sendDate) && !isNaN(new Date(sendDate.replace(" ", "T")).getTime());
           try {
             var tsData = await fetchBitlyTimeSeries(bUrl);
+            // 원시 타임시리즈를 보존 → update-record-clicks 에서 캠페인별 send_date 기준으로 재계산
+            seriesMap[urls[bi]] = (tsData && tsData.link_clicks) ? tsData.link_clicks : [];
             var clickDetail;
             if (isValidDate && tsData.link_clicks) {
               clickDetail = calcWindowClicks(tsData.link_clicks, sendDate);
@@ -6367,11 +6370,11 @@ var server = http.createServer(async function (req, res) {
             }
             results[urls[bi]] = clickDetail;
             console.log("[Bitly] " + urls[bi] + " (sent:" + (sendDate||'N/A') + ") => " + JSON.stringify(clickDetail));
-          } catch (e) { console.log("[Bitly Error] " + urls[bi] + ": " + e.message); results[urls[bi]] = { total: 0 }; }
+          } catch (e) { console.log("[Bitly Error] " + urls[bi] + ": " + e.message); results[urls[bi]] = { total: 0 }; seriesMap[urls[bi]] = []; }
           if (bi < urls.length - 1) await delay(200);
         }
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ clicks: results }));
+        res.end(JSON.stringify({ clicks: results, series: seriesMap }));
       } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); }
       return;
     }
@@ -6412,6 +6415,7 @@ var server = http.createServer(async function (req, res) {
     if (pathname === "/api/update-record-clicks" && req.method === "POST") {
       var ucBody = await parseBody(req);
       var clickMap = ucBody.clicks || {};
+      var seriesMap = ucBody.series || {}; // URL별 원시 타임시리즈(link_clicks) — 캠페인별 send_date 기준 재계산용
       var cdPath5 = CAMPAIGN_DATA_PATH;
       var cdData5 = fs.existsSync(cdPath5) ? JSON.parse(fs.readFileSync(cdPath5, "utf8")) : { campaigns: [], records: [] };
       var updated = 0;
@@ -6441,8 +6445,22 @@ var server = http.createServer(async function (req, res) {
         if (registeredUrls.length === 0) return;
         var sendCount = camp.send_count || 0;
         // URL별 분리 저장 (대시보드 per-URL 표시용)
+        // 시간별 윈도우는 이 캠페인 자신의 send_date 기준으로 재계산한다.
+        // (동일 bit.ly URL이 여러 캠페인에 재사용될 때, 옛 발송기록 날짜에 앵커링되어
+        //  최근 발송분 클릭이 7d 윈도우 밖으로 빠져 "누적만 있고 시간별 0"이 되던 버그 수정)
         camp.url_clicks = {};
         registeredUrls.forEach(function (url) {
+          var series = seriesMap[url];
+          if (Array.isArray(series)) {
+            // 원시 타임시리즈 → 이 캠페인 send_date 기준 누적 윈도우
+            var detail = calcWindowClicks(series, camp.send_date);
+            camp.url_clicks[url] = {};
+            slotKeys.forEach(function (k) {
+              camp.url_clicks[url][k] = (detail[k] !== undefined && detail[k] !== null) ? detail[k] : 0;
+            });
+            return;
+          }
+          // series 미제공(구버전 클라이언트 호환): 기존 per-URL 결과 그대로 사용
           var cv = clickMap[url];
           if (typeof cv === "object") {
             camp.url_clicks[url] = {};
