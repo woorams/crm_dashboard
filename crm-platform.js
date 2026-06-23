@@ -6299,20 +6299,22 @@ var server = http.createServer(async function (req, res) {
         var fToNextStr = fToNext.toISOString().slice(0,10);
 
         // 1. 일자별 가입자 + 샘플주문 리드타임 (D+0~D+30 1일 단위)
+        // 최적화: CUSTOM_SAMPLE_ORDER를 회원별 '첫 샘플일'로 선집계(fan-out 제거) →
+        // COUNT(DISTINCT CASE..) 62개를 SUM(CASE..)로 대체(회원당 1행이라 의미 동일, 훨씬 가벼움).
         var sLtCols = '', dLtCols = '';
         for (var di = 0; di <= 30; di++) {
-          sLtCols += "COUNT(DISTINCT CASE WHEN cso.sample_order_seq IS NOT NULL AND DATEDIFF(DAY, u.reg_date, cso.REQUEST_DATE) = " + di + " THEN u.uid END) AS s_d" + di + ", ";
-          dLtCols += "COUNT(DISTINCT CASE WHEN cso.sample_order_seq IS NULL AND co.member_id IS NOT NULL AND DATEDIFF(DAY, u.reg_date, co.min_order_date) = " + di + " THEN u.uid END) AS d_d" + di + ", ";
+          sLtCols += "SUM(CASE WHEN cf.first_sample_date IS NOT NULL AND DATEDIFF(DAY, u.reg_date, cf.first_sample_date) = " + di + " THEN 1 ELSE 0 END) AS s_d" + di + ", ";
+          dLtCols += "SUM(CASE WHEN cf.first_sample_date IS NULL AND co.min_order_date IS NOT NULL AND DATEDIFF(DAY, u.reg_date, co.min_order_date) = " + di + " THEN 1 ELSE 0 END) AS d_d" + di + ", ";
         }
-        sLtCols += "COUNT(DISTINCT CASE WHEN cso.sample_order_seq IS NOT NULL AND DATEDIFF(DAY, u.reg_date, cso.REQUEST_DATE) > 30 THEN u.uid END) AS s_d30plus, ";
-        dLtCols += "COUNT(DISTINCT CASE WHEN cso.sample_order_seq IS NULL AND co.member_id IS NOT NULL AND DATEDIFF(DAY, u.reg_date, co.min_order_date) > 30 THEN u.uid END) AS d_d30plus ";
+        sLtCols += "SUM(CASE WHEN cf.first_sample_date IS NOT NULL AND DATEDIFF(DAY, u.reg_date, cf.first_sample_date) > 30 THEN 1 ELSE 0 END) AS s_d30plus, ";
+        dLtCols += "SUM(CASE WHEN cf.first_sample_date IS NULL AND co.min_order_date IS NOT NULL AND DATEDIFF(DAY, u.reg_date, co.min_order_date) > 30 THEN 1 ELSE 0 END) AS d_d30plus ";
         var sampleQ = "SELECT CONVERT(varchar, u.reg_date, 23) AS reg_date, COUNT(DISTINCT u.uid) AS reg_count, " +
-          "COUNT(DISTINCT CASE WHEN cso.sample_order_seq IS NOT NULL THEN u.uid END) AS sample_converted, " +
+          "SUM(CASE WHEN cf.first_sample_date IS NOT NULL THEN 1 ELSE 0 END) AS sample_converted, " +
           sLtCols +
-          "COUNT(DISTINCT CASE WHEN cso.sample_order_seq IS NULL AND co.member_id IS NOT NULL THEN u.uid END) AS direct_order, " +
+          "SUM(CASE WHEN cf.first_sample_date IS NULL AND co.min_order_date IS NOT NULL THEN 1 ELSE 0 END) AS direct_order, " +
           dLtCols +
           " FROM S2_UserInfo u WITH (NOLOCK) " +
-          "LEFT JOIN CUSTOM_SAMPLE_ORDER cso WITH (NOLOCK) ON u.uid = cso.MEMBER_ID " +
+          "LEFT JOIN (SELECT MEMBER_ID, MIN(REQUEST_DATE) AS first_sample_date FROM CUSTOM_SAMPLE_ORDER WITH (NOLOCK) GROUP BY MEMBER_ID) cf ON u.uid = cf.MEMBER_ID " +
           "LEFT JOIN (SELECT member_id, MIN(order_date) AS min_order_date FROM custom_order WITH (NOLOCK) WHERE status_seq >= 1 GROUP BY member_id) co ON u.uid = co.member_id " +
           "WHERE u.reg_date >= @from AND u.reg_date < @toNext " +
           "GROUP BY CONVERT(varchar, u.reg_date, 23) " +
