@@ -6267,6 +6267,27 @@ var server = http.createServer(async function (req, res) {
       return;
     }
 
+    // DB 연결 진단: 가장 가벼운 쿼리(SELECT 1)로 전송단까지 정상인지 확인
+    // - ok:true  → DB가 단순 쿼리는 정상 처리 = 퍼널/전환조회는 '쿼리 과중'이 원인
+    // - ok:false → 단순 쿼리도 실패 = 전송/네트워크(예: Azure SQL redirect 포트) 문제(인프라)
+    if (pathname === "/api/db-ping" && req.method === "GET") {
+      var pingStart = Date.now();
+      try {
+        if (!pool) pool = await sql.connect(dbConfig);
+        var pingRes = await pool.request().query("SELECT 1 AS ok");
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({ ok: true, connected: !!(pool && pool.connected), ms: Date.now() - pingStart, server: dbConfig.server, database: dbConfig.database, result: pingRes.recordset }));
+      } catch (pe) {
+        var pd = pe.message || "(메시지 없음)";
+        if (pe.code) pd += " [code:" + pe.code + "]";
+        if (pe.number) pd += " [SQL:" + pe.number + "]";
+        if (pe.originalError && pe.originalError.message && pe.originalError.message !== pe.message) pd += " / 원본: " + pe.originalError.message;
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({ ok: false, connected: !!(pool && pool.connected), ms: Date.now() - pingStart, server: dbConfig.server, database: dbConfig.database, error: pd }));
+      }
+      return;
+    }
+
     // 퍼널 대시보드 API
     if (pathname === "/api/funnel-data" && req.method === "GET") {
       try {
