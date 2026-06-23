@@ -6935,6 +6935,7 @@ var server = http.createServer(async function (req, res) {
       var cdDataAll = fs.existsSync(cdPathAll) ? JSON.parse(fs.readFileSync(cdPathAll, "utf8")) : { campaigns: [], records: [] };
       var results = [];
       var updated = 0;
+      var acAttempted = 0, acErrCount = 0, acFirstErr = null;
       for (var ci = 0; ci < (cdDataAll.campaigns || []).length; ci++) {
         var c = cdDataAll.campaigns[ci];
         if (!c.extraction_id || c.type === "취소") continue;
@@ -6946,6 +6947,7 @@ var server = http.createServer(async function (req, res) {
         var splitRec = applySplit(extRec.recipients, c.extraction_split);
         var mIds = splitRec.map(function(r) { return r.uid; }).filter(Boolean);
         if (mIds.length === 0) continue;
+        acAttempted++;
         var sd = (c.send_date || "").replace("T", " ");
         if (sd.length === 10) sd += " 00:00:00";
         if (!sd || sd.length < 10) continue;
@@ -7007,12 +7009,25 @@ var server = http.createServer(async function (req, res) {
           c.revenue = { "1d": rv1, "2d": rv2 };
           updated++;
           results.push({ index: ci, purpose: purpose2, conv1d: c1d, conv2d: c2d, rev1d: rv1, rev2d: rv2 });
-        } catch (e2) { console.log("[전환자동일괄] 캠페인 " + ci + " 에러:", e2.message); }
+        } catch (e2) { acErrCount++; if (!acFirstErr) acFirstErr = e2; console.log("[전환자동일괄] 캠페인 " + ci + " 에러:", e2.message); }
       }
       fs.writeFileSync(cdPathAll, JSON.stringify(cdDataAll, null, 2), "utf-8");
-      console.log("[전환자동일괄] " + updated + "건 업데이트");
+      console.log("[전환자동일괄] " + updated + "건 업데이트, 시도 " + acAttempted + ", 오류 " + acErrCount);
+      // 한 건도 갱신 못했고 DB 오류가 있었으면 → 원인을 숨기지 말고 표면화(code/SQL번호/원본)
+      if (updated === 0 && acErrCount > 0 && acFirstErr) {
+        var acDetail = acFirstErr.message || "(메시지 없음)";
+        if (acFirstErr.code) acDetail += " [code:" + acFirstErr.code + "]";
+        if (acFirstErr.number) acDetail += " [SQL:" + acFirstErr.number + "]";
+        if (acFirstErr.originalError && acFirstErr.originalError.message && acFirstErr.originalError.message !== acFirstErr.message) {
+          acDetail += " / 원본: " + acFirstErr.originalError.message;
+        }
+        if (!pool || !pool.connected) acDetail += " [pool:disconnected]";
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: "전환 조회 DB 오류 (" + acErrCount + "/" + acAttempted + "건 실패): " + acDetail }));
+        return;
+      }
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: true, updated: updated, details: results }));
+      res.end(JSON.stringify({ ok: true, updated: updated, attempted: acAttempted, errors: acErrCount, details: results }));
       return;
     }
 
