@@ -70,7 +70,7 @@ var dbConfig = {
 };
 
 var pool = null;
-var cartSchema = { available: false, memberCol: null, cardSeqCol: null };
+var cartSchema = { available: false, memberCol: null, cardSeqCol: null, dateCol: null };
 var campaignHistory = [];
 var CAMPAIGN_HISTORY_PATH = path.join(DATA_DIR, "campaign-history.json");
 
@@ -218,12 +218,23 @@ async function discoverCartSchema(p) {
 
     var memberCandidates = ["uid", "member_id", "user_id", "memberid", "userid", "cart_owner_id", "owner_id"];
     var cardCandidates = ["card_seq", "cardseq", "card_code", "cardcode"];
+    // 담은 시각(등록일) 컬럼. 선호 순서대로 첫 매칭을 사용한다(수정일보다 등록일 우선).
+    var dateCandidates = ["reg_date", "regdate", "reg_dt", "reg_datetime", "regist_date",
+      "ins_date", "insert_date", "input_date", "create_date", "created_date", "created_at",
+      "cart_date", "write_date", "wdate", "regdate_time"];
     var memberCol = colResult.recordset.find(function (r) { return memberCandidates.indexOf(r.col_name.toLowerCase()) >= 0; });
     var cardCol = colResult.recordset.find(function (r) { return cardCandidates.indexOf(r.col_name.toLowerCase()) >= 0; });
+    // dateCandidates 순서를 우선순위로 사용: 후보 배열을 순회하며 먼저 발견되는 컬럼을 채택.
+    var dateCol = null;
+    for (var di = 0; di < dateCandidates.length && !dateCol; di++) {
+      dateCol = colResult.recordset.find(function (r) { return r.col_name.toLowerCase() === dateCandidates[di]; });
+    }
 
     if (memberCol && cardCol && isSafeColumnName(memberCol.col_name) && isSafeColumnName(cardCol.col_name)) {
-      cartSchema = { available: true, memberCol: memberCol.col_name, cardSeqCol: cardCol.col_name };
-      console.log("[CART] 매핑 성공: member=" + memberCol.col_name + ", card=" + cardCol.col_name);
+      var dateColName = (dateCol && isSafeColumnName(dateCol.col_name)) ? dateCol.col_name : null;
+      cartSchema = { available: true, memberCol: memberCol.col_name, cardSeqCol: cardCol.col_name, dateCol: dateColName };
+      console.log("[CART] 매핑 성공: member=" + memberCol.col_name + ", card=" + cardCol.col_name +
+        ", date=" + (dateColName || "(없음 - 기간필터 비활성)"));
     } else {
       console.log("[CART] 컬럼 매핑 실패 → 장바구니 필터 비활성화");
     }
@@ -337,12 +348,31 @@ function buildQuery(filters) {
 
   if (cartSchema.available && (filters.cartSample === "Y" || filters.cartSample === "N")) {
     var cop = filters.cartSample === "Y" ? "EXISTS" : "NOT EXISTS";
-    baseConditions.push(cop + " (\n      SELECT 1 FROM S4_CART cart WITH (NOLOCK)\n      INNER JOIN S2_Card sc WITH (NOLOCK) ON cart." + cartSchema.cardSeqCol + " = sc.Card_Seq\n      WHERE cart." + cartSchema.memberCol + " = u.uid AND sc.Card_Div <> 'A01'\n    )");
+    var csub = ["cart." + cartSchema.memberCol + " = u.uid", "sc.Card_Div <> 'A01'"];
+    // 담은 날짜 기간 조건(날짜 컬럼이 탐색된 경우에만). 종료일은 addDay로 당일 포함.
+    if (cartSchema.dateCol && filters.cartSampleDateFrom) {
+      inputs.push({ name: "cartSampleFrom", type: sql.VarChar(10), value: filters.cartSampleDateFrom });
+      csub.push("cart." + cartSchema.dateCol + " >= @cartSampleFrom");
+    }
+    if (cartSchema.dateCol && filters.cartSampleDateTo) {
+      inputs.push({ name: "cartSampleTo", type: sql.VarChar(10), value: addDay(filters.cartSampleDateTo) });
+      csub.push("cart." + cartSchema.dateCol + " < @cartSampleTo");
+    }
+    baseConditions.push(cop + " (\n      SELECT 1 FROM S4_CART cart WITH (NOLOCK)\n      INNER JOIN S2_Card sc WITH (NOLOCK) ON cart." + cartSchema.cardSeqCol + " = sc.Card_Seq\n      WHERE " + csub.join("\n        AND ") + "\n    )");
   }
 
   if (cartSchema.available && (filters.cartInvitation === "Y" || filters.cartInvitation === "N")) {
     var ciop = filters.cartInvitation === "Y" ? "EXISTS" : "NOT EXISTS";
-    baseConditions.push(ciop + " (\n      SELECT 1 FROM S4_CART cart WITH (NOLOCK)\n      INNER JOIN S2_Card sc WITH (NOLOCK) ON cart." + cartSchema.cardSeqCol + " = sc.Card_Seq\n      WHERE cart." + cartSchema.memberCol + " = u.uid AND sc.Card_Div = 'A01'\n    )");
+    var cisub = ["cart." + cartSchema.memberCol + " = u.uid", "sc.Card_Div = 'A01'"];
+    if (cartSchema.dateCol && filters.cartInvDateFrom) {
+      inputs.push({ name: "cartInvFrom", type: sql.VarChar(10), value: filters.cartInvDateFrom });
+      cisub.push("cart." + cartSchema.dateCol + " >= @cartInvFrom");
+    }
+    if (cartSchema.dateCol && filters.cartInvDateTo) {
+      inputs.push({ name: "cartInvTo", type: sql.VarChar(10), value: addDay(filters.cartInvDateTo) });
+      cisub.push("cart." + cartSchema.dateCol + " < @cartInvTo");
+    }
+    baseConditions.push(ciop + " (\n      SELECT 1 FROM S4_CART cart WITH (NOLOCK)\n      INNER JOIN S2_Card sc WITH (NOLOCK) ON cart." + cartSchema.cardSeqCol + " = sc.Card_Seq\n      WHERE " + cisub.join("\n        AND ") + "\n    )");
   }
 
   if (filters.weddingDateFrom || filters.weddingDateTo) {
@@ -1714,6 +1744,8 @@ function buildInducementExcel(targets, stage) {
 function generateHTML() {
   var cartAvail = cartSchema.available;
   var cartHiddenClass = cartAvail ? "hidden" : "";
+  // 날짜 컬럼이 탐색됐을 때만 장바구니 기간 입력칸을 노출한다(클라이언트 JS가 토글).
+  var cartDateAvail = cartSchema.available && !!cartSchema.dateCol;
 
   return `<!DOCTYPE html>
 <html lang="ko">
@@ -2686,6 +2718,12 @@ function generateHTML() {
             <label><input type="radio" name="cartSample" value="Y"><span>Y</span></label>
             <label><input type="radio" name="cartSample" value="N"><span>N</span></label>
           </div>
+          <div class="date-range hidden" id="cartSampleDateGroup">
+            <span style="font-size:12px;color:#666;">담은 기간:</span>
+            <input type="date" id="cartSampleDateFrom">
+            <span class="date-sep">~</span>
+            <input type="date" id="cartSampleDateTo">
+          </div>
           <span class="cart-disabled-note ${cartHiddenClass}" id="cartNote1">S4_CART 스키마 미발견 - 비활성</span>
         </div>
       </div>
@@ -2697,6 +2735,12 @@ function generateHTML() {
             <label><input type="radio" name="cartInvitation" value="all" checked><span>전체</span></label>
             <label><input type="radio" name="cartInvitation" value="Y"><span>Y</span></label>
             <label><input type="radio" name="cartInvitation" value="N"><span>N</span></label>
+          </div>
+          <div class="date-range hidden" id="cartInvDateGroup">
+            <span style="font-size:12px;color:#666;">담은 기간:</span>
+            <input type="date" id="cartInvDateFrom">
+            <span class="date-sep">~</span>
+            <input type="date" id="cartInvDateTo">
           </div>
           <span class="cart-disabled-note ${cartHiddenClass}" id="cartNote2">S4_CART 스키마 미발견 - 비활성</span>
         </div>
@@ -5307,6 +5351,7 @@ function escHtml(s) { if (s == null) return ""; return String(s).replace(/&/g,"&
 
 // ═══ 고객 추출 탭 JS ═══
 var CART_AVAILABLE = ${cartAvail};
+var CART_DATE_AVAILABLE = ${cartDateAvail};
 
 if (!CART_AVAILABLE) {
   document.querySelectorAll('#cartSampleGroup input, #cartInvGroup input').forEach(function(el) {
@@ -5314,6 +5359,23 @@ if (!CART_AVAILABLE) {
     el.closest('label').style.opacity = '0.4';
     el.closest('label').style.cursor = 'not-allowed';
   });
+}
+
+// 장바구니 '담은 기간' 입력칸: 날짜 컬럼이 탐색됐고(Y/N 선택 시)에만 노출.
+function toggleCartDate(name, groupId) {
+  var v = radioVal(name);
+  var show = CART_DATE_AVAILABLE && (v === 'Y' || v === 'N');
+  document.getElementById(groupId).classList.toggle('hidden', !show);
+}
+if (CART_AVAILABLE) {
+  document.querySelectorAll('input[name=cartSample]').forEach(function(r) {
+    r.addEventListener('change', function() { toggleCartDate('cartSample', 'cartSampleDateGroup'); });
+  });
+  document.querySelectorAll('input[name=cartInvitation]').forEach(function(r) {
+    r.addEventListener('change', function() { toggleCartDate('cartInvitation', 'cartInvDateGroup'); });
+  });
+  toggleCartDate('cartSample', 'cartSampleDateGroup');
+  toggleCartDate('cartInvitation', 'cartInvDateGroup');
 }
 
 function styleOp(sel) {
@@ -5383,7 +5445,11 @@ function getFilters() {
     miDateFrom: document.getElementById('miDateFrom').value,
     miDateTo: document.getElementById('miDateTo').value,
     cartSample: CART_AVAILABLE ? radioVal('cartSample') : 'all',
+    cartSampleDateFrom: CART_DATE_AVAILABLE ? document.getElementById('cartSampleDateFrom').value : '',
+    cartSampleDateTo: CART_DATE_AVAILABLE ? document.getElementById('cartSampleDateTo').value : '',
     cartInvitation: CART_AVAILABLE ? radioVal('cartInvitation') : 'all',
+    cartInvDateFrom: CART_DATE_AVAILABLE ? document.getElementById('cartInvDateFrom').value : '',
+    cartInvDateTo: CART_DATE_AVAILABLE ? document.getElementById('cartInvDateTo').value : '',
     weddingDateFrom: document.getElementById('weddingDateFrom').value,
     weddingDateTo: document.getElementById('weddingDateTo').value,
     weddingDateOp: document.getElementById('weddingDateOp').value,
