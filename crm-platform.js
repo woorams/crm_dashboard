@@ -145,6 +145,112 @@ function addExtractionRecord(campaignName, rows) {
   return record;
 }
 
+// ── 080 수신거부 명단 (수동 업로드분, 고객 추출에서 제외) ─────────────
+// refuseList: { 정규화번호: { phone, refusedAt, addedAt } }
+// refuseSet:  빠른 조회용 정규화번호 Set
+var REFUSE_LIST_PATH = path.join(DATA_DIR, "refuse-list.json");
+var refuseList = {};
+var refuseSet = new Set();
+
+function rebuildRefuseSet() {
+  refuseSet = new Set(Object.keys(refuseList));
+}
+
+function loadRefuseList() {
+  try {
+    if (fs.existsSync(REFUSE_LIST_PATH)) {
+      var data = JSON.parse(fs.readFileSync(REFUSE_LIST_PATH, "utf-8"));
+      refuseList = data && data.numbers ? data.numbers : {};
+      rebuildRefuseSet();
+      console.log("[수신거부] " + refuseSet.size + "건 로드");
+    }
+  } catch (e) {
+    console.log("[수신거부] 로드 실패:", e.message);
+    refuseList = {};
+    rebuildRefuseSet();
+  }
+}
+
+function saveRefuseList() {
+  try {
+    fs.writeFileSync(
+      REFUSE_LIST_PATH,
+      JSON.stringify({ updatedAt: nowKstStr(), count: Object.keys(refuseList).length, numbers: refuseList }, null, 2),
+      "utf-8"
+    );
+  } catch (e) {
+    console.log("[수신거부] 저장 실패:", e.message);
+  }
+}
+
+// 080 수신거부 파일에서 (전화번호, 등록일) 추출.
+// 지원: 레거시 .xls(실제로는 euc-kr HTML 테이블) 및 일반 .xlsx.
+// 전화/날짜는 ASCII라 HTML은 latin1 디코딩만으로 안전하게 뽑힌다(한글 헤더 무시).
+function parseRefuseFile(buf) {
+  var out = [];
+  var PHONE = /0\d{1,2}[-\s]?\d{3,4}[-\s]?\d{4}/;
+  var DATEP = /\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?/;
+  var head = buf.slice(0, 512).toString("latin1").toLowerCase();
+  var isHtml = head.indexOf("<html") >= 0 || head.indexOf("<table") >= 0 || head.indexOf("<tr") >= 0 || head.indexOf("<!doctype") >= 0;
+  if (isHtml) {
+    var text = buf.toString("latin1");
+    var trs = text.split(/<tr[^>]*>/i);
+    for (var i = 0; i < trs.length; i++) {
+      var cells = trs[i].split(/<t[dh][^>]*>/i).map(function (c) {
+        return c.replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").trim();
+      });
+      var phone = null, date = null;
+      for (var c = 0; c < cells.length; c++) {
+        var pm = cells[c].match(PHONE);
+        if (pm && !phone) phone = pm[0];
+        var dm = cells[c].match(DATEP);
+        if (dm && !date) date = dm[0];
+      }
+      if (phone) out.push({ phone: phone, refusedAt: date });
+    }
+  } else {
+    var wb = XLSX.read(buf, { type: "buffer" });
+    var ws = wb.Sheets[wb.SheetNames[0]];
+    var rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false });
+    for (var r = 0; r < rows.length; r++) {
+      var row = rows[r] || [];
+      var phone2 = null, date2 = null;
+      for (var k = 0; k < row.length; k++) {
+        var v = row[k] == null ? "" : String(row[k]);
+        var pm2 = v.match(PHONE);
+        if (pm2 && !phone2) phone2 = pm2[0];
+        var dm2 = v.match(DATEP);
+        if (dm2 && !date2) date2 = dm2[0];
+      }
+      if (phone2) out.push({ phone: phone2, refusedAt: date2 });
+    }
+  }
+  return out;
+}
+
+// 파싱 결과를 명단에 누적 병합(합집합). 반환: 통계.
+function mergeRefuseNumbers(parsed) {
+  var added = 0, dup = 0, invalid = 0;
+  var nowStr = nowKstStr();
+  parsed.forEach(function (item) {
+    var np = normalizePhone(item.phone || "");
+    if (!np || np.length < 9 || np.length > 12) { invalid++; return; }
+    if (refuseList[np]) {
+      dup++;
+      // 더 이른 거부일이 있으면 갱신
+      if (item.refusedAt && (!refuseList[np].refusedAt || item.refusedAt < refuseList[np].refusedAt)) {
+        refuseList[np].refusedAt = item.refusedAt;
+      }
+      return;
+    }
+    refuseList[np] = { phone: item.phone, refusedAt: item.refusedAt || null, addedAt: nowStr };
+    added++;
+  });
+  rebuildRefuseSet();
+  saveRefuseList();
+  return { added: added, duplicated: dup, invalid: invalid, total: refuseSet.size };
+}
+
 var sampleInducementLog = [];
 // { id, runDate, stage, uid, uname, phone, segment, messageText, generatedAt }
 
@@ -594,6 +700,20 @@ async function executeQuery(filters) {
     console.log("[모바일청첩장] " + Object.keys(miSet).length + "명 보유, 필터 후 " + rows.length + "건 (" + miElapsed + "ms)");
   }
 
+  // 080 수신거부 명단 제외 (수동 업로드분). 발신 전 무조건 반영.
+  var excludedRefuse = 0;
+  if (refuseSet.size > 0) {
+    var beforeR = rows.length;
+    rows = rows.filter(function (r) {
+      var np = normalizePhone(r["휴대폰번호"] || "");
+      return !(np && refuseSet.has(np));
+    });
+    excludedRefuse = beforeR - rows.length;
+    if (excludedRefuse > 0) {
+      console.log("[수신거부] " + excludedRefuse + "명 제외 (명단 " + refuseSet.size + "건)");
+    }
+  }
+
   return {
     rows: rows,
     count: rows.length,
@@ -601,6 +721,8 @@ async function executeQuery(filters) {
     limit: built.limit,
     elapsed: Date.now() - t0,
     generatedSql: built.sql,
+    excludedRefuse: excludedRefuse,
+    refuseListCount: refuseSet.size,
   };
 }
 
@@ -1459,7 +1581,15 @@ async function generateStageTargets(stage, targetDate, limit, excludeUids) {
 
   var runId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   var generatedAt = targetDate;
-  var targets = result.recordset.map(function (r) {
+  // 080 수신거부 명단 제외
+  var siRecords = result.recordset;
+  if (refuseSet.size > 0) {
+    siRecords = siRecords.filter(function (r) {
+      var np = normalizePhone(r.phone || "");
+      return !(np && refuseSet.has(np));
+    });
+  }
+  var targets = siRecords.map(function (r) {
     var msg = getMessageTemplate(stage, r.segment, r.uname);
     var entry = {
       id: runId,
@@ -1908,6 +2038,7 @@ function generateHTML() {
   <button class="tab-btn active" data-tab="extraction" onclick="switchTab('extraction')">고객 추출</button>
   <button class="tab-btn" data-tab="crm" onclick="switchTab('crm')" style="display:none">전환 추적</button>
   <button class="tab-btn" data-tab="sample-inducement" onclick="switchTab('sample-inducement')" style="display:none">샘플 유도</button>
+  <button class="tab-btn" data-tab="refuse" onclick="switchTab('refuse')">수신거부</button>
   <button class="tab-btn" data-tab="funnel" onclick="switchTab('funnel')">퍼널 대시보드</button>
   <button class="tab-btn" data-tab="kanban" onclick="switchTab('kanban')">캠페인 칸반 <span style="font-size:9px;background:#f59e0b;color:#fff;padding:1px 5px;border-radius:8px;margin-left:2px">BETA</span></button>
   <button class="tab-btn" data-tab="weekly-review" onclick="switchTab('weekly-review');initWeeklyReview()">주간 리뷰</button>
@@ -2877,6 +3008,41 @@ function generateHTML() {
   </div>
 
   <!-- ═══════════════════════════════════════════ -->
+  <!-- 탭: 080 수신거부 명단 관리                    -->
+  <!-- ═══════════════════════════════════════════ -->
+  <div id="tab-refuse" class="tab-content">
+
+    <div class="panel" style="border:1px solid #fca5a5;background:#fef2f2;">
+      <div class="panel-title" style="color:#b91c1c;">📵 080 수신거부 명단 관리</div>
+      <p style="font-size:13px;color:#6b7280;margin:6px 0 0;line-height:1.75;">
+        080 수신거부 번호는 바른손 DB에 자동 반영되지 않습니다. <b>매일 LMS 발송 전</b>, 어제까지 수신거부한 명단 파일(예: RefuseNumberList.xls)을 여기에 업로드하세요.<br>
+        등록된 번호는 <b>[고객 추출]</b> 탭에서 조회·엑셀·어드민 양식 다운로드 시 <b>자동으로 제외</b>됩니다. (누적 병합 — 한번 등록되면 계속 제외)
+      </p>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">명단 업로드</div>
+      <div class="filter-row">
+        <div class="filter-label">명단 파일</div>
+        <div class="filter-body">
+          <input type="file" id="refuseFile" accept=".xls,.xlsx,.htm,.html" style="font-size:13px;">
+          <button class="btn btn-primary" id="btnRefuseUpload" onclick="uploadRefuseList()">업로드 / 추가</button>
+          <button class="btn" id="btnRefuseClear" onclick="clearRefuseList()" style="background:#ef4444;color:#fff;">전체 삭제</button>
+          <span style="font-size:11px;color:#9ca3af;">지원 형식: .xls(수신거부시스템 원본) / .xlsx</span>
+        </div>
+      </div>
+      <div id="refuseStatus" style="font-size:13px;color:#374151;margin-top:10px;">불러오는 중...</div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">등록된 수신거부 번호 <span id="refuseCountBadge" style="font-size:12px;font-weight:400;color:#9ca3af;"></span></div>
+      <div id="refuseListArea" class="table-wrap">
+        <div class="empty-state"><p>등록된 번호가 없습니다</p></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════ -->
   <!-- 탭 2: CRM 전환 추적                          -->
   <!-- ═══════════════════════════════════════════ -->
   <div id="tab-crm" class="tab-content">
@@ -3327,7 +3493,7 @@ function generateHTML() {
 </div>
 
 <script>
-var VALID_TABS = ['campaign-dashboard', 'extraction', 'crm', 'sample-inducement', 'funnel', 'kanban', 'weekly-review'];
+var VALID_TABS = ['campaign-dashboard', 'extraction', 'crm', 'sample-inducement', 'refuse', 'funnel', 'kanban', 'weekly-review'];
 
 // ═══ 캠페인 대시보드 ═══
 var cdData = null;
@@ -5326,6 +5492,7 @@ function switchTab(tabId) {
     else { if (!_kbInited) kbInitFilter(); renderKanban(); }
   }
   if (tabId === 'weekly-review') initWeeklyReview();
+  if (tabId === 'refuse') loadRefuseStatus();
   document.querySelectorAll('.tab-btn').forEach(function(b) {
     b.classList.toggle('active', b.getAttribute('data-tab') === tabId);
   });
@@ -5339,6 +5506,7 @@ function switchTab(tabId) {
   var hash = location.hash.replace('#', '');
   if (VALID_TABS.indexOf(hash) >= 0) switchTab(hash);
   else switchTab('extraction');
+  if (typeof loadRefuseStatus === 'function') loadRefuseStatus();
 })();
 
 window.addEventListener('hashchange', function() {
@@ -5511,7 +5679,10 @@ function renderExtResult(data) {
   var area = document.getElementById('resultArea');
   var html = '';
   if (data.limitReached) html += '<div class="warning">조회 결과가 ' + data.limit + '건 제한에 도달했습니다. 실제 대상자가 더 많을 수 있습니다.</div>';
-  html += '<div class="result-bar"><span class="result-count">총 <b>' + data.count.toLocaleString() + '</b>명</span><span class="result-meta">' + data.elapsed + 'ms &middot; <span class="sql-toggle" onclick="toggleSql()">생성된 SQL 보기</span></span></div>';
+  var refuseNote = (data.excludedRefuse && data.excludedRefuse > 0)
+    ? '<span style="color:#b91c1c;font-weight:600;margin-left:10px;">📵 수신거부 ' + data.excludedRefuse.toLocaleString() + '명 제외</span>'
+    : (data.refuseListCount ? '<span style="color:#9ca3af;margin-left:10px;">수신거부 명단 ' + data.refuseListCount.toLocaleString() + '건 적용</span>' : '');
+  html += '<div class="result-bar"><span class="result-count">총 <b>' + data.count.toLocaleString() + '</b>명</span>' + refuseNote + '<span class="result-meta">' + data.elapsed + 'ms &middot; <span class="sql-toggle" onclick="toggleSql()">생성된 SQL 보기</span></span></div>';
   html += '<div class="sql-box hidden" id="sqlBox">' + escHtml(data.generatedSql) + '</div>';
   if (data.rows.length === 0) {
     html += '<div class="empty-state"><p>조건에 맞는 대상자가 없습니다</p></div>';
@@ -5547,6 +5718,88 @@ async function doAdminDownload() {
 }
 
 function toggleSql() { document.getElementById('sqlBox').classList.toggle('hidden'); }
+
+// ═══ 080 수신거부 명단 ═══
+function _abToB64(buf) {
+  var bytes = new Uint8Array(buf), bin = '', CH = 0x8000;
+  for (var i = 0; i < bytes.length; i += CH) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+  }
+  return btoa(bin);
+}
+function _maskPhone(p) {
+  var d = (p || '').replace(/[^0-9]/g, '');
+  if (d.length < 7) return p || '';
+  return d.slice(0, 3) + '-****-' + d.slice(-4);
+}
+async function loadRefuseStatus() {
+  var el = document.getElementById('refuseStatus');
+  if (!el) return;
+  try {
+    var res = await fetch('api/refuse-list');
+    var d = await res.json();
+    var html = '현재 등록 <b>' + (d.count || 0).toLocaleString() + '</b>건';
+    if (d.updatedAt) html += ' <span style="color:#9ca3af">· 최근 업로드 ' + escHtml(d.updatedAt) + '</span>';
+    if (d.latestRefusedAt) html += ' <span style="color:#9ca3af">· 최근 거부일 ' + escHtml(d.latestRefusedAt) + '</span>';
+    el.innerHTML = html;
+    var badge = document.getElementById('refuseCountBadge');
+    if (badge) {
+      var shown = (d.recent || []).length;
+      badge.textContent = d.count ? '(총 ' + d.count.toLocaleString() + '건' + (d.count > shown ? ', 최근 ' + shown + '건 표시' : '') + ')' : '';
+    }
+    var area = document.getElementById('refuseListArea');
+    if (area) {
+      if (!d.recent || d.recent.length === 0) {
+        area.innerHTML = '<div class="empty-state"><p>등록된 번호가 없습니다</p></div>';
+      } else {
+        var t = '<table class="ext-table"><thead><tr><th>No</th><th>전화번호</th><th>수신거부일</th><th>등록일시</th></tr></thead><tbody>';
+        d.recent.forEach(function (x, i) {
+          t += '<tr><td>' + (i + 1) + '</td><td>' + escHtml(_maskPhone(x.phone)) + '</td><td>' + escHtml(x.refusedAt || '-') + '</td><td>' + escHtml(x.addedAt || '-') + '</td></tr>';
+        });
+        t += '</tbody></table>';
+        area.innerHTML = t;
+      }
+    }
+  } catch (e) {
+    el.textContent = '상태 조회 실패: ' + e.message;
+  }
+}
+async function uploadRefuseList() {
+  var input = document.getElementById('refuseFile');
+  var f = input.files && input.files[0];
+  if (!f) { alert('수신거부 명단 파일을 선택해주세요.'); return; }
+  var btn = document.getElementById('btnRefuseUpload');
+  btn.disabled = true; var old = btn.textContent; btn.textContent = '업로드 중...';
+  try {
+    var buf = await f.arrayBuffer();
+    var b64 = _abToB64(buf);
+    var res = await fetch('api/refuse-list/upload', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: f.name, dataB64: b64 })
+    });
+    var d = await res.json();
+    if (!res.ok || d.error) throw new Error(d.error || '업로드 실패');
+    alert('업로드 완료\\n\\n파싱 ' + d.parsed + '건\\n신규 추가 ' + d.added + '건 / 중복 ' + d.duplicated + '건 / 무효 ' + d.invalid + '건\\n\\n총 등록 ' + d.total + '건');
+    input.value = '';
+    loadRefuseStatus();
+  } catch (e) {
+    alert('오류: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = old;
+  }
+}
+async function clearRefuseList() {
+  if (!confirm('수신거부 명단 전체를 삭제할까요?\\n(되돌릴 수 없습니다)')) return;
+  try {
+    var res = await fetch('api/refuse-list/clear', { method: 'POST' });
+    var d = await res.json();
+    if (!res.ok || d.error) throw new Error(d.error || '삭제 실패');
+    alert('수신거부 명단을 전체 삭제했습니다.');
+    loadRefuseStatus();
+  } catch (e) {
+    alert('오류: ' + e.message);
+  }
+}
 
 // ═══ CRM 전환 추적 탭 JS ═══
 var currentCrmResult = null;
@@ -6913,6 +7166,55 @@ var server = http.createServer(async function (req, res) {
       return;
     }
 
+    // ── 080 수신거부 명단: 상태 조회 ──
+    if (pathname === "/api/refuse-list" && req.method === "GET") {
+      var rlNums = Object.keys(refuseList).map(function (k) { return refuseList[k]; });
+      rlNums.sort(function (a, b) { return (b.refusedAt || "").localeCompare(a.refusedAt || ""); });
+      var rlMeta = {};
+      try { if (fs.existsSync(REFUSE_LIST_PATH)) rlMeta = JSON.parse(fs.readFileSync(REFUSE_LIST_PATH, "utf8")); } catch (e) { /* noop */ }
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({
+        count: refuseSet.size,
+        updatedAt: rlMeta.updatedAt || null,
+        latestRefusedAt: rlNums.length ? rlNums[0].refusedAt : null,
+        recent: rlNums.slice(0, 100),
+      }));
+      return;
+    }
+
+    // ── 080 수신거부 명단: 파일 업로드(누적 병합) ──
+    if (pathname === "/api/refuse-list/upload" && req.method === "POST") {
+      var rlBody = await parseBody(req);
+      if (!rlBody.dataB64) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "파일 데이터가 없습니다." }));
+        return;
+      }
+      var rlBuf = Buffer.from(rlBody.dataB64, "base64");
+      var rlParsed = parseRefuseFile(rlBuf);
+      if (rlParsed.length === 0) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "파일에서 전화번호를 찾지 못했습니다. 형식을 확인해주세요." }));
+        return;
+      }
+      var rlStat = mergeRefuseNumbers(rlParsed);
+      console.log("[수신거부] 업로드 '" + (rlBody.filename || "") + "': 파싱 " + rlParsed.length + " → 신규 " + rlStat.added + " / 중복 " + rlStat.duplicated + " / 무효 " + rlStat.invalid + " (총 " + rlStat.total + ")");
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, parsed: rlParsed.length, added: rlStat.added, duplicated: rlStat.duplicated, invalid: rlStat.invalid, total: rlStat.total, filename: rlBody.filename || "" }));
+      return;
+    }
+
+    // ── 080 수신거부 명단: 전체 삭제 ──
+    if (pathname === "/api/refuse-list/clear" && req.method === "POST") {
+      refuseList = {};
+      rebuildRefuseSet();
+      saveRefuseList();
+      console.log("[수신거부] 전체 삭제");
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, total: 0 }));
+      return;
+    }
+
     // AB 분할 헬퍼: recipients 배열에서 split에 따라 부분 추출
     function applySplit(recipients, split) {
       if (!split || split === "all") return recipients;
@@ -8004,6 +8306,7 @@ async function start() {
   }
   loadCampaignHistory();
   loadExtractionHistory();
+  loadRefuseList();
 
   // HTTP 서버를 먼저 listen → /health 가 DB 연결과 무관하게 즉시 응답(배포 헬스체크 통과).
   server.listen(PORT, "0.0.0.0", function () {

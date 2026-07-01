@@ -9,7 +9,11 @@ barunsoncard-*.json
 # ── 개인정보(PII) 데이터 ──
 extraction-history.json
 campaign-history.json
+refuse-list.json
 weekly-reviews/
+
+# ── 로컬 테스트 산출물 ──
+local-data/
 
 # ── 의존성 ──
 node_modules/
