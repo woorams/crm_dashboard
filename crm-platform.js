@@ -2699,8 +2699,14 @@ function generateHTML() {
               </div>
             </div>
             <textarea id="cmMessage" style="width:100%;height:180px;padding:10px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:inherit;resize:vertical;line-height:1.6" placeholder="[바른손카드] 메시지를 입력하세요...&#10;&#10;URL 삽입 위치에 {#URL} 입력&#10;{#이름} — 수신자 이름 치환&#10;{#A} — 쿠폰코드 치환"></textarea>
-            <div style="margin-top:6px;display:flex;gap:6px;align-items:center">
+            <div id="cmCloneHint" style="display:none;margin-top:6px;font-size:11px;color:#166534;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:4px;padding:5px 8px"></div>
+            <div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
               <button onclick="insertUrlVar()" style="padding:3px 10px;background:#e67e22;color:#fff;border:none;border-radius:4px;font-size:11px;font-weight:600;cursor:pointer">{#URL} 삽입</button>
+              <button onclick="insertMsgVar('{#이름}')" style="padding:3px 10px;background:#6b7280;color:#fff;border:none;border-radius:4px;font-size:11px;cursor:pointer">{#이름}</button>
+              <button onclick="insertMsgVar('{#A}')" style="padding:3px 8px;background:#6b7280;color:#fff;border:none;border-radius:4px;font-size:11px;cursor:pointer">{#A}</button>
+              <button onclick="insertMsgVar('{#B}')" style="padding:3px 8px;background:#6b7280;color:#fff;border:none;border-radius:4px;font-size:11px;cursor:pointer">{#B}</button>
+              <button onclick="insertMsgVar('{#C}')" style="padding:3px 8px;background:#6b7280;color:#fff;border:none;border-radius:4px;font-size:11px;cursor:pointer">{#C}</button>
+              <button onclick="insertMsgVar('{#D}')" style="padding:3px 8px;background:#6b7280;color:#fff;border:none;border-radius:4px;font-size:11px;cursor:pointer">{#D}</button>
               <span style="font-size:11px;color:#999">{#URL}은 발송기록/URL관리에서 Bitly 생성 시 자동 치환됩니다</span>
             </div>
           </div>
@@ -2999,7 +3005,9 @@ function generateHTML() {
         <button class="btn btn-primary" id="btnQuery" onclick="doQuery()">조회하기</button>
         <button class="btn btn-success" id="btnDownload" onclick="doDownload()" disabled>엑셀 다운로드</button>
         <button class="btn" id="btnAdminDownload" onclick="doAdminDownload()" disabled style="background:#7c3aed;color:#fff;">어드민 발송양식 다운로드</button>
+        <button class="btn" id="btnAbDownload" onclick="doAbDownload()" disabled style="background:#c2410c;color:#fff;">A/B 2분할 발송양식 다운로드</button>
       </div>
+      <div id="abDownloadHint" style="display:none;margin-top:8px;font-size:12px;color:#166534;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:8px 10px;"></div>
     </div>
 
     <div id="resultArea">
@@ -5097,13 +5105,31 @@ function populatePrevMessages(){
     sel.appendChild(opt);
   });
 }
+// 메시지 본문에 박혀있는 실제 bit.ly URL을 {#URL} 자리표시자로 역치환.
+// (이전 캠페인 복제 시 옛 단축URL을 손으로 지우고 {#URL}을 다시 넣는 수작업 제거)
+function revertBitlyToPlaceholder(msg){
+  if(!msg)return {text:'',count:0};
+  var out=''; var sp=0; var last=0; var count=0;
+  while((sp=msg.indexOf('bit.ly/',sp))>=0){
+    var st=msg.lastIndexOf('http',sp);
+    if(st<0){sp+=7;continue;}
+    var endA=msg.indexOf(' ',sp); var endB=msg.indexOf(String.fromCharCode(10),sp);
+    var en=endA<0?endB:(endB<0?endA:Math.min(endA,endB));
+    if(en<0)en=msg.length;
+    out+=msg.substring(last,st)+'{#URL}';
+    last=en; sp=en; count++;
+  }
+  out+=msg.substring(last);
+  return {text:out,count:count};
+}
 function loadPrevMessage(){
   var sel=document.getElementById('cmPrevMessage');
   var idx=parseInt(sel.value);if(isNaN(idx))return;
   var c=getCampaigns()[idx];if(!c||!c.message)return;
   var ta=document.getElementById('cmMessage');
   if(ta.value&&!confirm('현재 입력 내용을 덮어쓰시겠습니까?'))return;
-  ta.value=c.message;
+  var rev=revertBitlyToPlaceholder(c.message);
+  ta.value=rev.text;
   document.getElementById('cmPurpose').value=c.purpose||'';
   document.getElementById('cmChannel').value=c.channel||'LMS';
   document.getElementById('cmTarget').value=c.target||'';
@@ -5113,16 +5139,25 @@ function loadPrevMessage(){
   document.getElementById('cmDepth4').value=c.depth4||'';
   document.getElementById('cmIncentive').value=c.incentive||'';
   document.getElementById('cmSendCount').value=c.send_count||'0';
+  // 발송일시는 이전값을 그대로 쓰면 안 되므로 반드시 새로 입력하도록 비움
+  var sd=document.getElementById('cmSendDate');if(sd)sd.value='';
   sel.value='';
+  // 복제 결과 안내 (옛 URL 자동 복원 개수)
+  var hint=document.getElementById('cmCloneHint');
+  if(hint){
+    if(rev.count>0){hint.style.display='block';hint.innerHTML='✔ 이전 URL '+rev.count+'개를 <b>{#URL}</b>로 자동 복원했습니다. 발송일시를 새로 지정하세요.';}
+    else{hint.style.display='block';hint.innerHTML='✔ 불러왔습니다. 발송일시를 새로 지정하세요.';}
+  }
 }
-function insertUrlVar(){
+function insertMsgVar(token){
   var ta=document.getElementById('cmMessage');
   var start=ta.selectionStart, end=ta.selectionEnd;
   var val=ta.value;
-  ta.value=val.substring(0,start)+'{#URL}'+val.substring(end);
-  ta.selectionStart=ta.selectionEnd=start+6;
+  ta.value=val.substring(0,start)+token+val.substring(end);
+  ta.selectionStart=ta.selectionEnd=start+token.length;
   ta.focus();
 }
+function insertUrlVar(){ insertMsgVar('{#URL}'); }
 
 async function registerCampaign(){
   var msg=document.getElementById('cmMessage').value;
@@ -5646,7 +5681,8 @@ async function doQuery() {
   var btnQ = document.getElementById('btnQuery');
   var btnD = document.getElementById('btnDownload');
   var btnA = document.getElementById('btnAdminDownload');
-  btnQ.disabled = true; btnD.disabled = true; btnA.disabled = true;
+  var btnAb = document.getElementById('btnAbDownload');
+  btnQ.disabled = true; btnD.disabled = true; btnA.disabled = true; if(btnAb)btnAb.disabled = true;
   area.innerHTML = '<div class="loading"><span class="spinner"></span>조회 중...</div>';
   try {
     var resp = await fetch('api/query', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(getFilters()) });
@@ -5655,6 +5691,7 @@ async function doQuery() {
     renderExtResult(lastResult);
     btnD.disabled = false;
     btnA.disabled = false;
+    if(btnAb)btnAb.disabled = false;
   } catch (err) {
     area.innerHTML = '<div class="warning" style="background:#fee;color:#c00;">오류: ' + escHtml(err.message) + '</div>';
   } finally { btnQ.disabled = false; }
@@ -5715,6 +5752,40 @@ async function doAdminDownload() {
     document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
   } catch (err) { alert('다운로드 실패: ' + err.message); }
   finally { btnA.disabled = false; btnA.textContent = '어드민 발송양식 다운로드'; }
+}
+
+// A/B 2분할 발송양식 다운로드: 서버가 1회 쿼리로 대상자를 앞/뒤 절반으로 나눠
+// A/B 2개 어드민 엑셀을 base64로 반환 → 각각 다운로드. 추출이력은 '전체' 1건만 저장됨.
+async function doAbDownload() {
+  var btn = document.getElementById('btnAbDownload');
+  var hint = document.getElementById('abDownloadHint');
+  var filters = getFilters();
+  filters.campaignName = document.getElementById('extCampaignName').value || '';
+  if (!filters.campaignName) { alert('A/B 분할은 캠페인명이 필요합니다. 캠페인명을 입력하세요.'); return; }
+  btn.disabled = true; btn.textContent = '생성 중...';
+  try {
+    var resp = await fetch('api/admin-download-ab', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(filters) });
+    if (!resp.ok) throw new Error((await resp.json()).error || resp.statusText);
+    var data = await resp.json();
+    if (!data.ok) throw new Error(data.error || '생성 실패');
+    if (data.total === 0) { alert('조건에 맞는 대상자가 없습니다.'); return; }
+    [data.a, data.b].forEach(function(part) {
+      var bin = atob(part.b64);
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      var blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a'); a.href = url; a.download = part.filename;
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    });
+    if (hint) {
+      hint.style.display = 'block';
+      hint.innerHTML = '✔ 총 <b>' + data.total.toLocaleString() + '명</b>을 A(' + data.a.count.toLocaleString() + ') / B(' + data.b.count.toLocaleString() + ')로 분할해 2개 파일을 다운로드했습니다.<br>' +
+        '추출이력 <b>[' + escHtml(data.extractionName) + ']</b> 1건이 저장되었습니다. ' +
+        'A/B 캠페인 2건을 만들고 <b>각각 이 추출이력에 연동 + split을 A/B로 지정</b>하면 전환수가 그룹별로 자동 집계됩니다.';
+    }
+  } catch (err) { alert('A/B 다운로드 실패: ' + err.message); }
+  finally { btn.disabled = false; btn.textContent = 'A/B 2분할 발송양식 다운로드'; }
 }
 
 function toggleSql() { document.getElementById('sqlBox').classList.toggle('hidden'); }
@@ -7163,6 +7234,38 @@ var server = http.createServer(async function (req, res) {
         "Content-Length": adminBuf.length,
       });
       res.end(adminBuf);
+      return;
+    }
+
+    // 어드민 발송양식 A/B 2분할 다운로드
+    // 쿼리를 1회만 실행해 대상자를 ceil(n/2) 기준 앞/뒤로 분할 → A/B 2개 발송파일 생성.
+    // 추출이력은 "전체" 1건만 저장(기존 A/B 전환집계 기계와 호환: 캠페인 2건이 동일 extraction_id +
+    // split=A/B로 연동되면 전환수 자동조회가 동일 기준으로 재분할함). 엑셀 수동분할만 제거하는 것이 목적.
+    if (pathname === "/api/admin-download-ab" && req.method === "POST") {
+      var abFilters = await parseBody(req);
+      var abResult = await executeQuery(abFilters);
+      var abRows = abResult.rows || [];
+      var abBaseName = abFilters.campaignName || ("추출_" + new Date().toISOString().slice(0, 10));
+      var abHalf = Math.ceil(abRows.length / 2);
+      var aRows = abRows.slice(0, abHalf);
+      var bRows = abRows.slice(abHalf);
+      var aName = abBaseName + "_A";
+      var bName = abBaseName + "_B";
+      var aBuf = buildAdminExcel(aRows, aName);
+      var bBuf = buildAdminExcel(bRows, bName);
+      // 전체 1건만 추출이력 저장 (A/B 전환집계는 이 1건을 split으로 재분할)
+      var abRecord = null;
+      if (abRows.length > 0) abRecord = addExtractionRecord(abBaseName, abRows);
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({
+        ok: true,
+        total: abRows.length,
+        excludedRefuse: abResult.excludedRefuse || 0,
+        extractionId: abRecord ? abRecord.id : null,
+        extractionName: abBaseName,
+        a: { filename: "CRM_LMS 발송양식(어드민)_" + aName + ".xlsx", count: aRows.length, b64: aBuf.toString("base64") },
+        b: { filename: "CRM_LMS 발송양식(어드민)_" + bName + ".xlsx", count: bRows.length, b64: bBuf.toString("base64") },
+      }));
       return;
     }
 
