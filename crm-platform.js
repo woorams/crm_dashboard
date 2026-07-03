@@ -120,6 +120,32 @@ function saveExtractionHistory() {
   }
 }
 
+// ── 추출 조건 프리셋 (필터 조합만 저장/복원, PII 없음) ──
+// "이전 캠페인 조건을 매번 손으로 재설정"하는 수작업 대체.
+var extractionPresets = [];
+var EXTRACTION_PRESETS_PATH = path.join(DATA_DIR, "extraction-presets.json");
+
+function loadExtractionPresets() {
+  try {
+    if (fs.existsSync(EXTRACTION_PRESETS_PATH)) {
+      var data = JSON.parse(fs.readFileSync(EXTRACTION_PRESETS_PATH, "utf-8"));
+      extractionPresets = Array.isArray(data) ? data.slice(-200) : [];
+      console.log("[추출프리셋] " + extractionPresets.length + "건 로드");
+    }
+  } catch (e) {
+    console.log("[추출프리셋] 로드 실패:", e.message);
+    extractionPresets = [];
+  }
+}
+
+function saveExtractionPresets() {
+  try {
+    fs.writeFileSync(EXTRACTION_PRESETS_PATH, JSON.stringify(extractionPresets.slice(-200), null, 2), "utf-8");
+  } catch (e) {
+    console.log("[추출프리셋] 저장 실패:", e.message);
+  }
+}
+
 function addExtractionRecord(campaignName, rows) {
   // 이름+휴대폰번호+회원ID만 저장 (경량화)
   var recipients = rows.map(function(r) {
@@ -2551,9 +2577,11 @@ function generateHTML() {
               </div>
             </div>
           </div>
-          <div style="display:flex;gap:8px;align-items:center">
-            <button onclick="generateBitlyUrl()" style="padding:8px 20px;background:#e67e22;color:#fff;border:none;border-radius:6px;font-weight:600;cursor:pointer">Bitly 생성</button>
-            <button onclick="saveUrlRecord()" style="padding:8px 20px;background:#1a73e8;color:#fff;border:none;border-radius:6px;font-weight:600;cursor:pointer">발송기록에 저장</button>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button id="btnGenSave" onclick="generateAndSaveUrl()" style="padding:8px 20px;background:#16a34a;color:#fff;border:none;border-radius:6px;font-weight:700;cursor:pointer">생성+저장 (원클릭)</button>
+            <button onclick="generateBitlyUrl()" style="padding:8px 16px;background:#e67e22;color:#fff;border:none;border-radius:6px;font-weight:600;cursor:pointer">Bitly 생성</button>
+            <button onclick="saveUrlRecord()" style="padding:8px 16px;background:#1a73e8;color:#fff;border:none;border-radius:6px;font-weight:600;cursor:pointer">발송기록에 저장</button>
+            <button onclick="checkUrlReachable()" style="padding:8px 14px;background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;border-radius:6px;font-weight:600;cursor:pointer">도달성 테스트</button>
             <span id="urlStatus" style="font-size:12px;color:#666"></span>
           </div>
         </div>
@@ -3001,6 +3029,19 @@ function generateHTML() {
           <span style="font-size:12px;color:#888;">어드민 양식 파일명에 사용</span>
         </div>
       </div>
+      <div class="filter-row">
+        <div class="filter-label">조건 프리셋</div>
+        <div class="filter-body" style="align-items:center;gap:6px;flex-wrap:wrap;">
+          <select id="extPresetSelect" style="padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;min-width:260px;">
+            <option value="">-- 저장된 조건 프리셋 --</option>
+          </select>
+          <button class="btn" onclick="applyExtractionPreset()" style="background:#0ea5e9;color:#fff;padding:6px 12px;">불러오기</button>
+          <button class="btn" onclick="saveExtractionPreset()" style="background:#334155;color:#fff;padding:6px 12px;">현재 조건 저장</button>
+          <button class="btn" onclick="deleteExtractionPreset()" style="background:#f1f5f9;color:#334155;padding:6px 12px;">삭제</button>
+          <span style="font-size:12px;color:#888;">이전 조건을 불러와 일부만 수정</span>
+        </div>
+      </div>
+      <div id="extPresetHint" style="display:none;margin:0 0 8px 0;font-size:12px;color:#166534;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:6px 10px;"></div>
       <div class="btn-row">
         <button class="btn btn-primary" id="btnQuery" onclick="doQuery()">조회하기</button>
         <button class="btn btn-success" id="btnDownload" onclick="doDownload()" disabled>엑셀 다운로드</button>
@@ -4778,7 +4819,7 @@ function buildUtmUrl(){
 
 async function generateBitlyUrl(){
   var fullUtm=document.getElementById('urlFullUtm').value;
-  if(!fullUtm){alert('랜딩 URL을 입력하세요');return;}
+  if(!fullUtm){alert('랜딩 URL을 입력하세요');return false;}
   var st=document.getElementById('urlStatus');
   st.textContent='생성 중...';st.style.color='#1a73e8';
   try{
@@ -4787,10 +4828,44 @@ async function generateBitlyUrl(){
     if(data.link){
       document.getElementById('urlBitly').value=data.link;
       st.textContent='생성 완료!';st.style.color='#34a853';
+      return true;
     }else{
       st.textContent='오류: '+(data.message||data.error||'알수없음');st.style.color='#dc3545';
+      return false;
     }
-  }catch(e){st.textContent='오류: '+e.message;st.style.color='#dc3545';}
+  }catch(e){st.textContent='오류: '+e.message;st.style.color='#dc3545';return false;}
+}
+
+// 원클릭: Bitly 생성 → 성공 시 곧바로 발송기록 저장(+{#URL} 자동 치환).
+// 기존엔 [Bitly 생성]과 [발송기록에 저장]을 각각 눌러야 했던 2스텝을 1버튼으로 축약.
+async function generateAndSaveUrl(){
+  if(_selectedCampaignIdx<0){alert('캠페인을 선택하세요');return;}
+  if(!document.getElementById('urlFullUtm').value){alert('랜딩 URL을 입력하세요');return;}
+  var btn=document.getElementById('btnGenSave');
+  if(btn){btn.disabled=true;btn.textContent='생성+저장 중...';}
+  try{
+    var ok=await generateBitlyUrl();
+    if(ok) await saveUrlRecord();
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent='생성+저장 (원클릭)';}
+  }
+}
+
+// URL 도달성 자동검증(선택): 서버가 완성 UTM URL로 요청을 보내 최종 상태코드·리다이렉트를 확인.
+async function checkUrlReachable(){
+  var target=document.getElementById('urlFullUtm').value||document.getElementById('urlBitly').value;
+  if(!target){alert('먼저 URL을 입력/생성하세요');return;}
+  var st=document.getElementById('urlStatus');
+  st.textContent='도달성 확인 중...';st.style.color='#1a73e8';
+  try{
+    var res=await fetch('api/url-check',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:target})});
+    var data=await res.json();
+    if(data.ok&&data.reachable){
+      st.textContent='✔ 도달 OK ('+data.status+(data.finalUrl&&data.finalUrl!==target?' → '+data.finalUrl:'')+')';st.style.color='#34a853';
+    }else{
+      st.textContent='✖ 도달 실패: '+(data.status||data.error||'응답 없음');st.style.color='#dc3545';
+    }
+  }catch(e){st.textContent='도달성 확인 오류: '+e.message;st.style.color='#dc3545';}
 }
 
 function copyBitly(){
@@ -5611,16 +5686,26 @@ document.querySelectorAll('input[name=mobileInvitation]').forEach(function(r) {
   });
 });
 
-(function initVisibility() {
-  var sv = document.querySelector('input[name=sampleOrder]:checked').value;
-  var iv = document.querySelector('input[name=invitationOrder]:checked').value;
-  var rv = document.querySelector('input[name=returnGiftOrder]:checked').value;
-  var mi = document.querySelector('input[name=mobileInvitation]:checked').value;
+// 라디오/셀렉트 현재값 기준으로 날짜 하위칸 표시를 재계산.
+// 초기 로드 + 프리셋 복원(setFilters) 후에도 호출해 표시 상태를 동기화한다.
+function refreshFilterVisibility() {
+  var sv = radioVal('sampleOrder');
+  var iv = radioVal('invitationOrder');
+  var rv = radioVal('returnGiftOrder');
+  var mi = radioVal('mobileInvitation');
   document.getElementById('sampleDateGroup').classList.toggle('hidden', sv === 'all');
   document.getElementById('invDateGroup').classList.toggle('hidden', iv === 'all');
   document.getElementById('returnGiftDateGroup').classList.toggle('hidden', rv === 'all');
   document.getElementById('miDateGroup').classList.toggle('hidden', mi !== 'Y');
-})();
+  var sdt = document.getElementById('sampleDateType');
+  if (sdt) document.getElementById('sampleSalesGubun').classList.toggle('hidden', sdt.value !== 'delivery');
+  if (CART_DATE_AVAILABLE) {
+    toggleCartDate('cartSample', 'cartSampleDateGroup');
+    toggleCartDate('cartInvitation', 'cartInvDateGroup');
+  }
+}
+refreshFilterVisibility();
+if (typeof loadExtractionPresets === 'function') { try { loadExtractionPresets(); } catch (e) {} }
 
 function radioVal(name) {
   var el = document.querySelector('input[name=' + name + ']:checked');
@@ -5672,6 +5757,105 @@ function getFilters() {
     cardViewDateTo: document.getElementById('cardViewDateTo').value,
     limit: parseInt(document.getElementById('limitInput').value) || 5000
   };
+}
+
+// ── 추출 조건 프리셋: DOM 복원 ──
+function _setRadio(name, val){
+  var el=document.querySelector('input[name='+name+'][value="'+val+'"]');
+  if(el) el.checked=true;
+}
+function _setVal(id, val){
+  var el=document.getElementById(id);
+  if(el) el.value=(val==null?'':val);
+}
+function setFilters(f){
+  if(!f) return;
+  _setRadio('siteDiv', f.siteDiv||'all');
+  _setRadio('gender', f.gender||'all');
+  _setVal('regDateFrom', f.regDateFrom); _setVal('regDateTo', f.regDateTo);
+  _setRadio('sampleOrder', f.sampleOrder||'all');
+  _setVal('sampleDateType', f.sampleDateType); _setVal('sampleSalesGubun', f.sampleSalesGubun);
+  _setVal('sampleDateFrom', f.sampleDateFrom); _setVal('sampleDateTo', f.sampleDateTo);
+  _setRadio('invitationOrder', f.invitationOrder||'all');
+  _setVal('invDateFrom', f.invitationDateFrom); _setVal('invDateTo', f.invitationDateTo);
+  _setRadio('returnGiftOrder', f.returnGiftOrder||'all');
+  _setVal('returnGiftDateFrom', f.returnGiftDateFrom); _setVal('returnGiftDateTo', f.returnGiftDateTo);
+  _setRadio('mobileInvitation', f.mobileInvitation||'all');
+  _setVal('miDateFrom', f.miDateFrom); _setVal('miDateTo', f.miDateTo);
+  if(CART_AVAILABLE){ _setRadio('cartSample', f.cartSample||'all'); _setRadio('cartInvitation', f.cartInvitation||'all'); }
+  if(CART_DATE_AVAILABLE){ _setVal('cartSampleDateFrom', f.cartSampleDateFrom); _setVal('cartSampleDateTo', f.cartSampleDateTo); _setVal('cartInvDateFrom', f.cartInvDateFrom); _setVal('cartInvDateTo', f.cartInvDateTo); }
+  _setVal('weddingDateFrom', f.weddingDateFrom); _setVal('weddingDateTo', f.weddingDateTo); _setVal('weddingDateOp', f.weddingDateOp);
+  _setRadio('wishcard', f.wishcard||'all'); _setVal('wishcardOp', f.wishcardOp);
+  _setRadio('sampleBasket', f.sampleBasket||'all'); _setVal('sampleBasketOp', f.sampleBasketOp);
+  _setRadio('coupon', f.coupon||'all'); _setVal('couponOp', f.couponOp);
+  _setRadio('review', f.review||'all'); _setVal('reviewOp', f.reviewOp);
+  _setRadio('csInquiry', f.csInquiry||'all'); _setVal('csInquiryOp', f.csInquiryOp);
+  _setRadio('cardView', f.cardView||'all'); _setVal('cardViewOp', f.cardViewOp);
+  _setVal('cardViewDateFrom', f.cardViewDateFrom); _setVal('cardViewDateTo', f.cardViewDateTo);
+  if(f.limit!=null) _setVal('limitInput', f.limit);
+  // op-select 색상(AND/OR) 재적용
+  ['weddingDateOp','wishcardOp','sampleBasketOp','couponOp','reviewOp','csInquiryOp','cardViewOp'].forEach(function(id){
+    var el=document.getElementById(id); if(el&&typeof styleOp==='function') styleOp(el);
+  });
+  // 라디오 프로그램적 설정은 change 이벤트를 발생시키지 않으므로 표시상태 수동 동기화
+  if(typeof refreshFilterVisibility==='function') refreshFilterVisibility();
+}
+
+// ── 추출 조건 프리셋: 서버 연동 ──
+var _extPresets = [];
+async function loadExtractionPresets(){
+  var sel=document.getElementById('extPresetSelect');
+  if(!sel) return;
+  try{
+    var res=await fetch('api/extraction-presets');
+    var data=await res.json();
+    _extPresets=(data && data.presets)||[];
+  }catch(e){ _extPresets=[]; }
+  sel.innerHTML='<option value="">-- 저장된 조건 프리셋 --</option>';
+  _extPresets.slice().reverse().forEach(function(p){
+    var opt=document.createElement('option');
+    opt.value=p.id;
+    opt.textContent=p.name;
+    sel.appendChild(opt);
+  });
+}
+function applyExtractionPreset(){
+  var sel=document.getElementById('extPresetSelect');
+  var id=sel.value; if(!id) return;
+  var p=null;
+  for(var i=0;i<_extPresets.length;i++){ if(String(_extPresets[i].id)===String(id)){ p=_extPresets[i]; break; } }
+  if(!p){ alert('프리셋을 찾을 수 없습니다.'); return; }
+  setFilters(p.filters);
+  var hint=document.getElementById('extPresetHint');
+  if(hint){ hint.style.display='block'; hint.textContent='✔ 프리셋 ['+p.name+'] 조건을 불러왔습니다. 필요한 부분만 수정 후 조회하세요.'; }
+}
+async function saveExtractionPreset(){
+  var name=prompt('저장할 프리셋 이름을 입력하세요 (예: 당일샘플_가입3~5일)');
+  if(name==null) return;
+  name=name.trim(); if(!name){ alert('이름을 입력하세요.'); return; }
+  try{
+    var res=await fetch('api/extraction-presets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name, filters:getFilters()})});
+    var data=await res.json();
+    if(!data.ok) throw new Error(data.error||'저장 실패');
+    await loadExtractionPresets();
+    var sel=document.getElementById('extPresetSelect'); if(sel) sel.value=data.preset.id;
+    var hint=document.getElementById('extPresetHint');
+    if(hint){ hint.style.display='block'; hint.textContent='✔ 현재 조건을 ['+name+']'+(data.replaced?' (덮어씀)':'')+' 프리셋으로 저장했습니다.'; }
+  }catch(e){ alert('프리셋 저장 실패: '+e.message); }
+}
+async function deleteExtractionPreset(){
+  var sel=document.getElementById('extPresetSelect');
+  var id=sel.value; if(!id){ alert('삭제할 프리셋을 선택하세요.'); return; }
+  var name=sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].textContent : '';
+  if(!confirm('프리셋 ['+name+']을(를) 삭제할까요?')) return;
+  try{
+    var res=await fetch('api/extraction-presets/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})});
+    var data=await res.json();
+    if(!data.ok) throw new Error('삭제 실패');
+    await loadExtractionPresets();
+    var hint=document.getElementById('extPresetHint');
+    if(hint){ hint.style.display='block'; hint.textContent='프리셋 ['+name+']을(를) 삭제했습니다.'; }
+  }catch(e){ alert('프리셋 삭제 실패: '+e.message); }
 }
 
 var lastResult = null;
@@ -6815,6 +6999,49 @@ var server = http.createServer(async function (req, res) {
       return;
     }
 
+    // URL 도달성 검증: 주어진 URL로 요청을 보내 최종 상태코드/리다이렉트를 확인(최대 5회 추적).
+    // 발송 전 랜딩페이지가 실제로 열리는지를 눈으로 클릭하지 않고 자동 확인.
+    if (pathname === "/api/url-check" && req.method === "POST") {
+      var uBody = await parseBody(req);
+      var checkUrl = (uBody.url || "").trim();
+      if (!checkUrl) { res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" }); res.end(JSON.stringify({ error: "url 필요" })); return; }
+      try {
+        var httpsMod = require("https");
+        function headOrGet(targetUrl, depth) {
+          return new Promise(function (resolve) {
+            var u;
+            try { u = new URL(targetUrl); } catch (e) { resolve({ reachable: false, error: "잘못된 URL" }); return; }
+            if (u.protocol !== "http:" && u.protocol !== "https:") { resolve({ reachable: false, error: "http/https만 지원" }); return; }
+            var lib = u.protocol === "https:" ? httpsMod : http;
+            var opts = { method: "GET", hostname: u.hostname, port: u.port || (u.protocol === "https:" ? 443 : 80), path: u.pathname + u.search, headers: { "User-Agent": "Mozilla/5.0 (CRM-URL-Check)" } };
+            var creq = lib.request(opts, function (cres) {
+              var status = cres.statusCode;
+              // 리다이렉트 추적 (최대 5회)
+              if (status >= 300 && status < 400 && cres.headers.location && depth < 5) {
+                cres.resume();
+                var next = cres.headers.location;
+                try { next = new URL(next, targetUrl).href; } catch (e) {}
+                resolve(headOrGet(next, depth + 1));
+                return;
+              }
+              cres.resume();
+              resolve({ reachable: status >= 200 && status < 400, status: status, finalUrl: targetUrl });
+            });
+            creq.setTimeout(8000, function () { creq.destroy(); resolve({ reachable: false, error: "타임아웃(8s)" }); });
+            creq.on("error", function (err) { resolve({ reachable: false, error: err.message }); });
+            creq.end();
+          });
+        }
+        var checkResult = await headOrGet(checkUrl, 0);
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify(Object.assign({ ok: true }, checkResult)));
+      } catch (e) {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, reachable: false, error: e.message }));
+      }
+      return;
+    }
+
     // Bitly API: 클릭수 조회 (여러 URL 일괄)
     if (pathname === "/api/bitly-clicks" && req.method === "POST") {
       var cBody = await parseBody(req);
@@ -7266,6 +7493,49 @@ var server = http.createServer(async function (req, res) {
         a: { filename: "CRM_LMS 발송양식(어드민)_" + aName + ".xlsx", count: aRows.length, b64: aBuf.toString("base64") },
         b: { filename: "CRM_LMS 발송양식(어드민)_" + bName + ".xlsx", count: bRows.length, b64: bBuf.toString("base64") },
       }));
+      return;
+    }
+
+    // ── 추출 조건 프리셋: 목록 조회 ──
+    if (pathname === "/api/extraction-presets" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, presets: extractionPresets }));
+      return;
+    }
+
+    // ── 추출 조건 프리셋: 저장 (동일 이름이면 교체) ──
+    if (pathname === "/api/extraction-presets" && req.method === "POST") {
+      var epBody = await parseBody(req);
+      var epName = (epBody.name || "").trim();
+      if (!epName) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "프리셋 이름이 필요합니다." }));
+        return;
+      }
+      var epRecord = { id: Date.now(), name: epName, filters: epBody.filters || {}, createdAt: new Date().toISOString() };
+      var epIdx = -1;
+      for (var ei = 0; ei < extractionPresets.length; ei++) {
+        if (extractionPresets[ei].name === epName) { epIdx = ei; break; }
+      }
+      if (epIdx >= 0) extractionPresets.splice(epIdx, 1);
+      extractionPresets.push(epRecord);
+      if (extractionPresets.length > 200) extractionPresets = extractionPresets.slice(-200);
+      saveExtractionPresets();
+      console.log("[추출프리셋] 저장: " + epName);
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, preset: epRecord, replaced: epIdx >= 0 }));
+      return;
+    }
+
+    // ── 추출 조건 프리셋: 삭제 ──
+    if (pathname === "/api/extraction-presets/delete" && req.method === "POST") {
+      var epdBody = await parseBody(req);
+      var epdId = epdBody.id;
+      var before = extractionPresets.length;
+      extractionPresets = extractionPresets.filter(function (p) { return String(p.id) !== String(epdId); });
+      saveExtractionPresets();
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, removed: before - extractionPresets.length }));
       return;
     }
 
@@ -8409,6 +8679,7 @@ async function start() {
   }
   loadCampaignHistory();
   loadExtractionHistory();
+  loadExtractionPresets();
   loadRefuseList();
 
   // HTTP 서버를 먼저 listen → /health 가 DB 연결과 무관하게 즉시 응답(배포 헬스체크 통과).
