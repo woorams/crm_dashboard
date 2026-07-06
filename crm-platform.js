@@ -2206,6 +2206,8 @@ function generateHTML() {
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
           <div class="panel-title" style="margin-bottom:0">캠페인별 상세 성과 <span style="font-size:11px;color:#999;font-weight:400">(메시지 클릭 시 전체 내용 확인)</span>
             <button id="btnAutoConvAll" onclick="autoConvAll()" style="margin-left:12px;padding:3px 10px;background:#7b1fa2;color:#fff;border:none;border-radius:4px;font-size:11px;font-weight:600;cursor:pointer" title="추출이력 연동 캠페인의 전환수를 DB에서 자동 조회">전환수 자동 조회</button>
+            <button id="btnBatchClone" onclick="batchCloneRegister()" style="margin-left:6px;padding:3px 10px;background:#fde047;color:#854d0e;border:none;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer" title="체크한 캠페인들을 오늘 기준으로 복제해 '예정'으로 일괄 등록 (발송일=오늘18시, 기간 슬라이드, 건수 0, 본문 링크→{#URL})">☑ 선택 일괄 복제 등록</button>
+            <span id="batchCloneCount" style="margin-left:6px;font-size:11px;color:#854d0e;font-weight:600"></span>
           </div>
           <div style="display:flex;gap:6px;align-items:center;font-size:12px">
             <label style="color:#666">목적:</label>
@@ -2242,11 +2244,12 @@ function generateHTML() {
           <table class="cd-table" id="cdCampaignTable">
             <thead>
               <tr>
-                <th class="th-info th-group" colspan="15">캠페인 정보</th>
+                <th class="th-info th-group" colspan="16">캠페인 정보</th>
                 <th class="th-click th-group" colspan="6">누적 클릭수 / 클릭률(%)</th>
                 <th class="th-conv th-group" colspan="3">샘플/원 주문 여부</th>
               </tr>
               <tr>
+                <th class="th-info" style="width:26px" title="일괄 복제 선택"><input type="checkbox" id="cdSelAll" onclick="toggleSelAllCampaigns(this)" style="cursor:pointer"></th>
                 <th class="th-info">상태</th><th class="th-info" title="Bitly URL 적용 + 대상자 추출이력 연동 모두 완료되어야 발송 가능">준비</th><th class="th-info">발송일</th><th class="th-info">메시지</th><th class="th-info">목적</th>
                 <th class="th-info">기간 조건</th>
                 <th class="th-info">D1<br>(주문상태)</th><th class="th-info">D2<br>(샘플 장바구니)</th>
@@ -4430,6 +4433,7 @@ function renderCampaignTable(){
     var dateBorder=(_prevDate&&curDate!==_prevDate)?'border-top:3px solid #333;':'';
     _prevDate=curDate;
     return '<tr style="'+dateBorder+'">'+
+      '<td style="text-align:center"><input type="checkbox" class="cdSelCb" value="'+c._globalIdx+'" onclick="updateBatchCloneCount()" style="cursor:pointer"></td>'+
       '<td style="white-space:nowrap">'+statusBadge(c.type,c._globalIdx)+'</td>'+
       readyTd(c)+
       '<td style="white-space:nowrap;font-size:10px">'+dt+'</td>'+
@@ -4456,6 +4460,7 @@ function renderCampaignTable(){
       (function(){var c1=c.conversions&&c.conversions['1d']?Math.round(c.conversions['1d'].count)||0:0;var c2=c.conversions&&c.conversions['2d']?Math.round(c.conversions['2d'].count)||0:0;var t=Math.max(c1,c2);var r=c.send_count>0?(t/c.send_count*100).toFixed(1):'0.0';var color=t>0?'#137333':'#999';return'<td class="td-conv" style="text-align:center;min-width:42px"><div style="font-size:11px;font-weight:'+(t>0?'700':'400')+';color:'+color+'">'+t+'</div><div style="font-size:9px;color:#999">'+r+'%</div></td>';})()+
       '</tr>';
   }).join('');
+  if(typeof updateBatchCloneCount==='function')updateBatchCloneCount(); // 렌더 후 선택/카운트 동기화
 }
 
 function fConvEdit(gIdx,slot,obj,sendCount){
@@ -5347,6 +5352,63 @@ function cmRecalcPeriod(){
   tgtEl.value=_cloneSrc.descLine?(_cloneSrc.descLine+' '+dateStr):dateStr;
   var pm=document.getElementById('cmPrevMsgStatus');
   if(pm){pm.style.color='#7b1fa2';pm.textContent='✓ 기간조건 오늘(발송일 '+_cpFmtYMD(send)+') 기준 재계산: '+dateStr+' — 필요시 직접 수정하세요.';}
+}
+
+// ═══ 일괄 복제 등록 (V1): 체크한 캠페인들을 오늘 기준으로 복제해 '예정' 일괄 등록 ═══
+function toggleSelAllCampaigns(cb){
+  var boxes=document.querySelectorAll('.cdSelCb');
+  for(var i=0;i<boxes.length;i++)boxes[i].checked=cb.checked;
+  updateBatchCloneCount();
+}
+function updateBatchCloneCount(){
+  var n=document.querySelectorAll('.cdSelCb:checked').length;
+  var el=document.getElementById('batchCloneCount'); if(el)el.textContent=n>0?(n+'개 선택됨'):'';
+  var all=document.querySelectorAll('.cdSelCb').length;
+  var sa=document.getElementById('cdSelAll'); if(sa)sa.checked=(all>0&&n===all);
+}
+function _batchToday1800(){var d=new Date();var p=function(n){return(n<10?'0':'')+n;};return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T18:00';}
+// 복제 시 기간조건: 원본 (발송일↔타겟날짜) 관계를 오늘로 슬라이드 (cmRecalcPeriod와 동일 개념, DOM 없이)
+function _cloneTargetForToday(c){
+  var descLine=_cpDescLine(c.target);
+  var rng=_cpParseDates(c.target);
+  var srcSend=_cpSendDateFromInput(c.send_date?c.send_date.slice(0,10):'');
+  if(rng&&srcSend){
+    var today=_cpSendDateFromInput(_batchToday1800());
+    var delta=Math.round((today.getTime()-srcSend.getTime())/86400000);
+    var ns=_cpAddDays(rng.start,delta), ne=_cpAddDays(rng.end,delta);
+    var dateStr=(ns.getTime()===ne.getTime())?_cpFmtYMD(ns):(_cpFmtYMD(ns)+'~'+_cpFmtMD(ne));
+    return descLine?(descLine+' '+dateStr):dateStr;
+  }
+  return (c.target||'').split(String.fromCharCode(10)).join(' ');
+}
+async function batchCloneRegister(){
+  var boxes=document.querySelectorAll('.cdSelCb:checked');
+  if(!boxes.length){alert('복제할 캠페인을 먼저 체크하세요');return;}
+  var camps=getCampaigns(), list=[];
+  for(var i=0;i<boxes.length;i++){var c=camps[parseInt(boxes[i].value,10)];if(c)list.push(c);}
+  if(!list.length)return;
+  var sendDate=_batchToday1800();
+  var preview=list.slice(0,8).map(function(c){return '· '+(c.purpose||'(목적없음)')+' → '+_cloneTargetForToday(c);}).join(String.fromCharCode(10));
+  if(list.length>8)preview+=String.fromCharCode(10)+'... 외 '+(list.length-8)+'개';
+  var NL=String.fromCharCode(10);
+  if(!confirm(list.length+'개 캠페인을 오늘 기준으로 복제해 예정 상태로 일괄 등록합니다.'+NL+'발송일='+sendDate.replace('T',' ')+' · 건수 0 · 본문 링크 {#URL} 치환'+NL+NL+preview+NL+NL+'진행할까요?'))return;
+  var btn=document.getElementById('btnBatchClone'); var ot=btn?btn.textContent:'';
+  if(btn){btn.disabled=true;}
+  var reLink=new RegExp('https?://\\\\S+','g');
+  var ok=0,fail=0;
+  for(var j=0;j<list.length;j++){
+    var c=list[j];
+    var payload={ send_date:sendDate, purpose:c.purpose||'', target:_cloneTargetForToday(c),
+      depth1:c.depth1||'', depth2:c.depth2||'', depth3:c.depth3||'', depth4:c.depth4||'',
+      incentive:c.incentive||'', channel:c.channel||'LMS', send_count:'0',
+      message:(c.message||'').replace(reLink,'{#URL}'), extraction_id:'', extraction_split:'all' };
+    try{ var res=await fetch('api/campaign-register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); var data=await res.json(); if(data.ok)ok++;else fail++; }
+    catch(e){fail++;}
+    if(btn)btn.textContent='등록 중... ('+(j+1)+'/'+list.length+')';
+  }
+  if(btn){btn.disabled=false;btn.textContent=ot;}
+  alert('일괄 복제 등록 완료: 성공 '+ok+'개'+(fail?(' / 실패 '+fail+'개'):'')+'.'+NL+'예정 상태로 추가됐습니다. 발송 건수·대상 추출·URL은 각 캠페인 [수정]에서 조정하세요.');
+  cdLoaded=false; await loadCampaignDashboard();
 }
 
 async function openEditCampaign(gIdx){
