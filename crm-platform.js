@@ -2207,6 +2207,7 @@ function generateHTML() {
           <div class="panel-title" style="margin-bottom:0">캠페인별 상세 성과 <span style="font-size:11px;color:#999;font-weight:400">(메시지 클릭 시 전체 내용 확인)</span>
             <button id="btnAutoConvAll" onclick="autoConvAll()" style="margin-left:12px;padding:3px 10px;background:#7b1fa2;color:#fff;border:none;border-radius:4px;font-size:11px;font-weight:600;cursor:pointer" title="추출이력 연동 캠페인의 전환수를 DB에서 자동 조회">전환수 자동 조회</button>
             <button id="btnBatchClone" onclick="batchCloneRegister()" style="margin-left:6px;padding:3px 10px;background:#fde047;color:#854d0e;border:none;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer" title="체크한 캠페인들을 오늘 기준으로 복제해 '예정'으로 일괄 등록 (발송일=오늘18시, 기간 슬라이드, 건수 0, 본문 링크→{#URL})">☑ 선택 일괄 복제 등록</button>
+            <button id="btnBatchEdit" onclick="openBatchEditModal()" style="margin-left:4px;padding:3px 10px;background:#1a73e8;color:#fff;border:none;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer" title="예정 캠페인들의 발송일·건수·추출연동·기간을 한 화면에서 일괄 편집">📝 예정 일괄 편집</button>
             <span id="batchCloneCount" style="margin-left:6px;font-size:11px;color:#854d0e;font-weight:600"></span>
           </div>
           <div style="display:flex;gap:6px;align-items:center;font-size:12px">
@@ -2348,6 +2349,28 @@ function generateHTML() {
           <button onclick="deleteCampaignFromEdit()" style="padding:10px 16px;background:#fff;color:#dc2626;border:1px solid #dc2626;border-radius:6px;font-weight:600;cursor:pointer" title="이 캠페인을 완전히 삭제합니다 (복구 불가)">삭제</button>
           <button onclick="saveEditCampaign()" style="flex:1;padding:10px;background:#1a73e8;color:#fff;border:none;border-radius:6px;font-weight:600;cursor:pointer">저장</button>
           <button onclick="closeEditModal()" style="padding:10px 20px;background:#f0f0f0;border:none;border-radius:6px;cursor:pointer">취소</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 예정 캠페인 일괄 편집 모달 (V2) -->
+    <div id="cdBatchEditModal" class="cd-detail-modal">
+      <div class="modal-box" style="max-width:1180px;width:96%">
+        <button class="close-btn" onclick="closeBatchEditModal()">&times;</button>
+        <div style="font-size:15px;font-weight:700;margin-bottom:4px">예정 캠페인 일괄 편집 <span id="beCount" style="font-size:12px;color:#999;font-weight:400"></span></div>
+        <div style="font-size:11px;color:#666;margin-bottom:10px">발송일·건수·추출이력 연동·기간조건을 한 화면에서 편집한 뒤 [전체 저장]. 메시지 등 상세는 행 끝 [상세]에서.</div>
+        <div style="overflow:auto;max-height:62vh;border:1px solid #eee;border-radius:6px">
+          <table class="cd-table" id="cdBatchEditTable" style="font-size:11px">
+            <thead><tr>
+              <th style="min-width:150px">발송일시</th><th style="min-width:110px">목적</th><th style="min-width:150px">기간 조건</th><th style="min-width:110px">소구</th><th style="text-align:right;min-width:60px">건수</th><th style="min-width:190px">추출이력 연동</th><th style="min-width:70px">메시지</th><th></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div id="beStatus" style="font-size:11px;color:#7c3aed;margin-top:8px;min-height:14px"></div>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <button onclick="saveBatchEdit()" id="beSaveBtn" style="flex:1;padding:10px;background:#1a73e8;color:#fff;border:none;border-radius:6px;font-weight:600;cursor:pointer">전체 저장</button>
+          <button onclick="closeBatchEditModal()" style="padding:10px 20px;background:#f0f0f0;border:none;border-radius:6px;cursor:pointer">닫기</button>
         </div>
       </div>
     </div>
@@ -5408,6 +5431,83 @@ async function batchCloneRegister(){
   }
   if(btn){btn.disabled=false;btn.textContent=ot;}
   alert('일괄 복제 등록 완료: 성공 '+ok+'개'+(fail?(' / 실패 '+fail+'개'):'')+'.'+NL+'예정 상태로 추가됐습니다. 발송 건수·대상 추출·URL은 각 캠페인 [수정]에서 조정하세요.');
+  cdLoaded=false; await loadCampaignDashboard();
+}
+
+// ═══ V2: 예정 캠페인 일괄 편집 그리드 (발송일·건수·추출연동·기간을 한 화면에서) ═══
+var _beExtractList=[];
+async function openBatchEditModal(){
+  var camps=getCampaigns();
+  var rows=[];
+  for(var i=0;i<camps.length;i++){ if(camps[i] && camps[i].type==='예정') rows.push({gidx:i, c:camps[i]}); }
+  if(!rows.length){alert('편집할 예정 캠페인이 없습니다. 먼저 [선택 일괄 복제 등록]으로 예정 캠페인을 만드세요.');return;}
+  try{ var res=await fetch('api/extraction-history'); _beExtractList=await res.json(); }catch(e){ _beExtractList=[]; }
+  var extOpts=function(selId){
+    var s='<option value="">-- 없음 --</option>';
+    _beExtractList.slice().reverse().forEach(function(h){
+      var dt=h.createdAt?(new Date(h.createdAt)).toISOString().slice(0,10):'';
+      var sel=(String(h.id)===String(selId))?' selected':'';
+      s+='<option value="'+h.id+'"'+sel+'>'+(dt?dt+' ':'')+escHtml(h.campaignName||'')+' ('+h.count+'명)</option>';
+    });
+    return s;
+  };
+  var purposeOpts=function(p){
+    var arr=['당일 샘플 전환','샘플 전환','원주문 전환','답례품 전환','부가 상품 전환','기타'];
+    var s='<option value=""></option>';
+    arr.forEach(function(o){s+='<option'+(o===p?' selected':'')+'>'+o+'</option>';});
+    return s;
+  };
+  var tbody=document.querySelector('#cdBatchEditTable tbody');
+  tbody.innerHTML=rows.map(function(r){
+    var c=r.c;
+    var sd=(c.send_date||'').replace(' ','T').slice(0,16);
+    var tgt=(c.target||'').split(String.fromCharCode(10)).join(' ');
+    var msgLen=(c.message||'').length;
+    return '<tr data-gidx="'+r.gidx+'">'+
+      '<td><input type="datetime-local" class="be-send" value="'+sd+'" style="width:100%;font-size:11px;padding:2px"></td>'+
+      '<td><select class="be-purpose" style="width:100%;font-size:11px;padding:2px">'+purposeOpts((c.purpose||'').trim())+'</select></td>'+
+      '<td><input type="text" class="be-target" value="'+escHtml(tgt)+'" style="width:100%;font-size:11px;padding:2px"></td>'+
+      '<td><input type="text" class="be-incentive" value="'+escHtml(c.incentive||'')+'" style="width:100%;font-size:11px;padding:2px"></td>'+
+      '<td><input type="number" class="be-count" value="'+(c.send_count||0)+'" style="width:64px;font-size:11px;padding:2px;text-align:right"></td>'+
+      '<td><select class="be-extraction" style="width:100%;font-size:11px;padding:2px">'+extOpts(c.extraction_id)+'</select></td>'+
+      '<td style="text-align:center;color:'+(msgLen?'#16a34a':'#dc2626')+'" title="'+escHtml((c.message||'').slice(0,150))+'">'+(msgLen?('✓ '+msgLen+'자'):'없음')+'</td>'+
+      '<td><button onclick="openEditCampaign('+r.gidx+')" style="border:none;background:#dbeafe;color:#1e40af;padding:2px 8px;border-radius:4px;font-size:10px;cursor:pointer" title="메시지 등 상세 수정">상세</button></td>'+
+      '</tr>';
+  }).join('');
+  document.getElementById('beCount').textContent='('+rows.length+'건)';
+  document.getElementById('beStatus').textContent='';
+  var modal=document.getElementById('cdBatchEditModal');
+  modal.style.display='flex';
+  modal.onclick=function(e){if(e.target===modal)closeBatchEditModal();};
+}
+function closeBatchEditModal(){document.getElementById('cdBatchEditModal').style.display='none';}
+async function saveBatchEdit(){
+  var trs=document.querySelectorAll('#cdBatchEditTable tbody tr');
+  if(!trs.length){closeBatchEditModal();return;}
+  var btn=document.getElementById('beSaveBtn'); var st=document.getElementById('beStatus');
+  btn.disabled=true;
+  var camps=getCampaigns();
+  var ok=0,fail=0;
+  for(var i=0;i<trs.length;i++){
+    var tr=trs[i]; var gidx=parseInt(tr.getAttribute('data-gidx'),10); var c=camps[gidx]||{};
+    var q=function(cls){return tr.querySelector(cls);};
+    var payload={ index:gidx,
+      send_date:q('.be-send').value,
+      channel:c.channel||'LMS',
+      purpose:q('.be-purpose').value,
+      target:q('.be-target').value,
+      depth1:c.depth1||'', depth2:c.depth2||'', depth3:c.depth3||'', depth4:c.depth4||'',
+      incentive:q('.be-incentive').value,
+      send_count:q('.be-count').value||'0',
+      message:c.message||'',
+      extraction_id:q('.be-extraction').value||'',
+      extraction_split:c.extraction_split||'all' };
+    try{ var res=await fetch('api/campaign-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); var d=await res.json(); if(d.ok)ok++;else fail++; }
+    catch(e){fail++;}
+    if(st)st.textContent='저장 중... ('+(i+1)+'/'+trs.length+')';
+  }
+  btn.disabled=false;
+  if(st){st.style.color=fail?'#dc2626':'#16a34a';st.textContent='저장 완료: '+ok+'건'+(fail?(' / 실패 '+fail+'건'):'')+'. (닫으면 표에 반영됩니다)';}
   cdLoaded=false; await loadCampaignDashboard();
 }
 
