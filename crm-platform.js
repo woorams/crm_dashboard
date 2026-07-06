@@ -5132,7 +5132,7 @@ function saveComposedMessage(){
 }
 function loadMessage(i){var m=savedMessages[i];if(!m)return;document.getElementById('cmPurpose').value=m.purpose||'';document.getElementById('cmType').value=m.type||'';document.getElementById('cmChannel').value=m.channel||'LMS';document.getElementById('cmSendDate').value=m.send_date||'';document.getElementById('cmTarget').value=m.target||'';document.getElementById('cmIncentive').value=m.incentive||'';document.getElementById('cmUrl').value=m.url||'';document.getElementById('cmMessage').value=m.message||'';}
 function deleteMessage(i){if(!confirm('삭제하시겠습니까?'))return;savedMessages.splice(i,1);localStorage.setItem('crm_messages',JSON.stringify(savedMessages));loadSavedMessages();}
-function clearCompose(){['cmPurpose','cmSendDate','cmTarget','cmDepth1','cmDepth2','cmDepth3','cmDepth4','cmIncentive','cmSendCount','cmMessage','cmExtractionId'].forEach(function(id){document.getElementById(id).value='';});document.getElementById('cmExtractionSplit').value='all';document.getElementById('cmSplitInfo').textContent='';}
+function clearCompose(){_cloneSrc=null;['cmPurpose','cmSendDate','cmTarget','cmDepth1','cmDepth2','cmDepth3','cmDepth4','cmIncentive','cmSendCount','cmMessage','cmExtractionId'].forEach(function(id){document.getElementById(id).value='';});document.getElementById('cmExtractionSplit').value='all';document.getElementById('cmSplitInfo').textContent='';}
 
 var _extractionCounts={};
 function updateExtractionSplitInfo(){
@@ -5289,27 +5289,28 @@ function cloneCampaign(gIdx){
   setV('cmTarget',(c.target||'').split(String.fromCharCode(10)).join(' ')); // 단일행 input용 개행 제거
   setV('cmDepth1',c.depth1);setV('cmDepth2',c.depth2);setV('cmDepth3',c.depth3);setV('cmDepth4',c.depth4);
   setV('cmIncentive',c.incentive);
-  setV('cmSendCount',c.send_count||'0');
-  setV('cmSendDate','');
+  setV('cmSendCount','0'); // 고객 추출 전이라 발송 건수는 기본 0
   // 본문 링크 → {#URL} 복원
   var msg=c.message||'';
   var reLink=new RegExp('https?://\\\\S+','g');
   var linkCount=(msg.match(reLink)||[]).length;
   setV('cmMessage', msg.replace(reLink,'{#URL}'));
-  // 복제 컨텍스트: 원본 발송일 대비 타겟 종료일 offset 자동 추출
-  _cloneSrc=null;
-  var srcSend=_cpSendDateFromInput(c.send_date?c.send_date.slice(0,10):'');
+  // 복제 컨텍스트: 원본 (발송일 ↔ 타겟날짜) 관계를 그대로 오늘로 슬라이드하기 위해 저장
   var descLine=_cpDescLine(c.target);
-  if(srcSend){
-    var rng=_cpParseDates(c.target);
-    if(rng){var dEnd=Math.round((srcSend.getTime()-rng.end.getTime())/86400000);_cloneSrc={dEnd:dEnd,descLine:descLine};}
-    else{_cloneSrc={dEnd:2,descLine:descLine};}
-  }
-  // 추출이력 연동 (드롭다운 async 로드 완료를 기다렸다 적용)
-  setV('cmExtractionSplit', c.extraction_split||'all');
-  if(c.extraction_id){_cloneApplyExtraction(String(c.extraction_id),0);}
+  var rng=_cpParseDates(c.target);
+  var srcSend=_cpSendDateFromInput(c.send_date?c.send_date.slice(0,10):'');
+  _cloneSrc={descLine:descLine, ok:!!(rng&&srcSend),
+             origStart:rng?rng.start:null, origEnd:rng?rng.end:null, origSend:srcSend};
+  // 발송일시 = 오늘(복제·등록일) 18:00 자동 입력 → 기간조건도 오늘 기준으로 즉시 재계산
+  var _now=new Date();var _p2=function(n){return (n<10?'0':'')+n;};
+  setV('cmSendDate', _now.getFullYear()+'-'+_p2(_now.getMonth()+1)+'-'+_p2(_now.getDate())+'T18:00');
+  cmRecalcPeriod();
+  // 추출이력은 선택사항 — 자동 선택하지 않고 비워둠
+  setV('cmExtractionId','');
+  setV('cmExtractionSplit','all');
   var pm=document.getElementById('cmPrevMsgStatus');
-  if(pm){pm.style.color='#7b1fa2';pm.textContent='✓ 복제됨 — 링크 '+linkCount+'개를 {#URL}로 복원. 발송일시를 선택하면 기간조건이 요일에 맞춰 자동 재계산됩니다. 등록 시 Bitly를 새로 생성하세요.';}
+  var _dateNote=_cloneSrc.ok?'기간조건 오늘 기준 재계산됨':'원본 기간조건 날짜를 자동 인식 못함 — 직접 확인 필요';
+  if(pm){pm.style.color='#7b1fa2';pm.textContent='✓ 복제됨 — 링크 '+linkCount+'개 {#URL} 복원, 발송일시=오늘 18:00, '+_dateNote+', 건수 0(추출 후 입력). 등록 시 Bitly 새로 생성하세요.';}
   window.scrollTo(0,0);
   var sd=document.getElementById('cmSendDate');if(sd){try{sd.focus();}catch(e){}}
 }
@@ -5322,24 +5323,18 @@ function cmRecalcPeriod(){
   var sdEl=document.getElementById('cmSendDate');
   var tgtEl=document.getElementById('cmTarget');
   if(!sdEl||!tgtEl||!sdEl.value)return;
+  if(!_cloneSrc||!_cloneSrc.ok)return; // 복제(날짜인식 성공)인 경우에만 재계산 — 수동 작성은 보존
   var send=_cpSendDateFromInput(sdEl.value);
   if(!send)return;
-  var descLine,dEnd;
-  if(_cloneSrc){descLine=_cloneSrc.descLine;dEnd=_cloneSrc.dEnd;}
-  else{descLine=_cpDescLine(tgtEl.value);dEnd=2;}
-  if(!descLine&&!tgtEl.value)return; // 재계산할 근거 없음
-  var end=_cpAddDays(send,-dEnd);
-  var start=end;
-  var wd=send.getDay(); // 0일 1월 2화 3수 4목 5금 6토
-  var mode='단일일';
-  if(wd===1){start=_cpAddDays(end,-2);mode='월요일 뒤로 2일 확장';}       // Fri+Sat 커버
-  else if(wd===5){end=_cpAddDays(end,2);mode='금요일 앞으로 2일 확장';}   // Sat+Sun 커버
-  var dateStr=(start.getTime()===end.getTime())?_cpFmtYMD(start):(_cpFmtYMD(start)+'~'+_cpFmtMD(end));
-  // cmTarget은 단일행 input이라 개행이 소실됨 → 공백으로 결합
-  tgtEl.value=descLine?(descLine+' '+dateStr):dateStr;
+  // 원본 발송일 대비 타겟날짜 관계를 유지한 채 발송일(오늘) 기준으로 슬라이드
+  var deltaDays=Math.round((send.getTime()-_cloneSrc.origSend.getTime())/86400000);
+  var ns=_cpAddDays(_cloneSrc.origStart,deltaDays);
+  var ne=_cpAddDays(_cloneSrc.origEnd,deltaDays);
+  var dateStr=(ns.getTime()===ne.getTime())?_cpFmtYMD(ns):(_cpFmtYMD(ns)+'~'+_cpFmtMD(ne));
+  // cmTarget은 단일행 input이라 개행 대신 공백으로 결합
+  tgtEl.value=_cloneSrc.descLine?(_cloneSrc.descLine+' '+dateStr):dateStr;
   var pm=document.getElementById('cmPrevMsgStatus');
-  var dn=['일','월','화','수','목','금','토'];
-  if(pm){pm.style.color='#7b1fa2';pm.textContent='✓ 기간조건 자동 재계산 ('+dn[wd]+'요일 · '+mode+'): '+dateStr.replace(String.fromCharCode(10),' ')+' — 필요시 직접 수정하세요.';}
+  if(pm){pm.style.color='#7b1fa2';pm.textContent='✓ 기간조건 오늘(발송일 '+_cpFmtYMD(send)+') 기준 재계산: '+dateStr+' — 필요시 직접 수정하세요.';}
 }
 
 async function openEditCampaign(gIdx){
