@@ -2771,6 +2771,17 @@ function generateHTML() {
   <!-- ═══════════════════════════════════════════ -->
   <div id="tab-extraction" class="tab-content active">
 
+    <!-- 필터 프리셋 (자주 쓰는 추출 조건 세트 저장/원클릭 로드) -->
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:12px;padding:9px 12px;background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px">
+      <b style="font-size:12px;color:#374151;white-space:nowrap">🔖 필터 프리셋</b>
+      <select id="filterPresetSel" style="padding:5px 8px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;min-width:200px" onchange="applyFilterPreset()"><option value="">-- 저장된 프리셋 불러오기 --</option></select>
+      <span style="color:#cbd5e1">|</span>
+      <input id="filterPresetName" placeholder="새 프리셋 이름" style="padding:5px 8px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;width:150px" onkeydown="if(event.key==='Enter')saveFilterPreset()">
+      <button class="btn" onclick="saveFilterPreset()" style="background:#0ea5e9;color:#fff;padding:5px 12px;font-size:12px">현재 조건 저장</button>
+      <button class="btn" onclick="deleteFilterPreset()" style="background:#ef4444;color:#fff;padding:5px 12px;font-size:12px">삭제</button>
+      <span id="filterPresetMsg" style="font-size:11px;color:#7c3aed;margin-left:2px"></span>
+    </div>
+
     <!-- 기본 필터 -->
     <div class="panel">
       <div class="panel-title">기본 필터 (AND 결합)</div>
@@ -5696,6 +5707,7 @@ function switchTab(tabId) {
   if (VALID_TABS.indexOf(hash) >= 0) switchTab(hash);
   else switchTab('extraction');
   if (typeof loadRefuseStatus === 'function') loadRefuseStatus();
+  if (typeof loadFilterPresets === 'function') loadFilterPresets();
 })();
 
 window.addEventListener('hashchange', function() {
@@ -5826,6 +5838,74 @@ function getFilters() {
     cardViewDateTo: document.getElementById('cardViewDateTo').value,
     limit: parseInt(document.getElementById('limitInput').value) || 5000
   };
+}
+
+// ═══ 필터 프리셋: getFilters() 결과를 저장/복원 (매 캠페인 조건 재입력 제거) ═══
+function _setRadio(name, val){
+  if(val==null)return;
+  var el=document.querySelector('input[name="'+name+'"][value="'+val+'"]');
+  if(el){el.checked=true;try{el.dispatchEvent(new Event('change',{bubbles:true}));}catch(e){}}
+}
+function _setVal(id, val){
+  var el=document.getElementById(id);
+  if(el){el.value=(val==null?'':val);try{el.dispatchEvent(new Event('change',{bubbles:true}));}catch(e){}}
+}
+// getFilters()의 역함수 — 저장된 조건을 UI에 그대로 복원 (라디오 먼저, 그다음 종속 날짜값)
+function setFilters(f){
+  if(!f)return;
+  _setRadio('siteDiv',f.siteDiv); _setRadio('gender',f.gender);
+  _setVal('regDateFrom',f.regDateFrom); _setVal('regDateTo',f.regDateTo);
+  _setRadio('sampleOrder',f.sampleOrder); _setVal('sampleDateType',f.sampleDateType); _setVal('sampleSalesGubun',f.sampleSalesGubun);
+  _setVal('sampleDateFrom',f.sampleDateFrom); _setVal('sampleDateTo',f.sampleDateTo);
+  _setRadio('invitationOrder',f.invitationOrder); _setVal('invDateFrom',f.invitationDateFrom); _setVal('invDateTo',f.invitationDateTo);
+  _setRadio('returnGiftOrder',f.returnGiftOrder); _setVal('returnGiftDateFrom',f.returnGiftDateFrom); _setVal('returnGiftDateTo',f.returnGiftDateTo);
+  _setRadio('mobileInvitation',f.mobileInvitation); _setVal('miDateFrom',f.miDateFrom); _setVal('miDateTo',f.miDateTo);
+  _setRadio('cartSample',f.cartSample); _setVal('cartSampleDateFrom',f.cartSampleDateFrom); _setVal('cartSampleDateTo',f.cartSampleDateTo);
+  _setRadio('cartInvitation',f.cartInvitation); _setVal('cartInvDateFrom',f.cartInvDateFrom); _setVal('cartInvDateTo',f.cartInvDateTo);
+  _setVal('weddingDateFrom',f.weddingDateFrom); _setVal('weddingDateTo',f.weddingDateTo); _setVal('weddingDateOp',f.weddingDateOp);
+  _setRadio('wishcard',f.wishcard); _setVal('wishcardOp',f.wishcardOp);
+  _setRadio('sampleBasket',f.sampleBasket); _setVal('sampleBasketOp',f.sampleBasketOp);
+  _setRadio('coupon',f.coupon); _setVal('couponOp',f.couponOp);
+  _setRadio('review',f.review); _setVal('reviewOp',f.reviewOp);
+  _setRadio('csInquiry',f.csInquiry); _setVal('csInquiryOp',f.csInquiryOp);
+  _setRadio('cardView',f.cardView); _setVal('cardViewOp',f.cardViewOp); _setVal('cardViewDateFrom',f.cardViewDateFrom); _setVal('cardViewDateTo',f.cardViewDateTo);
+  if(f.limit!=null) _setVal('limitInput', f.limit);
+}
+function _getPresets(){ try{return JSON.parse(localStorage.getItem('crm_filter_presets')||'[]');}catch(e){return [];} }
+function _savePresets(list){ localStorage.setItem('crm_filter_presets', JSON.stringify(list)); }
+function loadFilterPresets(){
+  var sel=document.getElementById('filterPresetSel'); if(!sel)return;
+  var list=_getPresets();
+  sel.innerHTML='<option value="">-- 저장된 프리셋 불러오기 ('+list.length+') --</option>'+list.map(function(p,i){return '<option value="'+i+'">'+escHtml(p.name)+'</option>';}).join('');
+}
+function _presetMsg(t,color){ var m=document.getElementById('filterPresetMsg'); if(m){m.style.color=color||'#7c3aed';m.textContent=t;setTimeout(function(){if(m.textContent===t)m.textContent='';},4000);} }
+function saveFilterPreset(){
+  var nameEl=document.getElementById('filterPresetName');
+  var name=(nameEl.value||'').trim();
+  if(!name){_presetMsg('프리셋 이름을 입력하세요','#ef4444');nameEl.focus();return;}
+  var list=_getPresets();
+  var existing=-1; for(var i=0;i<list.length;i++){if(list[i].name===name){existing=i;break;}}
+  var entry={name:name, filters:getFilters(), created:new Date().toISOString()};
+  if(existing>=0){ if(!confirm('같은 이름의 프리셋을 덮어쓸까요? ('+name+')'))return; list[existing]=entry; }
+  else list.push(entry);
+  _savePresets(list); loadFilterPresets(); nameEl.value='';
+  _presetMsg('✓ 저장됨: '+name);
+}
+function applyFilterPreset(){
+  var sel=document.getElementById('filterPresetSel');
+  var i=parseInt(sel.value); if(isNaN(i))return;
+  var p=_getPresets()[i]; if(!p)return;
+  setFilters(p.filters);
+  _presetMsg('✓ 불러옴: '+p.name+' — [조회하기]를 누르세요');
+}
+function deleteFilterPreset(){
+  var sel=document.getElementById('filterPresetSel');
+  var i=parseInt(sel.value);
+  if(isNaN(i)){_presetMsg('삭제할 프리셋을 먼저 선택하세요','#ef4444');return;}
+  var list=_getPresets(); var nm=list[i]?list[i].name:'';
+  if(!confirm('프리셋 삭제: '+nm+' ?'))return;
+  list.splice(i,1); _savePresets(list); loadFilterPresets();
+  _presetMsg('삭제됨: '+nm);
 }
 
 var lastResult = null;
