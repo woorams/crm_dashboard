@@ -798,6 +798,44 @@ function buildAdminExcel(rows, campaignName) {
   return XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
 }
 
+// URL\uC774 \uC2E4\uC81C\uB85C \uC5F4\uB9AC\uB294\uC9C0 \uD655\uC778 (3xx \uB9AC\uB514\uB809\uC158 \uCD94\uC801, \uCD5C\uB300 5\uD68C). \uACB0\uACFC: {ok, status, finalUrl, error}
+function testUrlReachable(targetUrl, depth) {
+  depth = depth || 0;
+  return new Promise(function (resolve) {
+    if (depth > 5) { resolve({ ok: false, status: 0, error: "\uB9AC\uB514\uB809\uC158 \uACFC\uB2E4" }); return; }
+    var parsed;
+    try { parsed = new URL(targetUrl); } catch (e) { resolve({ ok: false, status: 0, error: "URL \uD615\uC2DD \uC624\uB958" }); return; }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") { resolve({ ok: false, status: 0, error: "\uC9C0\uC6D0\uD558\uC9C0 \uC54A\uB294 \uD504\uB85C\uD1A0\uCF5C" }); return; }
+    var lib = parsed.protocol === "https:" ? require("https") : http;
+    var options = {
+      method: "GET",
+      hostname: parsed.hostname,
+      port: parsed.port || undefined,
+      path: (parsed.pathname || "/") + (parsed.search || ""),
+      headers: { "User-Agent": "Mozilla/5.0 (CRM-LinkCheck)", "Accept": "*/*" },
+    };
+    var settled = false;
+    var done = function (v) { if (!settled) { settled = true; resolve(v); } };
+    var utReq = lib.request(options, function (utRes) {
+      var sc = utRes.statusCode;
+      if (sc >= 300 && sc < 400 && utRes.headers.location) {
+        var next = utRes.headers.location;
+        if (next.indexOf("http") !== 0) {
+          next = parsed.protocol + "//" + parsed.host + (next.charAt(0) === "/" ? "" : "/") + next;
+        }
+        utRes.resume();
+        testUrlReachable(next, depth + 1).then(done);
+        return;
+      }
+      utRes.resume();
+      done({ ok: sc >= 200 && sc < 400, status: sc, finalUrl: targetUrl });
+    });
+    utReq.on("error", function (e) { done({ ok: false, status: 0, error: e.message }); });
+    utReq.setTimeout(8000, function () { utReq.destroy(); done({ ok: false, status: 0, error: "\uC751\uB2F5 \uC2DC\uAC04\uCD08\uACFC(8\uCD08)" }); });
+    utReq.end();
+  });
+}
+
 // ═══════════════════════════════════════════════════════════
 // 3. CRM 전환 추적 백엔드
 // ═══════════════════════════════════════════════════════════
@@ -2485,6 +2523,13 @@ function generateHTML() {
         #cdSub-daily thead th.dpc1,#cdSub-daily thead th.dpc2,#cdSub-daily thead th.dpc3{z-index:7;background:#1e3a5f}
         #cdSub-daily .dp-sep{border-left:2px solid #94a3b8}
         #cdSub-daily .dp-sum{background:#f1f5f9;font-weight:600}
+        #cdSub-daily tr.dp-gt td{background:#fffbeb;font-weight:700;color:#78350f}
+        #cdSub-daily tr.dp-gt td.dpc1{background:#fef3c7}
+        #cdSub-daily tr.dp-gt td.dpc2,#cdSub-daily tr.dp-gt td.dpc3{background:#fffbeb}
+        #cdSub-daily tr.dp-gt td.dp-sum{background:#fde68a}
+        #cdSub-daily tr.dp-gt td.dp-empty{color:#d1b892}
+        #cdSub-daily tr.dp-gt:last-child td{border-bottom:2px solid #f59e0b}
+        #cdSub-daily tr.dp-gt .dp-wow{display:inline;margin-left:4px}
         #cdSub-daily .dp-tog{cursor:pointer;user-select:none;color:#bfdbfe;display:inline-block;width:14px}
         #cdSub-daily .dp-wow{display:block;font-size:10px;line-height:1.1;margin-top:1px}
         #cdSub-daily .dp-up{color:#16a34a}#cdSub-daily .dp-down{color:#dc2626}#cdSub-daily .dp-flat{color:#9ca3af}
@@ -2502,7 +2547,7 @@ function generateHTML() {
         #dpPop .dp-stat{font-size:11px;color:#2563eb;font-weight:700;margin-bottom:4px}
         #dpPop .dp-msg{font-size:12px;color:#374151;white-space:pre-wrap;line-height:1.45}
       </style>
-      <div class="dp-desc">가로: 일자(일~토 주간, <b>N주차</b>=WEEKNUM) · 주간 헤더 클릭 = 접기/펼치기 · "주합계" = 주간 합계 · 세로: 목적 → 세그먼트 → 지표 7종 · 작은 글씨 = WoW(일자=전주 동일요일 대비, 주합계=전주 합계 대비, 비교할 전주 데이터 없으면 생략) · <b>💬 발송 수 셀 클릭 = 그 날 발송 카피 보기</b></div>
+      <div class="dp-desc">가로: 일자(일~토 주간, <b>N주차</b>=WEEKNUM) · 주간 헤더 클릭 = 접기/펼치기 · "주합계" = 주간 합계 · 세로: 목적 → 세그먼트 → 지표 7종 · 작은 글씨 = WoW(일자=전주 동일요일 대비, 주합계=전주 합계 대비, 비교할 전주 데이터 없으면 생략) · <b>💬 발송 수 셀 클릭 = 그 날 발송 카피 보기</b> · <b>상단 노란 "전체 합계"</b>는 목적 '기타'를 제외한 전 목적 통합 합계</div>
       <div class="dp-bar"><button onclick="dpSetAll(true)">전체 펼치기</button><button onclick="dpSetAll(false)">전체 접기</button><span id="dpMeta" style="font-size:12px;color:#6b7280"></span></div>
       <div class="dp-wrap"><table class="dp" id="dpTbl"></table></div>
       <div id="dpPop"><div class="dp-ph"><span id="dpPopTitle"></span><span class="dp-x" onclick="dpHidePop()">✕</span></div><div class="dp-pb" id="dpPopBody"></div></div>
@@ -2552,7 +2597,8 @@ function generateHTML() {
             </div>
           </div>
           <div style="display:flex;gap:8px;align-items:center">
-            <button onclick="generateBitlyUrl()" style="padding:8px 20px;background:#e67e22;color:#fff;border:none;border-radius:6px;font-weight:600;cursor:pointer">Bitly 생성</button>
+            <button onclick="generateBitlyUrl()" style="padding:8px 20px;background:#e67e22;color:#fff;border:none;border-radius:6px;font-weight:600;cursor:pointer">Bitly 생성 + 테스트</button>
+            <button onclick="testUrlNow()" style="padding:8px 16px;background:#0ea5e9;color:#fff;border:none;border-radius:6px;font-weight:600;cursor:pointer">링크 테스트</button>
             <button onclick="saveUrlRecord()" style="padding:8px 20px;background:#1a73e8;color:#fff;border:none;border-radius:6px;font-weight:600;cursor:pointer">발송기록에 저장</button>
             <span id="urlStatus" style="font-size:12px;color:#666"></span>
           </div>
@@ -2657,7 +2703,7 @@ function generateHTML() {
         <div class="panel" style="padding:14px">
           <div class="panel-title">새 캠페인 등록</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
-            <div><label style="font-size:12px;color:#666">발송일시</label><input type="datetime-local" id="cmSendDate" class="filter-input" style="width:100%"></div>
+            <div><label style="font-size:12px;color:#666">발송일시</label><input type="datetime-local" id="cmSendDate" class="filter-input" style="width:100%" onchange="cmRecalcPeriod()"></div>
             <div><label style="font-size:12px;color:#666">채널</label><select id="cmChannel" class="filter-input" style="width:100%"><option>LMS</option><option>알림톡</option><option>SMS</option></select></div>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
@@ -2698,6 +2744,7 @@ function generateHTML() {
                 <button onclick="loadPrevMessage()" style="padding:3px 10px;background:#6b7280;color:#fff;border:none;border-radius:4px;font-size:11px;cursor:pointer;white-space:nowrap">불러오기</button>
               </div>
             </div>
+            <div id="cmPrevMsgStatus" style="font-size:11px;color:#7b1fa2;margin-bottom:4px;min-height:14px"></div>
             <textarea id="cmMessage" style="width:100%;height:180px;padding:10px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:inherit;resize:vertical;line-height:1.6" placeholder="[바른손카드] 메시지를 입력하세요...&#10;&#10;URL 삽입 위치에 {#URL} 입력&#10;{#이름} — 수신자 이름 치환&#10;{#A} — 쿠폰코드 치환"></textarea>
             <div style="margin-top:6px;display:flex;gap:6px;align-items:center">
               <button onclick="insertUrlVar()" style="padding:3px 10px;background:#e67e22;color:#fff;border:none;border-radius:4px;font-size:11px;font-weight:600;cursor:pointer">{#URL} 삽입</button>
@@ -2999,6 +3046,7 @@ function generateHTML() {
         <button class="btn btn-primary" id="btnQuery" onclick="doQuery()">조회하기</button>
         <button class="btn btn-success" id="btnDownload" onclick="doDownload()" disabled>엑셀 다운로드</button>
         <button class="btn" id="btnAdminDownload" onclick="doAdminDownload()" disabled style="background:#7c3aed;color:#fff;">어드민 발송양식 다운로드</button>
+        <label style="margin-left:6px;font-size:13px;color:#374151;display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" id="extAbSplit"> A/B 분할 (A·B 2파일 자동 생성)</label>
       </div>
     </div>
 
@@ -3560,13 +3608,15 @@ function dpWow(cur,prev,mode){
 function dpEsc(t){return (t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function renderDailyPerf(){
  var camps=((cdData&&cdData.campaigns)||[]).filter(function(c){return c.type!=='취소'&&c.send_date&&c.send_date.length>=10;});
- var agg={},msg={},minD=null,maxD=null,purSet={},segByPur={};
+ var agg={},gtAgg={},msg={},minD=null,maxD=null,purSet={},segByPur={};
  camps.forEach(function(c){
    var d=c.send_date.slice(0,10),p=c.purpose||'기타',s=dpSegOf(c.target);
+   var cs=c.send_count||0,cclk=dpClk(c),ccv=dpConv(c),crev=dpRev(c),ccost=c.cost||0;
    agg[p]=agg[p]||{};agg[p][s]=agg[p][s]||{};
    var cell=agg[p][s][d]=agg[p][s][d]||{s:0,clk:0,cv:0,rev:0,cost:0};
-   cell.s+=c.send_count||0;cell.clk+=dpClk(c);cell.cv+=dpConv(c);cell.rev+=dpRev(c);cell.cost+=c.cost||0;
-   var k=p+'|'+s+'|'+d;(msg[k]=msg[k]||[]).push({m:c.message,s:c.send_count||0,clk:dpClk(c),cv:dpConv(c),rev:dpRev(c)});
+   cell.s+=cs;cell.clk+=cclk;cell.cv+=ccv;cell.rev+=crev;cell.cost+=ccost;
+   if(p!=='기타'){var g=gtAgg[d]=gtAgg[d]||{s:0,clk:0,cv:0,rev:0,cost:0};g.s+=cs;g.clk+=cclk;g.cv+=ccv;g.rev+=crev;g.cost+=ccost;}
+   var k=p+'|'+s+'|'+d;(msg[k]=msg[k]||[]).push({m:c.message,s:cs,clk:cclk,cv:ccv,rev:crev});
    purSet[p]=1;(segByPur[p]=segByPur[p]||{})[s]=1;
    if(!minD||d<minD)minD=d;if(!maxD||d>maxD)maxD=d;
  });
@@ -3576,6 +3626,8 @@ function renderDailyPerf(){
  if(dpExpanded===null||dpExpanded.length!==weeks.length){dpExpanded=weeks.map(function(_,i){return i>=weeks.length-2;});}
  function gc(p,s,d){return (agg[p]&&agg[p][s]&&agg[p][s][d])||null;}
  function sumC(p,s,days){var o=null;days.forEach(function(d){var c=gc(p,s,d);if(c){o=o||{s:0,clk:0,cv:0,rev:0,cost:0};o.s+=c.s;o.clk+=c.clk;o.cv+=c.cv;o.rev+=c.rev;o.cost+=c.cost;}});return o;}
+ function gtc(d){return gtAgg[d]||null;}
+ function gtSum(days){var o=null;days.forEach(function(d){var c=gtAgg[d];if(c){o=o||{s:0,clk:0,cv:0,rev:0,cost:0};o.s+=c.s;o.clk+=c.clk;o.cv+=c.cv;o.rev+=c.rev;o.cost+=c.cost;}});return o;}
  var purs=DP_PUR.filter(function(p){return purSet[p];}).concat(Object.keys(purSet).filter(function(p){return DP_PUR.indexOf(p)<0;}));
  dpPOP=[];var popIdx={};
  function popFor(key,title,items){if(key in popIdx)return popIdx[key];var i=dpPOP.push({title:title,items:items})-1;popIdx[key]=i;return i;}
@@ -3588,6 +3640,25 @@ function renderDailyPerf(){
  });
  h1+='</tr>';h2+='</tr></thead>';
  var body='<tbody>';
+ // ── 전체 합계(목적 '기타' 제외) — 헤더 아래 고정 ──
+ DP_METRICS.forEach(function(m,mi){
+   body+='<tr class="dp-gt">';
+   if(mi===0){body+='<td class="dpc1" rowspan="'+DP_METRICS.length+'">전체 합계<br><span style="font-weight:400;font-size:10px;color:#92400e">기타 제외</span></td>';
+              body+='<td class="dpc2" rowspan="'+DP_METRICS.length+'">전 목적 통합</td>';}
+   body+='<td class="dpc3">'+m.label+'</td>';
+   weeks.forEach(function(w,wi){var open=dpExpanded[wi];
+     if(open){w.days.forEach(function(d,di){var c=gtc(d);var cls=di===0?'dp-sep':'';
+       if(!c){body+='<td class="dp-empty '+cls+'">·</td>';return;}
+       var cur=m.val(c);var pdt=dpYMD(d);pdt.setDate(pdt.getDate()-7);var pc=gtc(dpDS(pdt));var prev=pc?m.val(pc):null;
+       body+='<td class="'+cls+'"><span class="dp-val">'+m.fmt(cur)+'</span>'+dpWow(cur,prev,m.wow)+'</td>';
+     });}
+     var cw=gtSum(w.days);var scls=open?'dp-sum':'dp-sep dp-sum';
+     if(!cw){body+='<td class="dp-empty '+scls+'">·</td>';}
+     else{var cur=m.val(cw);var pw=wi>0?gtSum(weeks[wi-1].days):null;var prev=pw?m.val(pw):null;
+       body+='<td class="'+scls+'"><span class="dp-val">'+m.fmt(cur)+'</span>'+dpWow(cur,prev,m.wow)+'</td>';}
+   });
+   body+='</tr>';
+ });
  purs.forEach(function(p){
    var segs=DP_SEG.filter(function(s){return segByPur[p]&&segByPur[p][s];}).concat(Object.keys(segByPur[p]||{}).filter(function(s){return DP_SEG.indexOf(s)<0;}));
    segs.forEach(function(s,si){
@@ -4304,6 +4375,7 @@ function renderCampaignTable(){
     if(t==='완료'){bg='#dcfce7';fg='#166534';}else if(t==='예정'){bg='#dbeafe';fg='#1e40af';}else if(t==='취소'){bg='#fee2e2';fg='#991b1b';}
     var badge='<span style="display:inline-block;padding:1px 6px;border-radius:10px;font-size:9px;font-weight:600;background:'+bg+';color:'+fg+'">'+escHtml(t)+'</span>';
     if(t==='예정'||t==='완료'){badge+=' <button onclick="openEditCampaign('+gIdx+')" style="border:none;background:#dbeafe;color:#1e40af;padding:1px 6px;border-radius:4px;font-size:9px;cursor:pointer;margin-left:2px" title="캠페인 수정">수정</button>';}
+    if(t==='예정'||t==='완료'){badge+=' <button onclick="cloneCampaign('+gIdx+')" style="border:none;background:#fde047;color:#854d0e;padding:1px 6px;border-radius:4px;font-size:9px;font-weight:700;cursor:pointer;margin-left:2px" title="이 캠페인을 복제하여 메시지 작성 탭에 새로 등록">복제</button>';}
     if(t==='예정'){badge+=' <button onclick="changeCampaignStatus('+gIdx+',&#39;취소&#39;)" style="border:none;background:#fee2e2;color:#991b1b;padding:1px 6px;border-radius:4px;font-size:9px;cursor:pointer;margin-left:2px" title="취소로 변경">취소</button>';}
     else if(t==='취소'){badge+=' <button onclick="changeCampaignStatus('+gIdx+',&#39;예정&#39;)" style="border:none;background:#dbeafe;color:#1e40af;padding:1px 6px;border-radius:4px;font-size:9px;cursor:pointer;margin-left:2px" title="예정으로 복원">복원</button>';badge+=' <button onclick="deleteCampaign('+gIdx+')" style="border:none;background:#374151;color:#fff;padding:1px 6px;border-radius:4px;font-size:9px;cursor:pointer;margin-left:2px" title="캠페인 삭제">삭제</button>';}
     return badge;
@@ -4778,11 +4850,26 @@ async function generateBitlyUrl(){
     var data=await res.json();
     if(data.link){
       document.getElementById('urlBitly').value=data.link;
-      st.textContent='생성 완료!';st.style.color='#34a853';
+      st.textContent='생성 완료 · 링크 테스트 중...';st.style.color='#1a73e8';
+      await testUrlNow(data.link);
     }else{
       st.textContent='오류: '+(data.message||data.error||'알수없음');st.style.color='#dc3545';
     }
   }catch(e){st.textContent='오류: '+e.message;st.style.color='#dc3545';}
+}
+
+// Bitly/랜딩 링크가 실제로 열리는지 서버 통해 테스트 (CORS 우회)
+async function testUrlNow(link){
+  var st=document.getElementById('urlStatus');
+  var target=link||document.getElementById('urlBitly').value||document.getElementById('urlFullUtm').value;
+  if(!target){alert('테스트할 URL이 없습니다');return;}
+  st.textContent='링크 테스트 중...';st.style.color='#1a73e8';
+  try{
+    var tRes=await fetch('api/url-test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:target})});
+    var t=await tRes.json();
+    if(t.ok){st.textContent='✓ 링크 정상 (HTTP '+t.status+')';st.style.color='#34a853';}
+    else{st.textContent='⚠ 링크 응답 이상: '+(t.error||('HTTP '+t.status))+' — 원본 URL/파라미터 확인 필요';st.style.color='#e67e22';}
+  }catch(e){st.textContent='테스트 실패: '+e.message;st.style.color='#e67e22';}
 }
 
 function copyBitly(){
@@ -5103,7 +5190,13 @@ function loadPrevMessage(){
   var c=getCampaigns()[idx];if(!c||!c.message)return;
   var ta=document.getElementById('cmMessage');
   if(ta.value&&!confirm('현재 입력 내용을 덮어쓰시겠습니까?'))return;
-  ta.value=c.message;
+  // 이전 메시지의 링크(http/https·bit.ly 등)를 {#URL} 자리표시자로 자동 치환
+  var _prevMsg=c.message;
+  var _reLink=new RegExp('https?://\\\\S+','g');
+  var _linkCount=(_prevMsg.match(_reLink)||[]).length;
+  ta.value=_prevMsg.replace(_reLink,'{#URL}');
+  var _pmStatus=document.getElementById('cmPrevMsgStatus');
+  if(_pmStatus){_pmStatus.textContent=_linkCount>0?('✓ 링크 '+_linkCount+'개를 {#URL}로 치환했습니다 (Bitly 새로 생성 필요)'):'✓ 메시지를 불러왔습니다 (링크 없음)';_pmStatus.style.color='#7b1fa2';}
   document.getElementById('cmPurpose').value=c.purpose||'';
   document.getElementById('cmChannel').value=c.channel||'LMS';
   document.getElementById('cmTarget').value=c.target||'';
@@ -5146,6 +5239,107 @@ async function registerCampaign(){
     if(data.ok){alert('대시보드에 등록되었습니다 (예정 상태)');cdLoaded=false;clearCompose();cdSwitchSub('overview');}
     else{alert('등록 실패: '+(data.error||''));}
   }catch(e){alert('등록 실패: '+e.message);}
+}
+
+// ═══ 캠페인 복제 + 기간조건 요일 자동재계산 ═══
+// (이 파일은 generateHTML() 백틱 템플릿 안이라 정규식 리터럴의 백슬래시가 소실됨.
+//  정규식은 반드시 RegExp 생성자 + 4중 백슬래시로 작성한다: \\\\S → 브라우저 \S)
+var _cloneSrc=null; // {dEnd:원본 발송일−타겟종료일(일수), descLine:기간조건 설명줄}
+function _cpDate(y,mo,da){return new Date(y,mo-1,da);}
+function _cpAddDays(d,n){var x=new Date(d.getTime());x.setDate(x.getDate()+n);return x;}
+function _cpPad(n){return (n<10?'0':'')+n;}
+function _cpFmtYMD(d){return _cpPad(d.getFullYear()%100)+'.'+_cpPad(d.getMonth()+1)+'.'+_cpPad(d.getDate());}
+function _cpFmtMD(d){return _cpPad(d.getMonth()+1)+'.'+_cpPad(d.getDate());}
+function _cpSendDateFromInput(v){ // "2026-03-09T10:00" → 로컬 Date(타임존 안전)
+  if(!v)return null;var p=v.slice(0,10).split('-');
+  if(p.length<3)return null;var d=_cpDate(parseInt(p[0],10),parseInt(p[1],10),parseInt(p[2],10));
+  return isNaN(d.getTime())?null:d;
+}
+// 기간조건 텍스트에서 날짜범위 파싱: "26.03.05~03.07" / "26.03.02" / "(26.03.19~20)" / "26.04.10-11"
+function _cpParseDates(txt){
+  if(!txt)return null;
+  var b=txt.replace(new RegExp('[()]','g'),' ');
+  var m=b.match(new RegExp('(\\\\d{2})\\\\.(\\\\d{2})\\\\.(\\\\d{2})'));
+  if(!m)return null;
+  var y=2000+parseInt(m[1],10),mo=parseInt(m[2],10),da=parseInt(m[3],10);
+  var start=_cpDate(y,mo,da); // _cpDate는 1-based 월을 받는다
+  var rest=b.slice(b.indexOf(m[0])+m[0].length);
+  var em=rest.match(new RegExp('[~\\\\-]\\\\s*(?:(\\\\d{2})\\\\.)?(\\\\d{1,2})(?:\\\\.(\\\\d{2}))?'));
+  var end=start;
+  if(em){
+    var emo,eda;
+    if(em[3]){emo=parseInt(em[2],10);eda=parseInt(em[3],10);}
+    else if(em[1]){emo=parseInt(em[1],10);eda=parseInt(em[2],10);}
+    else{emo=mo;eda=parseInt(em[2],10);}
+    end=_cpDate(y,emo,eda);
+  }
+  return {start:start,end:end};
+}
+function _cpDescLine(target){
+  if(!target)return '';
+  return target.split(new RegExp('\\\\n|\\\\('))[0].trim();
+}
+function cloneCampaign(gIdx){
+  var c=getCampaigns()[gIdx];
+  if(!c){alert('복제할 캠페인을 찾을 수 없습니다');return;}
+  cdSwitchSub('compose');
+  var setV=function(id,v){var el=document.getElementById(id);if(el)el.value=(v==null?'':v);};
+  setV('cmPurpose',c.purpose);
+  setV('cmChannel',c.channel||'LMS');
+  setV('cmTarget',(c.target||'').split(String.fromCharCode(10)).join(' ')); // 단일행 input용 개행 제거
+  setV('cmDepth1',c.depth1);setV('cmDepth2',c.depth2);setV('cmDepth3',c.depth3);setV('cmDepth4',c.depth4);
+  setV('cmIncentive',c.incentive);
+  setV('cmSendCount',c.send_count||'0');
+  setV('cmSendDate','');
+  // 본문 링크 → {#URL} 복원
+  var msg=c.message||'';
+  var reLink=new RegExp('https?://\\\\S+','g');
+  var linkCount=(msg.match(reLink)||[]).length;
+  setV('cmMessage', msg.replace(reLink,'{#URL}'));
+  // 복제 컨텍스트: 원본 발송일 대비 타겟 종료일 offset 자동 추출
+  _cloneSrc=null;
+  var srcSend=_cpSendDateFromInput(c.send_date?c.send_date.slice(0,10):'');
+  var descLine=_cpDescLine(c.target);
+  if(srcSend){
+    var rng=_cpParseDates(c.target);
+    if(rng){var dEnd=Math.round((srcSend.getTime()-rng.end.getTime())/86400000);_cloneSrc={dEnd:dEnd,descLine:descLine};}
+    else{_cloneSrc={dEnd:2,descLine:descLine};}
+  }
+  // 추출이력 연동 (드롭다운 async 로드 완료를 기다렸다 적용)
+  setV('cmExtractionSplit', c.extraction_split||'all');
+  if(c.extraction_id){_cloneApplyExtraction(String(c.extraction_id),0);}
+  var pm=document.getElementById('cmPrevMsgStatus');
+  if(pm){pm.style.color='#7b1fa2';pm.textContent='✓ 복제됨 — 링크 '+linkCount+'개를 {#URL}로 복원. 발송일시를 선택하면 기간조건이 요일에 맞춰 자동 재계산됩니다. 등록 시 Bitly를 새로 생성하세요.';}
+  window.scrollTo(0,0);
+  var sd=document.getElementById('cmSendDate');if(sd){try{sd.focus();}catch(e){}}
+}
+function _cloneApplyExtraction(id,tries){
+  var sel=document.getElementById('cmExtractionId');if(!sel)return;
+  for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===id){sel.value=id;updateExtractionSplitInfo();return;}}
+  if(tries<20){setTimeout(function(){_cloneApplyExtraction(id,tries+1);},150);}
+}
+function cmRecalcPeriod(){
+  var sdEl=document.getElementById('cmSendDate');
+  var tgtEl=document.getElementById('cmTarget');
+  if(!sdEl||!tgtEl||!sdEl.value)return;
+  var send=_cpSendDateFromInput(sdEl.value);
+  if(!send)return;
+  var descLine,dEnd;
+  if(_cloneSrc){descLine=_cloneSrc.descLine;dEnd=_cloneSrc.dEnd;}
+  else{descLine=_cpDescLine(tgtEl.value);dEnd=2;}
+  if(!descLine&&!tgtEl.value)return; // 재계산할 근거 없음
+  var end=_cpAddDays(send,-dEnd);
+  var start=end;
+  var wd=send.getDay(); // 0일 1월 2화 3수 4목 5금 6토
+  var mode='단일일';
+  if(wd===1){start=_cpAddDays(end,-2);mode='월요일 뒤로 2일 확장';}       // Fri+Sat 커버
+  else if(wd===5){end=_cpAddDays(end,2);mode='금요일 앞으로 2일 확장';}   // Sat+Sun 커버
+  var dateStr=(start.getTime()===end.getTime())?_cpFmtYMD(start):(_cpFmtYMD(start)+'~'+_cpFmtMD(end));
+  // cmTarget은 단일행 input이라 개행이 소실됨 → 공백으로 결합
+  tgtEl.value=descLine?(descLine+' '+dateStr):dateStr;
+  var pm=document.getElementById('cmPrevMsgStatus');
+  var dn=['일','월','화','수','목','금','토'];
+  if(pm){pm.style.color='#7b1fa2';pm.textContent='✓ 기간조건 자동 재계산 ('+dn[wd]+'요일 · '+mode+'): '+dateStr.replace(String.fromCharCode(10),' ')+' — 필요시 직접 수정하세요.';}
 }
 
 async function openEditCampaign(gIdx){
@@ -5701,18 +5895,25 @@ function renderExtResult(data) {
 
 async function doAdminDownload() {
   var btnA = document.getElementById('btnAdminDownload');
+  var abEl = document.getElementById('extAbSplit');
+  var abSplit = abEl && abEl.checked;
   btnA.disabled = true; btnA.textContent = '다운로드 중...';
   try {
     var filters = getFilters();
     filters.campaignName = document.getElementById('extCampaignName').value || '';
-    var resp = await fetch('api/admin-download', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(filters) });
-    if (!resp.ok) throw new Error((await resp.json()).error || resp.statusText);
-    var blob = await resp.blob();
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a'); a.href = url;
-    var fname = filters.campaignName ? 'CRM_LMS 발송양식(어드민)_' + filters.campaignName + '.xlsx' : 'CRM_LMS 발송양식(어드민)_' + new Date().toISOString().slice(0,10) + '.xlsx';
-    a.download = fname;
-    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    var base = filters.campaignName || new Date().toISOString().slice(0,10);
+    var groups = abSplit ? ['A','B'] : [null];
+    for (var gi = 0; gi < groups.length; gi++) {
+      var f = Object.assign({}, filters, { abGroup: groups[gi] });
+      var resp = await fetch('api/admin-download', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(f) });
+      if (!resp.ok) throw new Error((await resp.json()).error || resp.statusText);
+      var blob = await resp.blob();
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a'); a.href = url;
+      var suffix = groups[gi] ? '_' + groups[gi] + '그룹' : '';
+      a.download = 'CRM_LMS 발송양식(어드민)_' + base + suffix + '.xlsx';
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    }
   } catch (err) { alert('다운로드 실패: ' + err.message); }
   finally { btnA.disabled = false; btnA.textContent = '어드민 발송양식 다운로드'; }
 }
@@ -6744,6 +6945,17 @@ var server = http.createServer(async function (req, res) {
       return;
     }
 
+    // URL 정상 여부 테스트 (Bitly/랜딩 링크가 실제로 열리는지 리디렉션 추적)
+    if (pathname === "/api/url-test" && req.method === "POST") {
+      var utBody = await parseBody(req);
+      var utUrl = utBody.url;
+      if (!utUrl) { res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" }); res.end(JSON.stringify({ ok: false, error: "url 필요" })); return; }
+      var utResult = await testUrlReachable(utUrl, 0);
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify(utResult));
+      return;
+    }
+
     // Bitly API: 클릭수 조회 (여러 URL 일괄)
     if (pathname === "/api/bitly-clicks" && req.method === "POST") {
       var cBody = await parseBody(req);
@@ -7151,12 +7363,22 @@ var server = http.createServer(async function (req, res) {
       var adminFilters = await parseBody(req);
       var adminResult = await executeQuery(adminFilters);
       var adminCampName = adminFilters.campaignName || ("추출_" + new Date().toISOString().slice(0, 10));
-      var adminBuf = buildAdminExcel(adminResult.rows, adminCampName);
-      // 추출 이력 저장
-      if (adminResult.rows.length > 0) {
-        addExtractionRecord(adminCampName, adminResult.rows);
+      var adminAllRows = adminResult.rows;
+      // A/B 분할: 전체 추출 기준 앞/뒤 절반 (applySplit과 동일한 ceil 로직 → 전환추적과 일치)
+      var adminAbGroup = adminFilters.abGroup;
+      var adminFileRows = adminAllRows;
+      var adminNameSuffix = "";
+      if (adminAbGroup === "A" || adminAbGroup === "B") {
+        var adminHalf = Math.ceil(adminAllRows.length / 2);
+        adminFileRows = adminAbGroup === "A" ? adminAllRows.slice(0, adminHalf) : adminAllRows.slice(adminHalf);
+        adminNameSuffix = " (" + adminAbGroup + "그룹)";
       }
-      var adminFilename = "CRM_LMS_admin_" + new Date().toISOString().slice(0, 10) + ".xlsx";
+      // 추출 이력 저장: 전체 기준 1회만 (단일 다운로드 또는 A그룹 호출 시 저장, B그룹 호출 시 중복 방지)
+      if (adminAllRows.length > 0 && adminAbGroup !== "B") {
+        addExtractionRecord(adminCampName, adminAllRows);
+      }
+      var adminBuf = buildAdminExcel(adminFileRows, adminCampName + adminNameSuffix);
+      var adminFilename = "CRM_LMS_admin_" + new Date().toISOString().slice(0, 10) + (adminAbGroup ? "_" + adminAbGroup : "") + ".xlsx";
       res.writeHead(200, {
         "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "Content-Disposition": "attachment; filename=" + encodeURIComponent(adminFilename),
