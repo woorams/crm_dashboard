@@ -2777,6 +2777,7 @@ function generateHTML() {
       <select id="filterPresetSel" style="padding:5px 8px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;min-width:200px" onchange="applyFilterPreset()"><option value="">-- 저장된 프리셋 불러오기 --</option></select>
       <span style="color:#cbd5e1">|</span>
       <input id="filterPresetName" placeholder="새 프리셋 이름" style="padding:5px 8px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;width:150px" onkeydown="if(event.key==='Enter')saveFilterPreset()">
+      <label style="font-size:11px;color:#374151;display:inline-flex;align-items:center;gap:3px;cursor:pointer;white-space:nowrap" title="체크 시, 저장한 날 대비 경과일수만큼 모든 날짜를 자동 이동합니다. 예: 오늘 샘플주문일 7/3~7/4로 저장 → 내일 불러오면 7/4~7/5. 고정 날짜로 저장하려면 체크 해제."><input type="checkbox" id="filterPresetRel" checked> 📅 날짜 오늘 기준 이동</label>
       <button class="btn" onclick="saveFilterPreset()" style="background:#0ea5e9;color:#fff;padding:5px 12px;font-size:12px">현재 조건 저장</button>
       <button class="btn" onclick="deleteFilterPreset()" style="background:#ef4444;color:#fff;padding:5px 12px;font-size:12px">삭제</button>
       <span id="filterPresetMsg" style="font-size:11px;color:#7c3aed;margin-left:2px"></span>
@@ -5871,12 +5872,18 @@ function setFilters(f){
   _setRadio('cardView',f.cardView); _setVal('cardViewOp',f.cardViewOp); _setVal('cardViewDateFrom',f.cardViewDateFrom); _setVal('cardViewDateTo',f.cardViewDateTo);
   if(f.limit!=null) _setVal('limitInput', f.limit);
 }
+// 날짜 필터 키 (상대 프리셋에서 오늘 기준으로 슬라이드할 대상)
+var PRESET_DATE_FIELDS=['regDateFrom','regDateTo','sampleDateFrom','sampleDateTo','invitationDateFrom','invitationDateTo','returnGiftDateFrom','returnGiftDateTo','miDateFrom','miDateTo','cartSampleDateFrom','cartSampleDateTo','cartInvDateFrom','cartInvDateTo','weddingDateFrom','weddingDateTo','cardViewDateFrom','cardViewDateTo'];
+function _todayYMD(){var d=new Date();var p=function(n){return(n<10?'0':'')+n;};return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate());}
+function _ymdToDate(s){if(!s)return null;var p=s.split('-');if(p.length<3)return null;var d=new Date(parseInt(p[0],10),parseInt(p[1],10)-1,parseInt(p[2],10));return isNaN(d.getTime())?null:d;}
+function _daysBetween(a,b){var da=_ymdToDate(a),db=_ymdToDate(b);if(!da||!db)return 0;return Math.round((db.getTime()-da.getTime())/86400000);}
+function _ymdShift(ymd,days){var d=_ymdToDate(ymd);if(!d)return ymd;d.setDate(d.getDate()+days);var p=function(n){return(n<10?'0':'')+n;};return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate());}
 function _getPresets(){ try{return JSON.parse(localStorage.getItem('crm_filter_presets')||'[]');}catch(e){return [];} }
 function _savePresets(list){ localStorage.setItem('crm_filter_presets', JSON.stringify(list)); }
 function loadFilterPresets(){
   var sel=document.getElementById('filterPresetSel'); if(!sel)return;
   var list=_getPresets();
-  sel.innerHTML='<option value="">-- 저장된 프리셋 불러오기 ('+list.length+') --</option>'+list.map(function(p,i){return '<option value="'+i+'">'+escHtml(p.name)+'</option>';}).join('');
+  sel.innerHTML='<option value="">-- 저장된 프리셋 불러오기 ('+list.length+') --</option>'+list.map(function(p,i){return '<option value="'+i+'">'+escHtml(p.name)+(p.relativeDates?' 🔄':'')+'</option>';}).join('');
 }
 function _presetMsg(t,color){ var m=document.getElementById('filterPresetMsg'); if(m){m.style.color=color||'#7c3aed';m.textContent=t;setTimeout(function(){if(m.textContent===t)m.textContent='';},4000);} }
 function saveFilterPreset(){
@@ -5885,18 +5892,28 @@ function saveFilterPreset(){
   if(!name){_presetMsg('프리셋 이름을 입력하세요','#ef4444');nameEl.focus();return;}
   var list=_getPresets();
   var existing=-1; for(var i=0;i<list.length;i++){if(list[i].name===name){existing=i;break;}}
-  var entry={name:name, filters:getFilters(), created:new Date().toISOString()};
+  var relEl=document.getElementById('filterPresetRel');
+  var entry={name:name, filters:getFilters(), relativeDates: relEl?relEl.checked:false, savedDate:_todayYMD(), created:new Date().toISOString()};
   if(existing>=0){ if(!confirm('같은 이름의 프리셋을 덮어쓸까요? ('+name+')'))return; list[existing]=entry; }
   else list.push(entry);
   _savePresets(list); loadFilterPresets(); nameEl.value='';
-  _presetMsg('✓ 저장됨: '+name);
+  _presetMsg('✓ 저장됨: '+name+(entry.relativeDates?' (날짜 오늘 기준 이동 🔄)':' (날짜 고정)'));
 }
 function applyFilterPreset(){
   var sel=document.getElementById('filterPresetSel');
   var i=parseInt(sel.value); if(isNaN(i))return;
   var p=_getPresets()[i]; if(!p)return;
-  setFilters(p.filters);
-  _presetMsg('✓ 불러옴: '+p.name+' — [조회하기]를 누르세요');
+  var f=p.filters, note='';
+  if(p.relativeDates && p.savedDate){
+    var delta=_daysBetween(p.savedDate, _todayYMD());
+    if(delta!==0){
+      f=Object.assign({}, f);
+      PRESET_DATE_FIELDS.forEach(function(k){ if(f[k]) f[k]=_ymdShift(f[k], delta); });
+      note=' · 날짜 '+(delta>0?'+':'')+delta+'일 이동(오늘 기준) 🔄';
+    } else { note=' · 날짜 오늘 기준 🔄'; }
+  }
+  setFilters(f);
+  _presetMsg('✓ 불러옴: '+p.name+note+' — [조회하기]를 누르세요');
 }
 function deleteFilterPreset(){
   var sel=document.getElementById('filterPresetSel');
