@@ -2296,8 +2296,8 @@ function generateHTML() {
       </div>
     </div>
 
-    <!-- 캠페인 수정 모달 -->
-    <div id="cdEditModal" class="cd-detail-modal">
+    <!-- 캠페인 수정 모달 (일괄편집 모달 위에 뜨도록 z-index 상향) -->
+    <div id="cdEditModal" class="cd-detail-modal" style="z-index:10001">
       <div class="modal-box" style="max-width:560px">
         <button class="close-btn" onclick="closeEditModal()">&times;</button>
         <div style="font-size:15px;font-weight:700;margin-bottom:14px">캠페인 수정</div>
@@ -4456,7 +4456,7 @@ function renderCampaignTable(){
     var dateBorder=(_prevDate&&curDate!==_prevDate)?'border-top:3px solid #333;':'';
     _prevDate=curDate;
     return '<tr style="'+dateBorder+'">'+
-      '<td style="text-align:center"><input type="checkbox" class="cdSelCb" value="'+c._globalIdx+'" onclick="updateBatchCloneCount()" style="cursor:pointer"></td>'+
+      '<td style="text-align:center"><input type="checkbox" class="cdSelCb" value="'+c._globalIdx+'" onclick="cdSelCbClick(event,this)" style="cursor:pointer"></td>'+
       '<td style="white-space:nowrap">'+statusBadge(c.type,c._globalIdx)+'</td>'+
       readyTd(c)+
       '<td style="white-space:nowrap;font-size:10px">'+dt+'</td>'+
@@ -4483,6 +4483,7 @@ function renderCampaignTable(){
       (function(){var c1=c.conversions&&c.conversions['1d']?Math.round(c.conversions['1d'].count)||0:0;var c2=c.conversions&&c.conversions['2d']?Math.round(c.conversions['2d'].count)||0:0;var t=Math.max(c1,c2);var r=c.send_count>0?(t/c.send_count*100).toFixed(1):'0.0';var color=t>0?'#137333':'#999';return'<td class="td-conv" style="text-align:center;min-width:42px"><div style="font-size:11px;font-weight:'+(t>0?'700':'400')+';color:'+color+'">'+t+'</div><div style="font-size:9px;color:#999">'+r+'%</div></td>';})()+
       '</tr>';
   }).join('');
+  _lastCbIdx=-1; // 재렌더 시 shift 범위 앵커 초기화
   if(typeof updateBatchCloneCount==='function')updateBatchCloneCount(); // 렌더 후 선택/카운트 동기화
 }
 
@@ -5381,6 +5382,19 @@ function cmRecalcPeriod(){
 function toggleSelAllCampaigns(cb){
   var boxes=document.querySelectorAll('.cdSelCb');
   for(var i=0;i<boxes.length;i++)boxes[i].checked=cb.checked;
+  _lastCbIdx=-1;
+  updateBatchCloneCount();
+}
+var _lastCbIdx=-1;
+// 체크박스 클릭: shift+클릭이면 직전 클릭 위치까지 범위 선택
+function cdSelCbClick(e, cb){
+  var boxes=Array.prototype.slice.call(document.querySelectorAll('.cdSelCb'));
+  var idx=boxes.indexOf(cb);
+  if(e && e.shiftKey && _lastCbIdx>=0 && _lastCbIdx<boxes.length && idx>=0){
+    var lo=Math.min(_lastCbIdx,idx), hi=Math.max(_lastCbIdx,idx);
+    for(var i=lo;i<=hi;i++){ boxes[i].checked=cb.checked; }
+  }
+  _lastCbIdx=idx;
   updateBatchCloneCount();
 }
 function updateBatchCloneCount(){
@@ -5621,7 +5635,7 @@ async function saveEditCampaign(){
   try{
     var res=await fetch('api/campaign-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     var data=await res.json();
-    if(data.ok){closeEditModal();cdLoaded=false;loadCampaignDashboard();}
+    if(data.ok){closeEditModal();cdLoaded=false;await loadCampaignDashboard();var _bm=document.getElementById('cdBatchEditModal');if(_bm&&_bm.style.display==='flex'){openBatchEditModal();}}
     else{alert('수정 실패: '+(data.error||''));}
   }catch(e){alert('수정 실패: '+e.message);}
 }
