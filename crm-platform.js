@@ -798,6 +798,95 @@ function buildAdminExcel(rows, campaignName) {
   return XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
 }
 
+// \u2500\u2500 \uBC1C\uC1A1 \uC804 \uC218\uC2E0\uAC70\uBD80 \uCCB4\uD06C \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// \uC5B4\uB4DC\uBBFC \uBC1C\uC1A1\uC591\uC2DD(message_upload + \uB300\uC0C1\uC790 raw)\uC744 \uBC1B\uC544, \uC2E4\uC81C \uBC1C\uC1A1 \uB300\uC0C1\uC758 \uD68C\uC6D0ID\uB97C
+// S2_UserInfo.chk_sms\uC640 \uB300\uC870\uD574 '\uC9C0\uAE08 \uB9C8\uCF00\uD305 SMS \uC218\uC2E0\uAC70\uBD80(N)'\uC778 \uC0AC\uB78C\uC744 \uCC3E\uB294\uB2E4.
+// (\uCD94\uCD9C \uC774\uD6C4 \uBC1C\uC1A1 \uC2DC\uC810\uAE4C\uC9C0 \uB298\uC5B4\uB09C \uC218\uC2E0\uAC70\uBD80\uB97C \uBC1C\uC1A1 \uC9C1\uC804 \uC7AC\uD655\uC778 \u2014 \uAE30\uC874 check_optout_NN.py \uC790\uB3D9\uD654)
+function _optDigits(p) { if (p == null) return null; var d = String(p).replace(/\D/g, ""); return d || null; }
+function _optHp(r) { return ["hand_phone1", "hand_phone2", "hand_phone3"].map(function (k) { return String(r[k] || "").replace(/\D/g, ""); }).join(""); }
+
+async function runOptoutCheck(buf) {
+  var wb = XLSX.read(buf, { type: "buffer" });
+  var mu = wb.Sheets["message_upload"];
+  if (!mu) throw new Error("message_upload \uC2DC\uD2B8\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uC5B4\uB4DC\uBBFC \uBC1C\uC1A1\uC591\uC2DD(.xlsx) \uD30C\uC77C\uC778\uC9C0 \uD655\uC778\uD574\uC8FC\uC138\uC694.");
+  var rawName = wb.SheetNames.filter(function (n) { return n !== "message_upload" && /raw/i.test(n); })[0]
+    || wb.SheetNames.filter(function (n) { return n !== "message_upload"; })[0];
+  var rawSheet = rawName ? wb.Sheets[rawName] : null;
+  if (!rawSheet) throw new Error("'\uB300\uC0C1\uC790 raw' \uC2DC\uD2B8\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4. [\uACE0\uAC1D\uCD94\uCD9C]\uC758 \uC5B4\uB4DC\uBBFC \uBC1C\uC1A1\uC591\uC2DD \uB2E4\uC6B4\uB85C\uB4DC\uB85C \uBC1B\uC740 \uD30C\uC77C\uC744 \uC62C\uB824\uC8FC\uC138\uC694.");
+
+  // \uBC1C\uC1A1 \uB300\uC0C1(message_upload, 5\uD589/idx4 \uBD80\uD130) \uC804\uD654\uBC88\uD638 \uC9D1\uD569
+  var muRows = XLSX.utils.sheet_to_json(mu, { header: 1, raw: false });
+  var sendPhones = {};
+  for (var i = 4; i < muRows.length; i++) {
+    var mrow = muRows[i] || [];
+    var ph = _optDigits(mrow[1]);
+    if (ph) sendPhones[ph] = true;
+  }
+  var campaignName = (muRows[1] && muRows[1][0]) ? String(muRows[1][0]).trim() : "";
+
+  // \uB300\uC0C1\uC790 raw(\uD68C\uC6D0ID \uD3EC\uD568) \uC911 \uC2E4\uC81C \uBC1C\uC1A1 \uB300\uC0C1\uB9CC
+  var rawRows = XLSX.utils.sheet_to_json(rawSheet, { header: 1, raw: false });
+  var rawSend = [];
+  for (var j = 1; j < rawRows.length; j++) {
+    var rr = rawRows[j] || [];
+    if (rr[0] == null && rr[1] == null) continue;
+    var rphone = _optDigits(rr[1]);
+    if (!rphone || !sendPhones[rphone]) continue;
+    rawSend.push({ name: rr[0] != null ? String(rr[0]).trim() : null, phone: rphone, member_id: rr[2] != null ? String(rr[2]).trim() : null, _row: rr });
+  }
+
+  // DB \uC870\uD68C: S2_UserInfo.chk_sms (500\uAC74 \uBC30\uCE58)
+  if (!pool) pool = await sql.connect(dbConfig);
+  var uids = rawSend.map(function (r) { return r.member_id; }).filter(Boolean);
+  var g = {};
+  var BATCH = 500;
+  for (var b = 0; b < uids.length; b += BATCH) {
+    var batch = uids.slice(b, b + BATCH);
+    var request = pool.request();
+    var pn = [];
+    for (var k = 0; k < batch.length; k++) { pn.push("@ou" + b + "_" + k); request.input("ou" + b + "_" + k, sql.VarChar(50), batch[k]); }
+    var q = "SELECT uid,uname,chk_sms,hand_phone1,hand_phone2,hand_phone3 FROM S2_UserInfo WITH (NOLOCK) WHERE uid IN (" + pn.join(",") + ")";
+    var rs = await request.query(q);
+    rs.recordset.forEach(function (r) { var u = String(r.uid); if (!g[u]) g[u] = []; g[u].push(r); });
+  }
+
+  var results = [];
+  rawSend.forEach(function (rec) {
+    var grp = (rec.member_id && g[rec.member_id]) ? g[rec.member_id] : [];
+    var matched = grp.filter(function (r) { return _optHp(r) === rec.phone; });
+    var use = matched.length ? matched : grp;
+    var smsVals = [];
+    use.forEach(function (r) { var v = String(r.chk_sms || "").trim().toUpperCase(); if (v && smsVals.indexOf(v) < 0) smsVals.push(v); });
+    smsVals.sort();
+    results.push({ name: rec.name, member_id: rec.member_id, phone: rec.phone, phone_match: matched.length > 0, uid_found: grp.length > 0, sms_vals: smsVals, opted_out: smsVals.indexOf("N") >= 0, _row: rec._row });
+  });
+  var optout = results.filter(function (r) { return r.opted_out; });
+  var noUid = results.filter(function (r) { return !r.uid_found; });
+
+  // \uC218\uC2E0\uAC70\uBD80 \uC81C\uC678\uD55C \uC815\uC81C \uBC1C\uC1A1\uC591\uC2DD(\uC5B4\uB4DC\uBBFC) \uC7AC\uC0DD\uC131
+  var outIds = {};
+  optout.forEach(function (r) { if (r.member_id) outIds[r.member_id] = true; });
+  var cleanedRows = rawSend.filter(function (r) { return !(r.member_id && outIds[r.member_id]); }).map(function (r) {
+    var rw = r._row || [];
+    return { "\uC774\uB984": rw[0] || "", "\uD734\uB300\uD3F0\uBC88\uD638": rw[1] || "", "\uD68C\uC6D0ID": rw[2] || "", "\uAC00\uC785\uC77C": rw[3] || "", "\uC608\uC2DD\uC77C": rw[4] || "", "\uC794\uC5EC\uC77C\uC218": rw[5] != null ? rw[5] : "", "\uC18C\uC9C0\uCFE0\uD3F0": rw[6] || "", "\uCE74\uB4DC\uC870\uD68C\uC218": rw[7] != null ? rw[7] : 0 };
+  });
+  var cleanedBuf = buildAdminExcel(cleanedRows, campaignName ? (campaignName + " (\uC218\uC2E0\uAC70\uBD80 \uC81C\uC678)") : "\uC218\uC2E0\uAC70\uBD80 \uC81C\uC678");
+
+  return {
+    ok: true,
+    campaignName: campaignName,
+    totalSend: results.length,
+    uidMatched: results.length - noUid.length,
+    optoutCount: optout.length,
+    noUidCount: noUid.length,
+    cleanedCount: cleanedRows.length,
+    optout: optout.map(function (r) { return { name: r.name, member_id: r.member_id, phone: r.phone, sms_vals: r.sms_vals, phone_match: r.phone_match }; }),
+    noUid: noUid.map(function (r) { return { name: r.name, member_id: r.member_id, phone: r.phone }; }),
+    cleanedB64: cleanedBuf.toString("base64"),
+    cleanedFilename: (campaignName || "\uBC1C\uC1A1\uB9AC\uC2A4\uD2B8") + "_\uC218\uC2E0\uAC70\uBD80\uC81C\uC678.xlsx"
+  };
+}
+
 // URL\uC774 \uC2E4\uC81C\uB85C \uC5F4\uB9AC\uB294\uC9C0 \uD655\uC778 (3xx \uB9AC\uB514\uB809\uC158 \uCD94\uC801, \uCD5C\uB300 5\uD68C). \uACB0\uACFC: {ok, status, finalUrl, error}
 function testUrlReachable(targetUrl, depth) {
   depth = depth || 0;
@@ -3097,6 +3186,23 @@ function generateHTML() {
   <!-- 탭: 080 수신거부 명단 관리                    -->
   <!-- ═══════════════════════════════════════════ -->
   <div id="tab-refuse" class="tab-content">
+
+    <div class="panel" style="border:1px solid #93c5fd;background:#eff6ff;">
+      <div class="panel-title" style="color:#1d4ed8;">✅ 발송 전 수신거부 체크 (발송 리스트 대조)</div>
+      <p style="font-size:13px;color:#6b7280;margin:6px 0 0;line-height:1.75;">
+        발송 직전 <b>어드민 발송양식</b>(message_upload + 대상자 raw 시트)을 올리면, 바른손 DB의 <b>마케팅 SMS 수신동의(chk_sms)</b>와 대조해 <b>지금 수신거부(N)</b> 상태인 사람을 찾아줍니다.<br>
+        추출 이후 늘어난 수신거부까지 <b>발송 시점 기준</b>으로 재확인 → 수신거부자를 제외한 정제 발송양식도 바로 받을 수 있습니다.
+      </p>
+      <div class="filter-row" style="margin-top:12px;">
+        <div class="filter-label">발송양식 파일</div>
+        <div class="filter-body">
+          <input type="file" id="optoutFile" accept=".xlsx" style="font-size:13px;">
+          <button class="btn btn-primary" id="btnOptoutCheck" onclick="doOptoutCheck()">수신거부 체크</button>
+          <span style="font-size:11px;color:#9ca3af;">[고객추출]의 어드민 발송양식 다운로드 파일 (.xlsx)</span>
+        </div>
+      </div>
+      <div id="optoutResult" style="margin-top:12px;"></div>
+    </div>
 
     <div class="panel" style="border:1px solid #fca5a5;background:#fef2f2;">
       <div class="panel-title" style="color:#b91c1c;">📵 080 수신거부 명단 관리</div>
@@ -6270,6 +6376,78 @@ async function clearRefuseList() {
   }
 }
 
+// ═══ 발송 전 수신거부 체크 ═══
+var _optoutCleaned = null; // {b64, filename}
+async function doOptoutCheck(){
+  var input = document.getElementById('optoutFile');
+  var f = input.files && input.files[0];
+  if (!f) { alert('발송양식 파일을 선택해주세요.'); return; }
+  var btn = document.getElementById('btnOptoutCheck');
+  btn.disabled = true; var old = btn.textContent; btn.textContent = '체크 중...';
+  var area = document.getElementById('optoutResult');
+  area.innerHTML = '<div style="color:#6b7280;font-size:13px">DB 대조 중... (건수 많으면 수 초 소요)</div>';
+  _optoutCleaned = null;
+  try {
+    var buf = await f.arrayBuffer();
+    var b64 = _abToB64(buf);
+    var res = await fetch('api/optout-check', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: f.name, dataB64: b64 })
+    });
+    var d = await res.json();
+    if (!res.ok || d.error) throw new Error(d.error || '체크 실패');
+    _optoutCleaned = { b64: d.cleanedB64, filename: d.cleanedFilename };
+    area.innerHTML = renderOptoutResult(d);
+  } catch (e) {
+    area.innerHTML = '<div style="color:#dc2626;font-size:13px">오류: ' + escHtml(e.message) + '</div>';
+  } finally {
+    btn.disabled = false; btn.textContent = old;
+  }
+}
+function _optCard(label, val, color){
+  return '<div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px 16px;min-width:96px;background:#fff"><div style="font-size:11px;color:#9ca3af">' + label + '</div><div style="font-size:22px;font-weight:700;color:' + color + '">' + val + '</div></div>';
+}
+function renderOptoutResult(d){
+  var h = '';
+  h += '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px">';
+  h += _optCard('발송 대상', d.totalSend, '#374151');
+  h += _optCard('수신거부(N)', d.optoutCount, '#dc2626');
+  h += _optCard('판정불가', d.noUidCount, '#d97706');
+  h += _optCard('제외 후 발송', d.cleanedCount, '#16a34a');
+  h += '</div>';
+  if (d.campaignName) h += '<div style="font-size:12px;color:#6b7280;margin-bottom:8px">캠페인: ' + escHtml(d.campaignName) + '</div>';
+  h += '<button class="btn btn-primary" onclick="downloadOptoutCleaned()" style="margin-bottom:14px">⬇ 수신거부 제외 발송양식 다운로드 (' + d.cleanedCount + '명)</button>';
+  if (d.optoutCount > 0) {
+    h += '<div style="font-weight:600;color:#dc2626;margin:8px 0 4px">수신거부(chk_sms=N) ' + d.optoutCount + '명 — 발송 제외 권장</div>';
+    h += '<div class="table-wrap"><table class="ext-table" style="font-size:12px"><thead><tr><th>이름</th><th>회원ID</th><th>휴대폰</th><th>chk_sms</th><th>번호일치</th></tr></thead><tbody>';
+    d.optout.forEach(function(r){
+      h += '<tr><td>' + escHtml(r.name || '') + '</td><td>' + escHtml(r.member_id || '') + '</td><td>' + escHtml(r.phone || '') + '</td><td>' + escHtml((r.sms_vals || []).join(',')) + '</td><td>' + (r.phone_match ? 'O' : '-') + '</td></tr>';
+    });
+    h += '</tbody></table></div>';
+  } else {
+    h += '<div style="color:#16a34a;font-weight:600;margin:8px 0">수신거부(N) 대상 없음 — 전원 발송 가능</div>';
+  }
+  if (d.noUidCount > 0) {
+    h += '<div style="font-weight:600;color:#d97706;margin:14px 0 4px">uid 매칭실패(판정불가) ' + d.noUidCount + '명</div>';
+    h += '<div style="font-size:11px;color:#9ca3af;margin-bottom:4px">DB에서 회원ID를 못 찾음 — 수동 확인 권장 (정제 양식엔 포함됨)</div>';
+    h += '<div class="table-wrap"><table class="ext-table" style="font-size:12px"><thead><tr><th>이름</th><th>회원ID</th><th>휴대폰</th></tr></thead><tbody>';
+    d.noUid.forEach(function(r){
+      h += '<tr><td>' + escHtml(r.name || '') + '</td><td>' + escHtml(r.member_id || '') + '</td><td>' + escHtml(r.phone || '') + '</td></tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+  return h;
+}
+function downloadOptoutCleaned(){
+  if (!_optoutCleaned || !_optoutCleaned.b64) { alert('먼저 수신거부 체크를 실행해주세요.'); return; }
+  var bin = atob(_optoutCleaned.b64); var len = bin.length; var arr = new Uint8Array(len);
+  for (var i = 0; i < len; i++) arr[i] = bin.charCodeAt(i);
+  var blob = new Blob([arr], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  var url = URL.createObjectURL(blob); var a = document.createElement('a');
+  a.href = url; a.download = _optoutCleaned.filename || '수신거부제외.xlsx';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+}
+
 // ═══ CRM 전환 추적 탭 JS ═══
 var currentCrmResult = null;
 var extHistoryList = [];
@@ -7702,6 +7880,28 @@ var server = http.createServer(async function (req, res) {
       console.log("[수신거부] 전체 삭제");
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true, total: 0 }));
+      return;
+    }
+
+    // ── 발송 전 수신거부 체크: 발송양식 업로드 → chk_sms=N 대조 ──
+    if (pathname === "/api/optout-check" && req.method === "POST") {
+      var ocBody = await parseBody(req);
+      if (!ocBody.dataB64) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "파일 데이터가 없습니다." }));
+        return;
+      }
+      try {
+        var ocBuf = Buffer.from(ocBody.dataB64, "base64");
+        var ocResult = await runOptoutCheck(ocBuf);
+        console.log("[수신거부체크] '" + (ocBody.filename || "") + "': 발송 " + ocResult.totalSend + " / 수신거부 " + ocResult.optoutCount + " / 판정불가 " + ocResult.noUidCount);
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify(ocResult));
+      } catch (e) {
+        console.log("[수신거부체크] 오류:", e.message);
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: e.message }));
+      }
       return;
     }
 
