@@ -2673,6 +2673,7 @@ function generateHTML() {
       <!-- 캠페인 선택 → URL/Bitly 생성 -->
       <div class="panel" style="padding:14px;margin-bottom:14px">
         <div class="panel-title" style="border-bottom-color:#e67e22">캠페인 URL 관리</div>
+        <div id="urlTodoBanner" style="margin:8px 0"></div>
         <div style="display:flex;gap:10px;align-items:flex-end;margin-bottom:12px">
           <div style="flex:1">
             <label style="font-size:12px;color:#666">캠페인 선택</label>
@@ -3700,7 +3701,7 @@ var cdLoaded = false;
 function cdSwitchSub(subId) {
   document.querySelectorAll('.cd-subtab').forEach(function(b){b.classList.toggle('active', b.dataset.sub===subId)});
   document.querySelectorAll('.cd-sub').forEach(function(s){s.classList.toggle('active', s.id==='cdSub-'+subId)});
-  if (subId==='records') { if(!cdLoaded){loadCampaignDashboard().then(function(){populateCampaignSelect();renderRecords();});}else{populateCampaignSelect();renderRecords();} }
+  if (subId==='records') { if(!cdLoaded){loadCampaignDashboard().then(function(){populateCampaignSelect();renderUrlTodo();renderRecords();});}else{populateCampaignSelect();renderUrlTodo();renderRecords();} }
   if (subId==='compose') { loadSavedMessages(); populatePrevMessages(); populateExtractionHistory(); }
   if (subId==='weekly-best') { if(!cdLoaded){loadCampaignDashboard().then(function(){renderWeeklyBest();renderAiContext();});}else{renderWeeklyBest();renderAiContext();} }
   if (subId==='trend') { if(!cdLoaded){loadCampaignDashboard().then(function(){renderTrend();});}else{renderTrend();} }
@@ -4835,6 +4836,46 @@ function renderKanban(){
 // ═══ URL 생성 & Bitly ═══
 var _selectedCampaignIdx = -1;
 
+// 브라우저 로컬(KST) 기준 오늘 YYYY-MM-DD (toISOString은 UTC라 자정 부근 오차)
+function _localToday(){var d=new Date();return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2);}
+
+// 오늘 발송 예정인데 URL({#URL}) 미등록인 캠페인을 상단에 표시 → 누락 방지
+function renderUrlTodo(){
+  var box=document.getElementById('urlTodoBanner'); if(!box) return;
+  var today=_localToday();
+  var mmdd=today.slice(5).split('-').join('/');
+  var camps=getCampaigns();
+  var todo=[];
+  for(var i=0;i<camps.length;i++){
+    var c=camps[i];
+    if(!c || c.type!=='예정') continue;
+    if((c.send_date||'').slice(0,10)!==today) continue;
+    var msg=c.message||'';
+    if(msg.indexOf('{#URL}')<0) continue; // URL 슬롯 없으면 등록 불필요
+    var rem=0,pos=0; while((pos=msg.indexOf('{#URL}',pos))>=0){rem++;pos+=6;}
+    todo.push({idx:i, c:c, rem:rem});
+  }
+  if(!todo.length){
+    box.innerHTML='<div style="padding:8px 12px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;font-size:12px;color:#15803d">✅ 오늘('+mmdd+') 발송 예정 캠페인 중 URL 미등록 없음</div>';
+    return;
+  }
+  var items=todo.map(function(t){
+    var tgt=(t.c.target||'').split(String.fromCharCode(10)).join(' ').slice(0,26);
+    var label=(t.c.purpose||'')+' · '+tgt+' · 미등록 '+t.rem+'개';
+    return '<button onclick="selectUrlCampaign('+t.idx+')" style="display:block;width:100%;text-align:left;margin-top:5px;padding:6px 10px;background:#fff;border:1px solid #fecaca;border-radius:5px;font-size:12px;color:#991b1b;cursor:pointer">▶ '+escHtml(label)+'</button>';
+  }).join('');
+  box.innerHTML='<div style="padding:10px 12px;background:#fef2f2;border:1px solid #fca5a5;border-radius:6px">'+
+    '<div style="font-size:13px;font-weight:700;color:#b91c1c">⚠️ 오늘('+mmdd+') 발송 예정 · URL 미등록 '+todo.length+'건 — 등록 필요</div>'+
+    items+'</div>';
+}
+// 배너에서 캠페인 선택 → 드롭다운 반영 + 폼 로드
+function selectUrlCampaign(idx){
+  var sel=document.getElementById('urlCampaignSelect');
+  if(sel){ sel.value=String(idx); onCampaignSelect(); }
+  var form=document.getElementById('urlFormArea');
+  if(form) form.scrollIntoView({behavior:'smooth',block:'center'});
+}
+
 function populateCampaignSelect(){
   var sel=document.getElementById('urlCampaignSelect');
   var camps=getCampaigns();
@@ -5020,7 +5061,7 @@ function cloneRecordToForm(idx){
   var r=_allRecordsFiltered[idx]; if(!r) return;
   document.getElementById('urlFormArea').style.display='';
   var sdEl=document.getElementById('urlSendDate');
-  if(sdEl && !sdEl.value) sdEl.value=new Date().toISOString().slice(0,10);
+  if(sdEl && !sdEl.value) sdEl.value=_localToday();
   var ymd=_urlYMD(sdEl?sdEl.value:'');
   document.getElementById('urlOriginal').value=r.original_url||r.landing_page||'';
   document.getElementById('urlSource').value=r.utm_source||'sms';
@@ -6503,7 +6544,7 @@ var currentCrmResult = null;
 var extHistoryList = [];
 
 document.getElementById('queryDate').value = new Date().toISOString().slice(0,10);
-(function(){var _u=document.getElementById('urlSendDate'); if(_u && !_u.value) _u.value=new Date().toISOString().slice(0,10);})();
+(function(){var _u=document.getElementById('urlSendDate'); if(_u && !_u.value) _u.value=_localToday();})();
 
 // 추출 이력 불러오기
 async function refreshExtHistory() {
