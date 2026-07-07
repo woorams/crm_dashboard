@@ -2825,7 +2825,7 @@ function generateHTML() {
         <div class="panel" style="padding:14px">
           <div class="panel-title">새 캠페인 등록</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
-            <div><label style="font-size:12px;color:#666">발송일시</label><input type="datetime-local" id="cmSendDate" class="filter-input" style="width:100%" onchange="cmRecalcPeriod()"></div>
+            <div><label style="font-size:12px;color:#666">발송일시</label><input type="datetime-local" id="cmSendDate" class="filter-input" style="width:100%" onchange="cmRecalcPeriod();updateCmUrlDate()"></div>
             <div><label style="font-size:12px;color:#666">채널</label><select id="cmChannel" class="filter-input" style="width:100%"><option>LMS</option><option>알림톡</option><option>SMS</option></select></div>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
@@ -2870,7 +2870,19 @@ function generateHTML() {
             <textarea id="cmMessage" style="width:100%;height:180px;padding:10px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-family:inherit;resize:vertical;line-height:1.6" placeholder="[바른손카드] 메시지를 입력하세요...&#10;&#10;URL 삽입 위치에 {#URL} 입력&#10;{#이름} — 수신자 이름 치환&#10;{#A} — 쿠폰코드 치환"></textarea>
             <div style="margin-top:6px;display:flex;gap:6px;align-items:center">
               <button onclick="insertUrlVar()" style="padding:3px 10px;background:#e67e22;color:#fff;border:none;border-radius:4px;font-size:11px;font-weight:600;cursor:pointer">{#URL} 삽입</button>
-              <span style="font-size:11px;color:#999">{#URL}은 발송기록/URL관리에서 Bitly 생성 시 자동 치환됩니다</span>
+              <span style="font-size:11px;color:#999">{#URL}을 넣고 아래에 랜딩 URL만 채우면 등록 시 Bitly가 자동 생성·삽입됩니다</span>
+            </div>
+            <div id="cmUrlSection" style="display:none;margin-top:8px;padding:10px;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                <label style="font-size:12px;font-weight:700;color:#9a3412">🔗 URL / Bitly 자동생성 <span id="cmUrlSlotInfo" style="font-weight:400;color:#c2410c"></span></label>
+                <label style="font-size:11px;color:#9a3412;cursor:pointer;display:flex;align-items:center;gap:4px"><input type="checkbox" id="cmAutoBitly" checked onchange="updateCmUrlPreview()"> 등록 시 Bitly 자동 생성·삽입</label>
+              </div>
+              <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px">
+                <div><label style="font-size:11px;color:#666">랜딩 URL (원본)</label><input type="text" id="cmLanding" class="filter-input" style="width:100%" placeholder="https://www.barunsoncard.com/..." oninput="updateCmUrlPreview()"></div>
+                <div><label style="font-size:11px;color:#666">UTM Content <span style="color:#c2410c">(날짜 자동)</span></label><input type="text" id="cmUrlContent" class="filter-input" style="width:100%" placeholder="260707_목적_내용" oninput="updateCmUrlPreview()"></div>
+              </div>
+              <input type="hidden" id="cmUrlCampaign">
+              <div id="cmUrlPreview" style="font-size:11px;color:#9a3412;margin-top:6px;word-break:break-all"></div>
             </div>
           </div>
           <div style="display:flex;gap:8px">
@@ -3702,7 +3714,7 @@ function cdSwitchSub(subId) {
   document.querySelectorAll('.cd-subtab').forEach(function(b){b.classList.toggle('active', b.dataset.sub===subId)});
   document.querySelectorAll('.cd-sub').forEach(function(s){s.classList.toggle('active', s.id==='cdSub-'+subId)});
   if (subId==='records') { if(!cdLoaded){loadCampaignDashboard().then(function(){populateCampaignSelect();renderUrlTodo();renderRecords();});}else{populateCampaignSelect();renderUrlTodo();renderRecords();} }
-  if (subId==='compose') { loadSavedMessages(); populatePrevMessages(); populateExtractionHistory(); }
+  if (subId==='compose') { loadSavedMessages(); populatePrevMessages(); populateExtractionHistory(); updateCmUrlSection(); }
   if (subId==='weekly-best') { if(!cdLoaded){loadCampaignDashboard().then(function(){renderWeeklyBest();renderAiContext();});}else{renderWeeklyBest();renderAiContext();} }
   if (subId==='trend') { if(!cdLoaded){loadCampaignDashboard().then(function(){renderTrend();});}else{renderTrend();} }
   if (subId==='daily') { if(!cdLoaded){loadCampaignDashboard().then(function(){renderDailyPerf();});}else{renderDailyPerf();} }
@@ -4890,6 +4902,22 @@ function populateCampaignSelect(){
   });
 }
 
+// 캠페인 → 매칭되는 발송기록 찾기 (비틀리/발송일/세그먼트 4단계). onCampaignSelect·cloneCampaign 공용.
+function findRecordForCampaign(c){
+  if(!c) return null;
+  var records=getRecords();
+  var _msg=c.message||''; var _bi=_msg.indexOf('bit.ly/'); var campBitly=null;
+  if(_bi>=0){var _s=_msg.lastIndexOf('http',_bi);if(_s>=0){var _e=_msg.indexOf(' ',_bi);var _en=_msg.indexOf(String.fromCharCode(10),_bi);if(_en>=0&&(_e<0||_en<_e))_e=_en;if(_e<0)_e=_msg.length;campBitly=_msg.substring(_s,_e).trim();}}
+  var campTarget=(c.target||'').trim();
+  var campDate=(c.send_date||'').slice(0,10);
+  var ri,r;
+  if(campBitly&&campTarget){for(ri=records.length-1;ri>=0;ri--){r=records[ri];if((r.bitly_url||'').trim()===campBitly&&(r.segment||'').indexOf(campTarget)>=0)return r;}}
+  if(campBitly&&campDate){for(ri=records.length-1;ri>=0;ri--){r=records[ri];if((r.bitly_url||'').trim()===campBitly&&(r.send_date||'').slice(0,10)===campDate)return r;}}
+  if(campDate){for(ri=records.length-1;ri>=0;ri--){r=records[ri];if((r.send_date||'').slice(0,10)===campDate&&(r.segment||'').indexOf(campTarget)>=0)return r;}}
+  if(campBitly){for(ri=records.length-1;ri>=0;ri--){if((records[ri].bitly_url||'').trim()===campBitly)return records[ri];}}
+  return null;
+}
+
 function onCampaignSelect(){
   var sel=document.getElementById('urlCampaignSelect');
   var idx=parseInt(sel.value);
@@ -4904,40 +4932,8 @@ function onCampaignSelect(){
   var details=[c.channel||'LMS',c.depth1||'',c.depth2||'',c.depth3||'',c.depth4||''].filter(function(x){return x&&x!=='-'&&x!=='X'}).join(' / ');
   info.innerHTML='<span style="background:#f0f4ff;padding:2px 8px;border-radius:4px">'+escHtml(c.purpose)+'</span> '+escHtml(details)+' | '+(c.send_count||0)+'건 | '+(c.incentive||'-');
   // 해당 캠페인의 발송기록에서 URL 정보 불러오기
-  var records=getRecords();
-  var matchedRecord=null;
-  var campBitly=null;var _msg=c.message||'';var _bi=_msg.indexOf('bit.ly/');
-  if(_bi>=0){var _start=_msg.lastIndexOf('http',_bi);if(_start>=0){var _end=_msg.indexOf(' ',_bi);var _endn=_msg.indexOf(String.fromCharCode(10),_bi);if(_endn>=0&&(_end<0||_endn<_end))_end=_endn;if(_end<0)_end=_msg.length;campBitly=_msg.substring(_start,_end).trim();}}
-  var campTarget=(c.target||'').trim();
   var campDate=(c.send_date||'').slice(0,10);
-  // 1차: 비틀리 + 세그먼트(target) 동시 매칭
-  if(campBitly&&campTarget){
-    for(var ri=records.length-1;ri>=0;ri--){
-      var r=records[ri];
-      if((r.bitly_url||'').trim()===campBitly&&(r.segment||'').indexOf(campTarget)>=0){matchedRecord=r;break;}
-    }
-  }
-  // 2차: 비틀리 + 발송일 매칭
-  if(!matchedRecord&&campBitly&&campDate){
-    for(var ri=records.length-1;ri>=0;ri--){
-      var r=records[ri];
-      if((r.bitly_url||'').trim()===campBitly&&(r.send_date||'').slice(0,10)===campDate){matchedRecord=r;break;}
-    }
-  }
-  // 3차: 발송일 + 세그먼트 매칭
-  if(!matchedRecord&&campDate){
-    for(var ri=records.length-1;ri>=0;ri--){
-      var r=records[ri];
-      if((r.send_date||'').slice(0,10)===campDate&&(r.segment||'').indexOf(campTarget)>=0){matchedRecord=r;break;}
-    }
-  }
-  // 4차: 비틀리만 매칭 (fallback)
-  if(!matchedRecord&&campBitly){
-    for(var ri=records.length-1;ri>=0;ri--){
-      if((records[ri].bitly_url||'').trim()===campBitly){matchedRecord=records[ri];break;}
-    }
-  }
-  console.log('[CampSelect] campBitly:', campBitly, 'matchedRecord:', matchedRecord?matchedRecord.seq:'none');
+  var matchedRecord=findRecordForCampaign(c);
   if(matchedRecord){
     console.log('[CampSelect] loading record', matchedRecord.seq, matchedRecord.bitly_url, matchedRecord.full_utm_url);
     document.getElementById('urlOriginal').value=matchedRecord.original_url||matchedRecord.landing_page||'';
@@ -5445,6 +5441,7 @@ function loadPrevMessage(){
   document.getElementById('cmIncentive').value=c.incentive||'';
   document.getElementById('cmSendCount').value=c.send_count||'0';
   sel.value='';
+  updateCmUrlSection();
 }
 function insertUrlVar(){
   var ta=document.getElementById('cmMessage');
@@ -5453,6 +5450,46 @@ function insertUrlVar(){
   ta.value=val.substring(0,start)+'{#URL}'+val.substring(end);
   ta.selectionStart=ta.selectionEnd=start+6;
   ta.focus();
+  updateCmUrlSection();
+}
+
+// ── 컴포즈 URL/Bitly 자동생성 헬퍼 ──
+function _cmUrlCount(){var m=(document.getElementById('cmMessage')||{}).value||'';var n=0,p=0;while((p=m.indexOf('{#URL}',p))>=0){n++;p+=6;}return n;}
+function _cmSendYMD(){var v=(document.getElementById('cmSendDate')||{}).value||'';return _urlYMD(v.slice(0,10));}
+function _cmBuildUtm(){
+  var base=((document.getElementById('cmLanding')||{}).value||'').trim();
+  if(!base) return '';
+  var med=((document.getElementById('cmChannel')||{}).value||'LMS').toLowerCase();
+  var camp=((document.getElementById('cmUrlCampaign')||{}).value||'').trim();
+  var content=((document.getElementById('cmUrlContent')||{}).value||'').trim();
+  var sep=base.indexOf('?')>=0?'&':'?';
+  var utm=base+sep+'utm_source=sms&utm_medium='+encodeURIComponent(med);
+  if(camp) utm+='&utm_campaign='+encodeURIComponent(camp);
+  if(content) utm+='&utm_content='+encodeURIComponent(content);
+  return utm;
+}
+function updateCmUrlSection(){
+  var sec=document.getElementById('cmUrlSection'); if(!sec) return;
+  var n=_cmUrlCount();
+  if(n<=0){ sec.style.display='none'; return; }
+  sec.style.display='';
+  var info=document.getElementById('cmUrlSlotInfo');
+  if(info) info.textContent='· 본문 {#URL} '+n+'개'+(n>1?' (첫 1개 자동, 나머지는 URL 관리에서)':'');
+  updateCmUrlDate();
+}
+function updateCmUrlDate(){
+  var el=document.getElementById('cmUrlContent'); if(!el) return;
+  var ymd=_cmSendYMD();
+  if(ymd && el.value) el.value=_swapContentDate(el.value, ymd);
+  updateCmUrlPreview();
+}
+function updateCmUrlPreview(){
+  var box=document.getElementById('cmUrlPreview'); if(!box) return;
+  var autoEl=document.getElementById('cmAutoBitly'); var auto=autoEl?autoEl.checked:true;
+  if(!auto){ box.innerHTML='<span style="color:#999">자동 생성 꺼짐 — {#URL} 그대로 등록됩니다</span>'; return; }
+  var utm=_cmBuildUtm();
+  if(!utm){ box.innerHTML='<span style="color:#dc2626">랜딩 URL을 입력하면 등록 시 Bitly가 자동 생성됩니다</span>'; return; }
+  box.innerHTML='등록 시 생성될 UTM: <span style="color:#374151">'+escHtml(utm)+'</span>';
 }
 
 async function registerCampaign(){
@@ -5471,11 +5508,45 @@ async function registerCampaign(){
     extraction_id:document.getElementById('cmExtractionId').value||'',
     extraction_split:document.getElementById('cmExtractionSplit').value||'all'
   };
+  var autoEl=document.getElementById('cmAutoBitly'); var auto=autoEl?autoEl.checked:false;
+  var landing=((document.getElementById('cmLanding')||{}).value||'').trim();
+  var slotCount=_cmUrlCount();
+  var doAuto=auto && slotCount>0 && !!landing;
   try{
     var res=await fetch('api/campaign-register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     var data=await res.json();
-    if(data.ok){alert('대시보드에 등록되었습니다 (예정 상태)');cdLoaded=false;clearCompose();cdSwitchSub('overview');}
-    else{alert('등록 실패: '+(data.error||''));}
+    if(!data.ok){alert('등록 실패: '+(data.error||''));return;}
+    if(!doAuto){
+      alert('대시보드에 등록되었습니다 (예정 상태)');
+      cdLoaded=false;clearCompose();cdSwitchSub('overview');return;
+    }
+    // 자동: Bitly 생성 → 기록 저장 + 본문 {#URL} 치환
+    var utm=_cmBuildUtm();
+    try{
+      var bres=await fetch('api/bitly-shorten',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({long_url:utm})});
+      var bdata=await bres.json();
+      if(!bdata.link) throw new Error(bdata.message||bdata.error||'Bitly 생성 실패');
+      var bitly=bdata.link;
+      cdLoaded=false; await loadCampaignDashboard();
+      var camps=getCampaigns(); var newIdx=camps.length-1;
+      for(var i=camps.length-1;i>=0;i--){ if(camps[i] && camps[i].send_date===payload.send_date && camps[i].purpose===payload.purpose && (camps[i].message||'').indexOf('{#URL}')>=0){ newIdx=i; break; } }
+      var nc=camps[newIdx]||{};
+      var recPayload={ send_date:nc.send_date||payload.send_date, site:'바',
+        segment:(nc.target||payload.target||'').split(String.fromCharCode(10)).join(' ').slice(0,50), group:'',
+        landing_page:landing.split('?')[0].split('/').pop()||'', original_url:landing,
+        utm_source:'sms', utm_medium:(payload.channel||'LMS').toLowerCase(),
+        utm_campaign:((document.getElementById('cmUrlCampaign')||{}).value||'').trim(),
+        utm_session:((document.getElementById('cmUrlContent')||{}).value||'').trim(),
+        full_utm_url:utm, bitly_url:bitly, message:nc.message||'', campaign_index:newIdx };
+      var arres=await fetch('api/add-record',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(recPayload)});
+      var ardata=await arres.json();
+      var repl=ardata.url_replaced?' · 본문 {#URL}→Bitly 치환됨':'';
+      var remainNote=slotCount>1?('\\n남은 {#URL} '+(slotCount-1)+'개는 URL 관리 탭에서 등록하세요.'):'';
+      alert('등록 완료 (예정) + Bitly 자동 생성'+repl+'\\nBitly: '+bitly+remainNote);
+    }catch(be){
+      alert('캠페인은 등록됐지만 Bitly 자동생성은 실패했습니다.\\n('+be.message+')\\n\\nURL 관리 탭에서 수동으로 생성하세요.');
+    }
+    cdLoaded=false;clearCompose();cdSwitchSub('overview');
   }catch(e){alert('등록 실패: '+e.message);}
 }
 
@@ -5546,9 +5617,18 @@ function cloneCampaign(gIdx){
   // 추출이력은 선택사항 — 자동 선택하지 않고 비워둠
   setV('cmExtractionId','');
   setV('cmExtractionSplit','all');
+  // URL 정보 carry-over: 원본 캠페인 매칭 기록에서 랜딩/utm 가져와 날짜만 오늘로 갱신
+  var _srcRec=findRecordForCampaign(c);
+  if(_srcRec){
+    setV('cmLanding', _srcRec.original_url||'');
+    setV('cmUrlCampaign', _srcRec.utm_campaign||'');
+    setV('cmUrlContent', _swapContentDate(_srcRec.utm_session||'', _cmSendYMD()));
+  } else { setV('cmLanding','');setV('cmUrlCampaign','');setV('cmUrlContent',''); }
+  updateCmUrlSection();
   var pm=document.getElementById('cmPrevMsgStatus');
   var _dateNote=_cloneSrc.ok?'기간조건 오늘 기준 재계산됨':'원본 기간조건 날짜를 자동 인식 못함 — 직접 확인 필요';
-  if(pm){pm.style.color='#7b1fa2';pm.textContent='✓ 복제됨 — 링크 '+linkCount+'개 {#URL} 복원, 발송일시=오늘 18:00, '+_dateNote+', 건수 0(추출 후 입력). 등록 시 Bitly 새로 생성하세요.';}
+  var _urlNote=_srcRec?('URL 정보 가져옴(랜딩·Content 날짜 갱신) — 등록 시 Bitly 자동 생성'):'URL 정보 없음 — 랜딩 입력 시 등록에서 Bitly 자동 생성';
+  if(pm){pm.style.color='#7b1fa2';pm.textContent='✓ 복제됨 — 링크 '+linkCount+'개 {#URL} 복원, 발송일시=오늘 18:00, '+_dateNote+', 건수 0(추출 후 입력). '+_urlNote+'.';}
   window.scrollTo(0,0);
   var sd=document.getElementById('cmSendDate');if(sd){try{sd.focus();}catch(e){}}
 }
@@ -6545,6 +6625,7 @@ var extHistoryList = [];
 
 document.getElementById('queryDate').value = new Date().toISOString().slice(0,10);
 (function(){var _u=document.getElementById('urlSendDate'); if(_u && !_u.value) _u.value=_localToday();})();
+(function(){var _cm=document.getElementById('cmMessage'); if(_cm) _cm.addEventListener('input', updateCmUrlSection);})();
 
 // 추출 이력 불러오기
 async function refreshExtHistory() {
