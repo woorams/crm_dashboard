@@ -2879,7 +2879,7 @@ function generateHTML() {
               </div>
               <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px">
                 <div><label style="font-size:11px;color:#666">랜딩 URL (원본)</label><input type="text" id="cmLanding" class="filter-input" style="width:100%" placeholder="https://www.barunsoncard.com/..." oninput="updateCmUrlPreview()"></div>
-                <div><label style="font-size:11px;color:#666">UTM Content <span style="color:#c2410c">(날짜 자동)</span></label><input type="text" id="cmUrlContent" class="filter-input" style="width:100%" placeholder="목적_내용 (날짜는 자동)" list="cmUrlContentList" autocomplete="off" oninput="updateCmUrlPreview()" onblur="updateCmUrlDate()"><datalist id="cmUrlContentList"></datalist></div>
+                <div><label style="font-size:11px;color:#666">UTM Content <span style="color:#c2410c">(텍스트만 · 날짜 자동)</span></label><input type="text" id="cmUrlContent" class="filter-input" style="width:100%" placeholder="목적_내용 (날짜 빼고 텍스트만)" list="cmUrlContentList" autocomplete="off" oninput="updateCmUrlPreview()"><datalist id="cmUrlContentList"></datalist></div>
               </div>
               <input type="hidden" id="cmUrlCampaign">
               <div id="cmUrlPreview" style="font-size:11px;color:#9a3412;margin-top:6px;word-break:break-all"></div>
@@ -5474,18 +5474,17 @@ function _cmBuildUtm(){
   if(content) utm+='&utm_content='+encodeURIComponent(content);
   return utm;
 }
-// 이전에 쓴 UTM Content 값(날짜 제외 descriptor)을 발송일 날짜 붙여 자동완성 목록으로
+// 이전에 쓴 UTM Content 값(날짜 제외 텍스트)만 중복 제거해 자동완성 목록으로
 function populateCmContentList(){
   var dl=document.getElementById('cmUrlContentList'); if(!dl) return;
-  var ymd=_cmSendYMD();
   var recs=getRecords(); var seen={}; var opts=[];
   var stripRe=new RegExp('^\\\\d{6}_');
-  for(var i=recs.length-1;i>=0 && opts.length<60;i--){
+  for(var i=recs.length-1;i>=0 && opts.length<80;i--){
     var s=(recs[i].utm_session||'').trim(); if(!s) continue;
-    var desc=s.replace(stripRe,''); if(!desc || seen[desc]) continue;
-    seen[desc]=1;
-    var val=ymd?(ymd+'_'+desc):desc;
-    opts.push('<option value="'+escHtml(val)+'"></option>');
+    var desc=s.replace(stripRe,'').trim(); if(!desc) continue;
+    var key=desc.toLowerCase(); if(seen[key]) continue; // 대소문자 무시 중복 제거
+    seen[key]=1;
+    opts.push('<option value="'+escHtml(desc)+'"></option>');
   }
   dl.innerHTML=opts.join('');
 }
@@ -5499,9 +5498,7 @@ function updateCmUrlSection(){
   updateCmUrlDate();
 }
 function updateCmUrlDate(){
-  var el=document.getElementById('cmUrlContent'); if(!el) return;
-  var ymd=_cmSendYMD();
-  if(ymd && el.value) el.value=_swapContentDate(el.value, ymd);
+  // 입력칸엔 텍스트만 유지(날짜는 프리뷰/생성 UTM에만 자동 부착). 목록·프리뷰만 갱신.
   populateCmContentList();
   updateCmUrlPreview();
 }
@@ -5662,7 +5659,7 @@ function cloneCampaign(gIdx){
   if(_srcRec){
     setV('cmLanding', _srcRec.original_url||'');
     setV('cmUrlCampaign', _srcRec.utm_campaign||'');
-    setV('cmUrlContent', _swapContentDate(_srcRec.utm_session||'', _cmSendYMD()));
+    setV('cmUrlContent', (_srcRec.utm_session||'').replace(new RegExp('^\\\\d{6}_'),'')); // 텍스트만(날짜 제외)
   } else { setV('cmLanding','');setV('cmUrlCampaign','');setV('cmUrlContent',''); }
   updateCmUrlSection();
   var pm=document.getElementById('cmPrevMsgStatus');
