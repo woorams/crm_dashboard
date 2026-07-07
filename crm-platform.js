@@ -5478,7 +5478,7 @@ function _cmBuildUtm(){
 function populateCmContentList(){
   var dl=document.getElementById('cmUrlContentList'); if(!dl) return;
   var recs=getRecords(); var seen={}; var opts=[];
-  var stripRe=new RegExp('^\\\\d{6}_');
+  var stripRe=new RegExp('^(\\\\d{4,8}_)+'); // 앞쪽 날짜형 숫자그룹(4~8자리_) 전부 제거
   for(var i=recs.length-1;i>=0 && opts.length<80;i--){
     var s=(recs[i].utm_session||'').trim(); if(!s) continue;
     var desc=s.replace(stripRe,'').trim(); if(!desc) continue;
@@ -5659,7 +5659,7 @@ function cloneCampaign(gIdx){
   if(_srcRec){
     setV('cmLanding', _srcRec.original_url||'');
     setV('cmUrlCampaign', _srcRec.utm_campaign||'');
-    setV('cmUrlContent', (_srcRec.utm_session||'').replace(new RegExp('^\\\\d{6}_'),'')); // 텍스트만(날짜 제외)
+    setV('cmUrlContent', (_srcRec.utm_session||'').replace(new RegExp('^(\\\\d{4,8}_)+'),'')); // 텍스트만(앞 날짜그룹 제외)
   } else { setV('cmLanding','');setV('cmUrlCampaign','');setV('cmUrlContent',''); }
   updateCmUrlSection();
   var pm=document.getElementById('cmPrevMsgStatus');
