@@ -2691,6 +2691,12 @@ function generateHTML() {
             </div>
             <div id="urlSlotList" style="margin-top:6px;display:flex;gap:4px;flex-wrap:wrap;font-size:10px"></div>
           </div>
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;padding:6px 10px;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px">
+            <label style="font-size:12px;color:#9a3412;font-weight:600">발송일</label>
+            <input type="date" id="urlSendDate" class="filter-input" style="width:150px" onchange="applyUrlDate()">
+            <button onclick="applyUrlDate()" style="padding:4px 10px;background:#ea580c;color:#fff;border:none;border-radius:4px;font-size:11px;font-weight:600;cursor:pointer">날짜 적용</button>
+            <span style="font-size:11px;color:#9a3412">→ UTM Content 앞 날짜(YYMMDD)를 이 날짜로 자동 치환 (목적_내용은 유지)</span>
+          </div>
           <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr;gap:8px;margin-bottom:10px">
             <div><label style="font-size:12px;color:#666">랜딩 URL (원본)</label><input type="text" id="urlOriginal" class="filter-input" style="width:100%" placeholder="https://www.barunsoncard.com/..."></div>
             <div><label style="font-size:12px;color:#666">UTM Source</label><input type="text" id="urlSource" class="filter-input" style="width:100%" value="sms"></div>
@@ -2749,7 +2755,7 @@ function generateHTML() {
             <th>번호</th><th>발송일</th><th>사이트</th><th>세그먼트</th><th>그룹</th>
             <th>랜딩페이지</th><th>Bitly URL</th>
             <th style="text-align:right;color:#1a73e8">1시간</th><th style="text-align:right;color:#1a73e8">6시간</th><th style="text-align:right;color:#1a73e8">12시간</th><th style="text-align:right;color:#1a73e8">24시간</th><th style="text-align:right;color:#1a73e8">48시간</th><th style="text-align:right;color:#1a73e8;font-weight:700">누적</th>
-            <th>메시지</th>
+            <th>메시지</th><th>복제</th>
           </tr></thead><tbody></tbody></table>
           <!-- 메시지 상세 모달 -->
           <div id="msgModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9999;justify-content:center;align-items:center">
@@ -4897,7 +4903,8 @@ function onCampaignSelect(){
     document.getElementById('urlSource').value=matchedRecord.utm_source||'sms';
     document.getElementById('urlMedium').value=matchedRecord.utm_medium||(c.channel||'LMS').toLowerCase();
     document.getElementById('urlCampaign').value=matchedRecord.utm_campaign||(c.purpose||'').split(' ').join('_').toLowerCase();
-    document.getElementById('urlSession').value=matchedRecord.utm_session||'';
+    var _cds=document.getElementById('urlSendDate'); if(_cds && campDate) _cds.value=campDate;
+    document.getElementById('urlSession').value=_swapContentDate(matchedRecord.utm_session||'', _urlYMD(campDate));
     document.getElementById('urlFullUtm').value=matchedRecord.full_utm_url||'';
     document.getElementById('urlBitly').value=matchedRecord.bitly_url||'';
     document.getElementById('urlStatus').textContent='발송기록 #'+matchedRecord.seq+' 에서 URL 정보를 불러왔습니다 (Bitly: '+(matchedRecord.bitly_url||'없음')+')';
@@ -4985,6 +4992,48 @@ function buildUtmUrl(){
   if(camp) utm+='&utm_campaign='+encodeURIComponent(camp);
   if(sess) utm+='&utm_content='+encodeURIComponent(sess);
   document.getElementById('urlFullUtm').value=utm;
+}
+
+// "2026-06-15" → "260615"
+function _urlYMD(dateStr){
+  var m=String(dateStr||'').match(new RegExp('(\\\\d{4})-(\\\\d{2})-(\\\\d{2})'));
+  return m?(m[1].slice(2)+m[2]+m[3]):'';
+}
+// utm_content 앞 YYMMDD를 ymd로 치환(없으면 앞에 붙임). 목적_내용은 유지.
+function _swapContentDate(content, ymd){
+  if(!ymd) return content;
+  var c=String(content||'');
+  var re=new RegExp('^\\\\d{6}');
+  if(re.test(c)) return c.replace(re, ymd);
+  return c?(ymd+'_'+c):ymd;
+}
+// 발송일 입력값으로 현재 UTM Content 날짜만 교체
+function applyUrlDate(){
+  var ymd=_urlYMD(document.getElementById('urlSendDate').value);
+  if(!ymd) return;
+  var el=document.getElementById('urlSession');
+  el.value=_swapContentDate(el.value, ymd);
+  buildUtmUrl();
+}
+// 발송기록 한 건을 URL 폼으로 복제(랜딩/한→영 캠페인명/목적_내용 그대로, 날짜만 발송일로 치환)
+function cloneRecordToForm(idx){
+  var r=_allRecordsFiltered[idx]; if(!r) return;
+  document.getElementById('urlFormArea').style.display='';
+  var sdEl=document.getElementById('urlSendDate');
+  if(sdEl && !sdEl.value) sdEl.value=new Date().toISOString().slice(0,10);
+  var ymd=_urlYMD(sdEl?sdEl.value:'');
+  document.getElementById('urlOriginal').value=r.original_url||r.landing_page||'';
+  document.getElementById('urlSource').value=r.utm_source||'sms';
+  document.getElementById('urlMedium').value=r.utm_medium||'lms';
+  document.getElementById('urlCampaign').value=r.utm_campaign||'';
+  document.getElementById('urlSession').value=_swapContentDate(r.utm_session||'', ymd);
+  document.getElementById('urlBitly').value='';
+  document.getElementById('urlFullUtm').value='';
+  buildUtmUrl();
+  var st=document.getElementById('urlStatus');
+  st.style.color='#c2410c';
+  st.innerHTML='기록 #'+r.seq+' 복제 — 날짜를 '+(ymd||'-')+'로 맞췄습니다. 확인 후 [Bitly 생성 + 테스트]만 누르면 됩니다.';
+  document.getElementById('urlOriginal').scrollIntoView({behavior:'smooth',block:'center'});
 }
 
 async function generateBitlyUrl(){
@@ -5243,7 +5292,8 @@ function renderRecords(resetPage) {
     var cl=r.clicks||{};
     var msgSnip=r.message?escHtml(r.message.replace(/[\\r\\n]+/g,' ')).slice(0,40)+'...':'';
     var msgBtn=r.message?'<div class="msg-preview" onclick="openMsgModal('+idx+')" style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;color:#1a73e8;font-size:11px" title="클릭하여 전체 보기">'+msgSnip+'</div>':'<span style="color:#ccc;font-size:11px">-</span>';
-    return '<tr><td>'+r.seq+'</td><td style="white-space:nowrap">'+(r.send_date||'').slice(0,16)+'</td><td>'+(r.site||'-')+'</td><td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">'+(r.segment||'-')+'</td><td>'+(r.group||'-')+'</td><td style="font-size:11px">'+(r.landing_page||'-')+'</td><td style="font-size:11px"><a href="'+(r.bitly_url||'#')+'" target="_blank">'+(r.bitly_url||'-')+'</a></td><td style="text-align:right;color:#1a73e8">'+(cl['1h']||0)+'</td><td style="text-align:right;color:#1a73e8">'+(cl['6h']||0)+'</td><td style="text-align:right;color:#1a73e8">'+(cl['12h']||0)+'</td><td style="text-align:right;color:#1a73e8">'+(cl['24h']||0)+'</td><td style="text-align:right;color:#1a73e8">'+(cl['48h']||0)+'</td><td style="text-align:right;font-weight:700">'+(cl.total||0)+'</td><td>'+msgBtn+'</td></tr>';
+    return '<tr><td>'+r.seq+'</td><td style="white-space:nowrap">'+(r.send_date||'').slice(0,16)+'</td><td>'+(r.site||'-')+'</td><td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">'+(r.segment||'-')+'</td><td>'+(r.group||'-')+'</td><td style="font-size:11px">'+(r.landing_page||'-')+'</td><td style="font-size:11px"><a href="'+(r.bitly_url||'#')+'" target="_blank">'+(r.bitly_url||'-')+'</a></td><td style="text-align:right;color:#1a73e8">'+(cl['1h']||0)+'</td><td style="text-align:right;color:#1a73e8">'+(cl['6h']||0)+'</td><td style="text-align:right;color:#1a73e8">'+(cl['12h']||0)+'</td><td style="text-align:right;color:#1a73e8">'+(cl['24h']||0)+'</td><td style="text-align:right;color:#1a73e8">'+(cl['48h']||0)+'</td><td style="text-align:right;font-weight:700">'+(cl.total||0)+'</td><td>'+msgBtn+'</td>'+
+      '<td><button onclick="cloneRecordToForm('+idx+')" style="padding:2px 8px;background:#fff7ed;color:#c2410c;border:1px solid #fed7aa;border-radius:4px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap" title="이 기록을 URL 폼으로 불러오고 날짜를 발송일로 자동 치환">복제</button></td></tr>';
   }).join('');
 }
 
@@ -6453,6 +6503,7 @@ var currentCrmResult = null;
 var extHistoryList = [];
 
 document.getElementById('queryDate').value = new Date().toISOString().slice(0,10);
+(function(){var _u=document.getElementById('urlSendDate'); if(_u && !_u.value) _u.value=new Date().toISOString().slice(0,10);})();
 
 // 추출 이력 불러오기
 async function refreshExtHistory() {
