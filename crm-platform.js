@@ -5492,6 +5492,24 @@ function updateCmUrlPreview(){
   box.innerHTML='등록 시 생성될 UTM: <span style="color:#374151">'+escHtml(utm)+'</span>';
 }
 
+// 메시지 textarea 우측 하단 리사이즈 그립을 더블클릭 → 작성 내용에 맞춰 펼치기/접기 토글
+function _cmMsgGripDblClick(e){
+  var ta=document.getElementById('cmMessage'); if(!ta||e.target!==ta) return;
+  var rect=ta.getBoundingClientRect();
+  var inGrip=(e.clientX>=rect.right-24)&&(e.clientY>=rect.bottom-24); // 우측 하단 그립 영역만
+  if(!inGrip) return; // 그립 밖 더블클릭은 기본 단어선택 유지
+  e.preventDefault();
+  if(ta.getAttribute('data-expanded')==='1'){
+    ta.style.height=ta.getAttribute('data-base-h')||'180px';
+    ta.setAttribute('data-expanded','0');
+  }else{
+    if(!ta.getAttribute('data-base-h')) ta.setAttribute('data-base-h', ta.style.height||(ta.offsetHeight+'px'));
+    ta.style.height='auto';
+    ta.style.height=(ta.scrollHeight+2)+'px'; // 내용 전체 높이에 맞춰 펼침
+    ta.setAttribute('data-expanded','1');
+  }
+}
+
 async function registerCampaign(){
   var msg=document.getElementById('cmMessage').value;
   var purpose=document.getElementById('cmPurpose').value;
@@ -6625,7 +6643,7 @@ var extHistoryList = [];
 
 document.getElementById('queryDate').value = new Date().toISOString().slice(0,10);
 (function(){var _u=document.getElementById('urlSendDate'); if(_u && !_u.value) _u.value=_localToday();})();
-(function(){var _cm=document.getElementById('cmMessage'); if(_cm) _cm.addEventListener('input', updateCmUrlSection);})();
+(function(){var _cm=document.getElementById('cmMessage'); if(_cm){ _cm.addEventListener('input', updateCmUrlSection); _cm.addEventListener('dblclick', _cmMsgGripDblClick); _cm.title='우측 하단 모서리를 더블클릭하면 작성 내용에 맞춰 펼쳐지고, 다시 더블클릭하면 원래 크기로 접힙니다'; }})();
 
 // 추출 이력 불러오기
 async function refreshExtHistory() {
