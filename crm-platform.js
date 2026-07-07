@@ -2879,7 +2879,7 @@ function generateHTML() {
               </div>
               <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px">
                 <div><label style="font-size:11px;color:#666">랜딩 URL (원본)</label><input type="text" id="cmLanding" class="filter-input" style="width:100%" placeholder="https://www.barunsoncard.com/..." oninput="updateCmUrlPreview()"></div>
-                <div><label style="font-size:11px;color:#666">UTM Content <span style="color:#c2410c">(날짜 자동)</span></label><input type="text" id="cmUrlContent" class="filter-input" style="width:100%" placeholder="260707_목적_내용" oninput="updateCmUrlPreview()"></div>
+                <div><label style="font-size:11px;color:#666">UTM Content <span style="color:#c2410c">(날짜 자동)</span></label><input type="text" id="cmUrlContent" class="filter-input" style="width:100%" placeholder="목적_내용 (날짜는 자동)" list="cmUrlContentList" autocomplete="off" oninput="updateCmUrlPreview()" onblur="updateCmUrlDate()"><datalist id="cmUrlContentList"></datalist></div>
               </div>
               <input type="hidden" id="cmUrlCampaign">
               <div id="cmUrlPreview" style="font-size:11px;color:#9a3412;margin-top:6px;word-break:break-all"></div>
@@ -5456,17 +5456,38 @@ function insertUrlVar(){
 // ── 컴포즈 URL/Bitly 자동생성 헬퍼 ──
 function _cmUrlCount(){var m=(document.getElementById('cmMessage')||{}).value||'';var n=0,p=0;while((p=m.indexOf('{#URL}',p))>=0){n++;p+=6;}return n;}
 function _cmSendYMD(){var v=(document.getElementById('cmSendDate')||{}).value||'';return _urlYMD(v.slice(0,10));}
+// UTM Content = 입력 descriptor에 발송일 날짜(YYMMDD) 자동 적용한 값 (직접 날짜 안 넣어도 붙음)
+function _cmContentDated(){
+  var raw=((document.getElementById('cmUrlContent')||{}).value||'').trim();
+  if(!raw) return '';
+  return _swapContentDate(raw, _cmSendYMD());
+}
 function _cmBuildUtm(){
   var base=((document.getElementById('cmLanding')||{}).value||'').trim();
   if(!base) return '';
   var med=((document.getElementById('cmChannel')||{}).value||'LMS').toLowerCase();
   var camp=((document.getElementById('cmUrlCampaign')||{}).value||'').trim();
-  var content=((document.getElementById('cmUrlContent')||{}).value||'').trim();
+  var content=_cmContentDated();
   var sep=base.indexOf('?')>=0?'&':'?';
   var utm=base+sep+'utm_source=sms&utm_medium='+encodeURIComponent(med);
   if(camp) utm+='&utm_campaign='+encodeURIComponent(camp);
   if(content) utm+='&utm_content='+encodeURIComponent(content);
   return utm;
+}
+// 이전에 쓴 UTM Content 값(날짜 제외 descriptor)을 발송일 날짜 붙여 자동완성 목록으로
+function populateCmContentList(){
+  var dl=document.getElementById('cmUrlContentList'); if(!dl) return;
+  var ymd=_cmSendYMD();
+  var recs=getRecords(); var seen={}; var opts=[];
+  var stripRe=new RegExp('^\\\\d{6}_');
+  for(var i=recs.length-1;i>=0 && opts.length<60;i--){
+    var s=(recs[i].utm_session||'').trim(); if(!s) continue;
+    var desc=s.replace(stripRe,''); if(!desc || seen[desc]) continue;
+    seen[desc]=1;
+    var val=ymd?(ymd+'_'+desc):desc;
+    opts.push('<option value="'+escHtml(val)+'"></option>');
+  }
+  dl.innerHTML=opts.join('');
 }
 function updateCmUrlSection(){
   var sec=document.getElementById('cmUrlSection'); if(!sec) return;
@@ -5481,6 +5502,7 @@ function updateCmUrlDate(){
   var el=document.getElementById('cmUrlContent'); if(!el) return;
   var ymd=_cmSendYMD();
   if(ymd && el.value) el.value=_swapContentDate(el.value, ymd);
+  populateCmContentList();
   updateCmUrlPreview();
 }
 function updateCmUrlPreview(){
@@ -5554,7 +5576,7 @@ async function registerCampaign(){
         landing_page:landing.split('?')[0].split('/').pop()||'', original_url:landing,
         utm_source:'sms', utm_medium:(payload.channel||'LMS').toLowerCase(),
         utm_campaign:((document.getElementById('cmUrlCampaign')||{}).value||'').trim(),
-        utm_session:((document.getElementById('cmUrlContent')||{}).value||'').trim(),
+        utm_session:_cmContentDated(),
         full_utm_url:utm, bitly_url:bitly, message:nc.message||'', campaign_index:newIdx };
       var arres=await fetch('api/add-record',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(recPayload)});
       var ardata=await arres.json();
