@@ -185,9 +185,9 @@ function saveRefuseList() {
 
 // ── 앱 설정 (캠페인 목적 등 필드값, 팀 공유) ─────────────
 // purposes: [{ name, conv }]
-// conv ∈ invitation(청첩장 결제) | sample(샘플 신청만) | sample_invitation(샘플+청첩장, 당일샘플) | returngift(답례품) | addon(부가상품)
+// conv ∈ invitation(청첩장 결제) | sample(샘플 신청만) | sample_invitation(샘플+청첩장, 당일샘플) | returngift(답례품) | addon(부가상품) | review(리뷰 작성)
 var SETTINGS_PATH = path.join(DATA_DIR, "app-settings.json");
-var VALID_CONV = ["invitation", "sample", "sample_invitation", "returngift", "addon"];
+var VALID_CONV = ["invitation", "sample", "sample_invitation", "returngift", "addon", "review"];
 var DEFAULT_PURPOSES = [
   { name: "당일 샘플 전환", conv: "sample_invitation" },
   { name: "샘플 전환", conv: "sample_invitation" },
@@ -218,6 +218,7 @@ function convTypeForPurpose(p) {
   for (var i = 0; i < appSettings.purposes.length; i++) {
     if ((appSettings.purposes[i].name || "").trim() === name) return appSettings.purposes[i].conv || "invitation";
   }
+  if (name.indexOf("리뷰") >= 0 || name.indexOf("후기") >= 0) return "review";
   if (name.indexOf("답례품") >= 0) return "returngift";
   if (name.indexOf("부가") >= 0 || name.indexOf("상품") >= 0) return "addon";
   if (name.indexOf("당일") >= 0 && name.indexOf("샘플") >= 0) return "sample_invitation";
@@ -1126,6 +1127,33 @@ async function matchRecipients(inputType, recipients) {
   return results;
 }
 
+// 리뷰 작성 여부(기간 윈도우). 고객추출 '리뷰 작성 여부' 필터와 동일 테이블(S2_UserComment).
+// reg_date 기준으로 발송 후 작성한 회원만 집계. 회원당 1행(GROUP BY uid).
+async function trackReviewOrders(memberIds, startDate, endDate) {
+  if (memberIds.length === 0) return [];
+  var results = [];
+  var BATCH = 500;
+  for (var b = 0; b < memberIds.length; b += BATCH) {
+    var batch = memberIds.slice(b, b + BATCH);
+    var request = pool.request();
+    var paramNames = [];
+    for (var i = 0; i < batch.length; i++) {
+      paramNames.push("@rc" + b + "_" + i);
+      request.input("rc" + b + "_" + i, sql.VarChar(50), batch[i]);
+    }
+    request.input("startDate_rc" + b, sql.VarChar(30), startDate.replace("T", " "));
+    request.input("endDate_rc" + b, sql.VarChar(30), endDate.replace("T", " "));
+    var q = "SELECT uid AS MEMBER_ID, CONVERT(varchar(19), MIN(reg_date), 120) AS first_date_str " +
+      "FROM S2_UserComment WITH (NOLOCK) " +
+      "WHERE uid IN (" + paramNames.join(",") + ") " +
+      "AND reg_date >= @startDate_rc" + b + " AND reg_date < @endDate_rc" + b + " " +
+      "GROUP BY uid";
+    var result = await request.query(q);
+    results = results.concat(result.recordset);
+  }
+  return results;
+}
+
 async function trackSampleOrders(memberIds, startDate, endDate) {
   if (memberIds.length === 0) return [];
   var results = [];
@@ -1275,7 +1303,7 @@ async function trackConversionRevenue(purpose, memberIds, startDate, endDate) {
   if (memberIds.length === 0) return 0;
   var p = (purpose || "").trim();
   var ctRev = convTypeForPurpose(p);
-  if (ctRev === "sample") return 0; // 샘플 신청은 무료(결제 0) → 매출 없음
+  if (ctRev === "sample" || ctRev === "review") return 0; // 샘플 신청·리뷰 작성은 결제 0 → 매출 없음
   var total = 0;
   var BATCH = 500;
   for (var b = 0; b < memberIds.length; b += BATCH) {
@@ -1327,6 +1355,8 @@ async function trackConversionInfo(purpose, memberIds, startDate, endDate) {
     add(await trackInvitationOrders(memberIds, startDate, endDate));
   } else if (ct === "sample") {
     add(await trackSampleOrders(memberIds, startDate, endDate)); // 샘플 신청만
+  } else if (ct === "review") {
+    add(await trackReviewOrders(memberIds, startDate, endDate)); // 리뷰 작성
   } else if (ct === "returngift") {
     add(await trackReturnGiftOrders(memberIds, startDate, endDate));
   } else if (ct === "addon") {
@@ -3787,7 +3817,7 @@ function generateHTML() {
       <div class="panel-title">⚙️ 캠페인 목적 관리</div>
       <p style="font-size:13px;color:#6b7280;margin:6px 0 12px;line-height:1.7">
         메시지 작성·수정·일괄편집의 <b>캠페인 목적</b> 드롭다운 목록을 관리합니다. 각 목적에 <b>전환 기준</b>을 지정하면 성과 대시보드의 전환 자동추적이 그 기준으로 집계됩니다.<br>
-        <span style="color:#9ca3af">전환 기준 — 청첩장 결제 / 샘플 신청 / 샘플 신청+청첩장 결제 / 답례품 / 부가상품</span>
+        <span style="color:#9ca3af">전환 기준 — 청첩장 결제 / 샘플 신청 / 샘플 신청+청첩장 결제 / 답례품 / 부가상품 / 리뷰 작성</span>
       </p>
       <div style="overflow-x:auto">
         <table class="cd-table" id="settingsPurposeTable" style="max-width:660px">
@@ -5634,8 +5664,8 @@ function _cmMsgGripDblClick(e){
 
 // ═══ 앱 설정: 캠페인 목적 관리 (서버 공유) ═══
 var APP_PURPOSES = [];
-var CONV_LABELS = { invitation:'청첩장 결제', sample:'샘플 신청', sample_invitation:'샘플 신청 + 청첩장 결제', returngift:'답례품', addon:'부가상품' };
-var CONV_ORDER = ['invitation','sample','sample_invitation','returngift','addon'];
+var CONV_LABELS = { invitation:'청첩장 결제', sample:'샘플 신청', sample_invitation:'샘플 신청 + 청첩장 결제', returngift:'답례품', addon:'부가상품', review:'리뷰 작성' };
+var CONV_ORDER = ['invitation','sample','sample_invitation','returngift','addon','review'];
 async function loadAppSettings(){
   try{
     var res=await fetch('api/settings'); var d=await res.json();
