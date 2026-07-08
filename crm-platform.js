@@ -183,6 +183,48 @@ function saveRefuseList() {
   }
 }
 
+// ── 앱 설정 (캠페인 목적 등 필드값, 팀 공유) ─────────────
+// purposes: [{ name, conv }]
+// conv ∈ invitation(청첩장 결제) | sample(샘플 신청만) | sample_invitation(샘플+청첩장, 당일샘플) | returngift(답례품) | addon(부가상품)
+var SETTINGS_PATH = path.join(DATA_DIR, "app-settings.json");
+var VALID_CONV = ["invitation", "sample", "sample_invitation", "returngift", "addon"];
+var DEFAULT_PURPOSES = [
+  { name: "당일 샘플 전환", conv: "sample_invitation" },
+  { name: "샘플 전환", conv: "sample_invitation" },
+  { name: "원주문 전환", conv: "invitation" },
+  { name: "답례품 전환", conv: "returngift" },
+  { name: "부가 상품 전환", conv: "addon" },
+  { name: "기타", conv: "sample_invitation" } // 기존 동작 보존: 기타=샘플+청첩장 집계
+];
+var appSettings = { purposes: DEFAULT_PURPOSES.slice() };
+
+function loadSettings() {
+  try {
+    if (fs.existsSync(SETTINGS_PATH)) {
+      var d = JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf-8"));
+      if (d && Array.isArray(d.purposes) && d.purposes.length) appSettings.purposes = d.purposes;
+      console.log("[설정] 캠페인 목적 " + appSettings.purposes.length + "개 로드");
+    }
+  } catch (e) { console.log("[설정] 로드 실패:", e.message); }
+}
+function saveSettings() {
+  try {
+    fs.writeFileSync(SETTINGS_PATH, JSON.stringify({ updatedAt: nowKstStr(), purposes: appSettings.purposes }, null, 2), "utf-8");
+  } catch (e) { console.log("[설정] 저장 실패:", e.message); }
+}
+// 목적 이름 → 전환기준(conv). 설정에 있으면 그 값, 없으면 키워드 추정(하위호환).
+function convTypeForPurpose(p) {
+  var name = (p || "").trim();
+  for (var i = 0; i < appSettings.purposes.length; i++) {
+    if ((appSettings.purposes[i].name || "").trim() === name) return appSettings.purposes[i].conv || "invitation";
+  }
+  if (name.indexOf("답례품") >= 0) return "returngift";
+  if (name.indexOf("부가") >= 0 || name.indexOf("상품") >= 0) return "addon";
+  if (name.indexOf("당일") >= 0 && name.indexOf("샘플") >= 0) return "sample_invitation";
+  if (name.indexOf("샘플") >= 0) return "sample";
+  return "invitation";
+}
+
 // 080 수신거부 파일에서 (전화번호, 등록일) 추출.
 // 지원: 레거시 .xls(실제로는 euc-kr HTML 테이블) 및 일반 .xlsx.
 // 전화/날짜는 ASCII라 HTML은 latin1 디코딩만으로 안전하게 뽑힌다(한글 헤더 무시).
@@ -1232,6 +1274,8 @@ async function trackAdditionalProductOrders(memberIds, startDate, endDate) {
 async function trackConversionRevenue(purpose, memberIds, startDate, endDate) {
   if (memberIds.length === 0) return 0;
   var p = (purpose || "").trim();
+  var ctRev = convTypeForPurpose(p);
+  if (ctRev === "sample") return 0; // 샘플 신청은 무료(결제 0) → 매출 없음
   var total = 0;
   var BATCH = 500;
   for (var b = 0; b < memberIds.length; b += BATCH) {
@@ -1261,15 +1305,48 @@ async function trackConversionRevenue(purpose, memberIds, startDate, endDate) {
       " AND EXISTS (SELECT 1 FROM custom_order_item coi WITH (NOLOCK) INNER JOIN S2_Card c2 WITH (NOLOCK) ON coi.card_seq=c2.Card_Seq WHERE coi.order_seq=co.order_seq AND c2.Card_Div IN ('C29','C04','D02'))" +
       " AND NOT EXISTS (SELECT 1 FROM custom_order_item coi2 WITH (NOLOCK) INNER JOIN S2_Card c3 WITH (NOLOCK) ON coi2.card_seq=c3.Card_Seq WHERE coi2.order_seq=co.order_seq AND c3.Card_Div='A01')";
     var parts;
-    if (p.indexOf("원주문") >= 0) parts = [invitationCO];
-    else if (p.indexOf("답례품") >= 0) parts = [rgCO, rgEO];
-    else if (p.indexOf("부가") >= 0 || p.indexOf("상품") >= 0) parts = [addonEO, addonCO, rgCO, rgEO];
-    else parts = [invitationCO]; // 당일 샘플 전환/기타: 샘플은 결제 0 → 청첩장 결제만 반영
+    if (ctRev === "returngift") parts = [rgCO, rgEO];
+    else if (ctRev === "addon") parts = [addonEO, addonCO, rgCO, rgEO];
+    else parts = [invitationCO]; // invitation / sample_invitation(당일샘플): 청첩장 결제
     var q = "SELECT COALESCE(SUM(amt),0) AS total FROM (SELECT DISTINCT src, oseq, amt FROM (" + parts.join(" UNION ALL ") + ") u) d";
     var result = await request.query(q);
     total += result.recordset[0].total || 0;
   }
   return total;
+}
+
+// 목적별 전환 정보(회원 단위 중복제거). 설정(convTypeForPurpose) 기반으로 어떤 주문을 전환으로 볼지 결정.
+// tracker들은 GROUP BY MEMBER_ID라 회원당 1행 → set 병합이 곧 순 전환 회원수.
+// 반환: { count } (합산). sample_invitation일 때는 { count, sample, invitation } 세분값도 함께 반환.
+async function trackConversionInfo(purpose, memberIds, startDate, endDate) {
+  if (!memberIds || memberIds.length === 0) return { count: 0 };
+  var ct = convTypeForPurpose(purpose);
+  var set = {};
+  function add(rows) { rows.forEach(function (r) { set[r.MEMBER_ID] = 1; }); }
+  if (ct === "invitation") {
+    add(await trackInvitationOrders(memberIds, startDate, endDate));
+  } else if (ct === "sample") {
+    add(await trackSampleOrders(memberIds, startDate, endDate)); // 샘플 신청만
+  } else if (ct === "returngift") {
+    add(await trackReturnGiftOrders(memberIds, startDate, endDate));
+  } else if (ct === "addon") {
+    add(await trackAdditionalProductOrders(memberIds, startDate, endDate));
+    add(await trackReturnGiftOrders(memberIds, startDate, endDate));
+  } else { // sample_invitation (샘플 전환·당일 샘플): 샘플 + 청첩장 결제 (각각 별도 집계도 반환)
+    var sSet = {}, iSet = {};
+    (await trackSampleOrders(memberIds, startDate, endDate)).forEach(function (r) { sSet[r.MEMBER_ID] = 1; set[r.MEMBER_ID] = 1; });
+    (await trackInvitationOrders(memberIds, startDate, endDate)).forEach(function (r) { iSet[r.MEMBER_ID] = 1; set[r.MEMBER_ID] = 1; });
+    return { count: Object.keys(set).length, sample: Object.keys(sSet).length, invitation: Object.keys(iSet).length };
+  }
+  return { count: Object.keys(set).length };
+}
+
+// 전환 저장 객체 생성: { count, rate } + (세분값 있으면) sample/invitation
+function buildConvObj(info, sendCount) {
+  var count = info ? (info.count || 0) : 0;
+  var o = { count: count, rate: sendCount > 0 ? count / sendCount : 0 };
+  if (info && info.sample != null) { o.sample = info.sample; o.invitation = info.invitation; }
+  return o;
 }
 
 async function checkSampleHistory(memberIds) {
@@ -2169,6 +2246,7 @@ function generateHTML() {
   <button class="tab-btn" data-tab="funnel" onclick="switchTab('funnel')">퍼널 대시보드</button>
   <button class="tab-btn" data-tab="kanban" onclick="switchTab('kanban')">캠페인 칸반 <span style="font-size:9px;background:#f59e0b;color:#fff;padding:1px 5px;border-radius:8px;margin-left:2px">BETA</span></button>
   <button class="tab-btn" data-tab="weekly-review" onclick="switchTab('weekly-review');initWeeklyReview()">주간 리뷰</button>
+  <button class="tab-btn" data-tab="settings" onclick="switchTab('settings');renderSettingsPurposes()">설정</button>
 </div>
 
 <div class="container">
@@ -3185,7 +3263,7 @@ function generateHTML() {
         <div class="filter-label">캠페인명</div>
         <div class="filter-body">
           <input type="text" id="extCampaignName" placeholder="예: 260316_샘플유도" style="padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;width:320px;">
-          <span style="font-size:12px;color:#888;">어드민 양식 파일명에 사용</span>
+          <span style="font-size:12px;color:#888;">어드민 양식 파일명에 사용 · 프리셋 선택 시 <b>추출일자_프리셋명</b> 자동입력</span>
         </div>
       </div>
       <div class="btn-row">
@@ -3701,10 +3779,35 @@ function generateHTML() {
     </div>
   </div>
 
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- 탭: 설정                                     -->
+  <!-- ═══════════════════════════════════════════ -->
+  <div id="tab-settings" class="tab-content">
+    <div class="panel">
+      <div class="panel-title">⚙️ 캠페인 목적 관리</div>
+      <p style="font-size:13px;color:#6b7280;margin:6px 0 12px;line-height:1.7">
+        메시지 작성·수정·일괄편집의 <b>캠페인 목적</b> 드롭다운 목록을 관리합니다. 각 목적에 <b>전환 기준</b>을 지정하면 성과 대시보드의 전환 자동추적이 그 기준으로 집계됩니다.<br>
+        <span style="color:#9ca3af">전환 기준 — 청첩장 결제 / 샘플 신청 / 샘플 신청+청첩장 결제 / 답례품 / 부가상품</span>
+      </p>
+      <div style="overflow-x:auto">
+        <table class="cd-table" id="settingsPurposeTable" style="max-width:660px">
+          <thead><tr><th style="width:60px">순서</th><th>목적 이름</th><th style="width:230px">전환 기준</th><th style="width:50px"></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+        <button onclick="addPurposeRow()" style="padding:7px 14px;background:#fff;color:#1a73e8;border:1px solid #1a73e8;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer">+ 목적 추가</button>
+        <button onclick="saveSettingsPurposes()" id="btnSaveSettings" style="padding:7px 18px;background:#1a73e8;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer">저장</button>
+        <span id="settingsStatus" style="font-size:12px"></span>
+      </div>
+      <div style="font-size:11px;color:#9ca3af;margin-top:10px">※ 저장하면 서버에 반영되어 모든 사용자에게 즉시 적용됩니다. 목적 이름을 바꾸면 전환추적 매핑도 새 이름 기준으로 동작합니다.</div>
+    </div>
+  </div>
+
 </div>
 
 <script>
-var VALID_TABS = ['campaign-dashboard', 'extraction', 'crm', 'sample-inducement', 'refuse', 'funnel', 'kanban', 'weekly-review'];
+var VALID_TABS = ['campaign-dashboard', 'extraction', 'crm', 'sample-inducement', 'refuse', 'funnel', 'kanban', 'weekly-review', 'settings'];
 
 // ═══ 캠페인 대시보드 ═══
 var cdData = null;
@@ -4605,7 +4708,7 @@ function renderCampaignTable(){
       fCR(c,'total','td-click')+
       fConvEdit(c._globalIdx,'1d',c.conversions&&c.conversions['1d'],c.send_count)+
       (function(){var c1=c.conversions&&c.conversions['1d']?Math.round(c.conversions['1d'].count)||0:0;var c2=c.conversions&&c.conversions['2d']?Math.round(c.conversions['2d'].count)||0:0;var gap=Math.max(c2-c1,0);var r=c.send_count>0?(gap/c.send_count*100).toFixed(1):'0.0';var color=gap>0?'#137333':'#999';return'<td class="td-conv" style="text-align:center;min-width:42px;cursor:pointer" onclick="editConvCell('+c._globalIdx+',&#39;2d&#39;,this)" title="24~48시간 구간 (클릭하여 수정)"><div style="font-size:11px;font-weight:'+(gap>0?'700':'400')+';color:'+color+'">'+gap+'</div><div style="font-size:9px;color:#999">'+r+'%</div></td>';})()+
-      (function(){var c1=c.conversions&&c.conversions['1d']?Math.round(c.conversions['1d'].count)||0:0;var c2=c.conversions&&c.conversions['2d']?Math.round(c.conversions['2d'].count)||0:0;var t=Math.max(c1,c2);var r=c.send_count>0?(t/c.send_count*100).toFixed(1):'0.0';var color=t>0?'#137333':'#999';return'<td class="td-conv" style="text-align:center;min-width:42px"><div style="font-size:11px;font-weight:'+(t>0?'700':'400')+';color:'+color+'">'+t+'</div><div style="font-size:9px;color:#999">'+r+'%</div></td>';})()+
+      (function(){var o2=c.conversions&&c.conversions['2d'];var c1=c.conversions&&c.conversions['1d']?Math.round(c.conversions['1d'].count)||0:0;var c2=o2?Math.round(o2.count)||0:0;var t=Math.max(c1,c2);var r=c.send_count>0?(t/c.send_count*100).toFixed(1):'0.0';var color=t>0?'#137333':'#999';var bd=(o2&&o2.sample!=null)?'<div style="font-size:8px;color:#7b1fa2;white-space:nowrap" title="샘플 신청 / 청첩장 주문 (48h 기준)">샘플 '+o2.sample+'·원 '+o2.invitation+'</div>':'';return'<td class="td-conv" style="text-align:center;min-width:42px"><div style="font-size:11px;font-weight:'+(t>0?'700':'400')+';color:'+color+'">'+t+'</div><div style="font-size:9px;color:#999">'+r+'%</div>'+bd+'</td>';})()+
       '</tr>';
   }).join('');
   _lastCbIdx=-1; // 재렌더 시 shift 범위 앵커 초기화
@@ -5529,6 +5632,82 @@ function _cmMsgGripDblClick(e){
   }
 }
 
+// ═══ 앱 설정: 캠페인 목적 관리 (서버 공유) ═══
+var APP_PURPOSES = [];
+var CONV_LABELS = { invitation:'청첩장 결제', sample:'샘플 신청', sample_invitation:'샘플 신청 + 청첩장 결제', returngift:'답례품', addon:'부가상품' };
+var CONV_ORDER = ['invitation','sample','sample_invitation','returngift','addon'];
+async function loadAppSettings(){
+  try{
+    var res=await fetch('api/settings'); var d=await res.json();
+    if(d && Array.isArray(d.purposes) && d.purposes.length) APP_PURPOSES=d.purposes;
+  }catch(e){}
+  if(!APP_PURPOSES.length) APP_PURPOSES=[{name:'당일 샘플 전환',conv:'invitation'},{name:'샘플 전환',conv:'invitation'},{name:'원주문 전환',conv:'invitation'},{name:'답례품 전환',conv:'returngift'},{name:'부가 상품 전환',conv:'addon'},{name:'기타',conv:'invitation'}];
+  applyPurposeDropdowns();
+}
+function purposeOptionsHtml(sel){
+  var h='<option value="">-- 선택 --</option>';
+  APP_PURPOSES.forEach(function(p){ var nm=p.name||''; h+='<option'+(nm===sel?' selected':'')+'>'+escHtml(nm)+'</option>'; });
+  return h;
+}
+function applyPurposeDropdowns(){
+  ['cmPurpose','edPurpose'].forEach(function(id){
+    var el=document.getElementById(id); if(!el) return;
+    var cur=el.value; el.innerHTML=purposeOptionsHtml(cur);
+  });
+}
+function _convSelectHtml(sel){
+  var h='';
+  CONV_ORDER.forEach(function(c){ h+='<option value="'+c+'"'+(c===sel?' selected':'')+'>'+escHtml(CONV_LABELS[c])+'</option>'; });
+  return h;
+}
+function renderSettingsPurposes(){
+  var tb=document.querySelector('#settingsPurposeTable tbody'); if(!tb) return;
+  tb.innerHTML=APP_PURPOSES.map(function(p,i){
+    return '<tr>'+
+      '<td style="white-space:nowrap"><button onclick="movePurposeRow('+i+',-1)" title="위로" style="border:1px solid #ddd;background:#fff;border-radius:4px;cursor:pointer;padding:1px 5px">▲</button> <button onclick="movePurposeRow('+i+',1)" title="아래로" style="border:1px solid #ddd;background:#fff;border-radius:4px;cursor:pointer;padding:1px 5px">▼</button></td>'+
+      '<td><input type="text" class="stPurName" value="'+escHtml(p.name||'')+'" style="width:100%;padding:4px 6px;border:1px solid #ddd;border-radius:4px"></td>'+
+      '<td><select class="stPurConv" style="width:100%;padding:4px 6px;border:1px solid #ddd;border-radius:4px">'+_convSelectHtml(p.conv||'invitation')+'</select></td>'+
+      '<td><button onclick="deletePurposeRow('+i+')" title="삭제" style="border:none;background:#fef2f2;color:#dc2626;border-radius:4px;cursor:pointer;padding:3px 8px">✕</button></td>'+
+      '</tr>';
+  }).join('');
+}
+function _collectSettingsRows(){
+  var arr=[];
+  document.querySelectorAll('#settingsPurposeTable tbody tr').forEach(function(tr){
+    var nm=(tr.querySelector('.stPurName').value||'').trim();
+    var cv=tr.querySelector('.stPurConv').value;
+    arr.push({name:nm, conv:cv});
+  });
+  return arr;
+}
+function addPurposeRow(){
+  APP_PURPOSES=_collectSettingsRows();
+  APP_PURPOSES.push({name:'', conv:'invitation'});
+  renderSettingsPurposes();
+  var last=document.querySelector('#settingsPurposeTable tbody tr:last-child .stPurName'); if(last) last.focus();
+}
+function deletePurposeRow(i){ APP_PURPOSES=_collectSettingsRows(); APP_PURPOSES.splice(i,1); renderSettingsPurposes(); }
+function movePurposeRow(i,dir){
+  APP_PURPOSES=_collectSettingsRows();
+  var j=i+dir; if(j<0||j>=APP_PURPOSES.length) return;
+  var t=APP_PURPOSES[i]; APP_PURPOSES[i]=APP_PURPOSES[j]; APP_PURPOSES[j]=t;
+  renderSettingsPurposes();
+}
+async function saveSettingsPurposes(){
+  var arr=_collectSettingsRows().filter(function(x){return x.name;});
+  if(!arr.length){ alert('목적을 최소 1개 이상 입력하세요'); return; }
+  var st=document.getElementById('settingsStatus'); var btn=document.getElementById('btnSaveSettings');
+  btn.disabled=true; st.style.color='#6b7280'; st.textContent='저장 중...';
+  try{
+    var res=await fetch('api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({purposes:arr})});
+    var d=await res.json();
+    if(!res.ok||d.error) throw new Error(d.error||'저장 실패');
+    APP_PURPOSES=d.purposes; renderSettingsPurposes(); applyPurposeDropdowns();
+    st.style.color='#16a34a'; st.textContent='저장 완료 · '+d.purposes.length+'개 (모든 화면 반영됨)';
+  }catch(e){ st.style.color='#dc2626'; st.textContent='오류: '+e.message; }
+  finally{ btn.disabled=false; }
+}
+
 async function registerCampaign(){
   var msg=document.getElementById('cmMessage').value;
   var purpose=document.getElementById('cmPurpose').value;
@@ -5623,7 +5802,11 @@ function _cpParseDates(txt){
 }
 function _cpDescLine(target){
   if(!target)return '';
-  return target.split(new RegExp('\\\\n|\\\\('))[0].trim();
+  var t=target.split(new RegExp('\\\\n|\\\\('))[0];
+  // 공백으로 붙은 날짜(YY.MM.DD ...)까지 라벨에 포함되면 재계산 시 날짜가 중복 누적됨.
+  // 첫 날짜부터 끝까지 제거해 순수 라벨만 남긴다. (예: "샘플 2일 경과 26.07.05" → "샘플 2일 경과")
+  t=t.replace(new RegExp('\\\\d{2}\\\\.\\\\d{2}\\\\.\\\\d{2}.*$'),'');
+  return t.trim();
 }
 function cloneCampaign(gIdx){
   var c=getCampaigns()[gIdx];
@@ -5780,7 +5963,7 @@ async function openBatchEditModal(){
     return s;
   };
   var purposeOpts=function(p){
-    var arr=['당일 샘플 전환','샘플 전환','원주문 전환','답례품 전환','부가 상품 전환','기타'];
+    var arr=(APP_PURPOSES&&APP_PURPOSES.length)?APP_PURPOSES.map(function(x){return x.name;}):['당일 샘플 전환','샘플 전환','원주문 전환','답례품 전환','부가 상품 전환','기타'];
     var s='<option value=""></option>';
     arr.forEach(function(o){s+='<option'+(o===p?' selected':'')+'>'+o+'</option>';});
     return s;
@@ -6403,7 +6586,10 @@ function applyFilterPreset(){
     } else { note=' · 날짜 오늘 기준 🔄'; }
   }
   setFilters(f);
-  _presetMsg('✓ 불러옴: '+p.name+note+' — [조회하기]를 누르세요');
+  // 캠페인명 자동입력: 추출일자(YYMMDD)_프리셋명 (예: 260708_샘플2일경과(0702)). 필요 시 직접 수정 가능.
+  var cn=document.getElementById('extCampaignName');
+  if(cn){ cn.value = _urlYMD(_localToday()) + '_' + p.name; }
+  _presetMsg('✓ 불러옴: '+p.name+note+' · 캠페인명 자동입력 — [조회하기]를 누르세요');
 }
 function deleteFilterPreset(){
   var sel=document.getElementById('filterPresetSel');
@@ -6493,7 +6679,7 @@ async function doAdminDownload() {
       var url = URL.createObjectURL(blob);
       var a = document.createElement('a'); a.href = url;
       var suffix = groups[gi] ? '_' + groups[gi] + '그룹' : '';
-      a.download = 'CRM_LMS 발송양식(어드민)_' + base + suffix + '.xlsx';
+      a.download = base + suffix + '.xlsx'; // 접두어 없이 입력(캠페인명) 그대로
       document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
     }
   } catch (err) { alert('다운로드 실패: ' + err.message); }
@@ -6663,6 +6849,7 @@ var extHistoryList = [];
 document.getElementById('queryDate').value = new Date().toISOString().slice(0,10);
 (function(){var _u=document.getElementById('urlSendDate'); if(_u && !_u.value) _u.value=_localToday();})();
 (function(){var _cm=document.getElementById('cmMessage'); if(_cm){ _cm.addEventListener('input', updateCmUrlSection); _cm.addEventListener('dblclick', _cmMsgGripDblClick); _cm.title='우측 하단 모서리를 더블클릭하면 작성 내용에 맞춰 펼쳐지고, 다시 더블클릭하면 원래 크기로 접힙니다'; }})();
+(function(){ if(typeof loadAppSettings==='function') loadAppSettings(); })();
 
 // 추출 이력 불러오기
 async function refreshExtHistory() {
@@ -8093,6 +8280,42 @@ var server = http.createServer(async function (req, res) {
       return;
     }
 
+    // ── 앱 설정: 캠페인 목적 목록 조회/저장 ──
+    if (pathname === "/api/settings" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ purposes: appSettings.purposes }));
+      return;
+    }
+    if (pathname === "/api/settings" && req.method === "POST") {
+      var sBody = await parseBody(req);
+      if (!sBody || !Array.isArray(sBody.purposes)) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "purposes 배열이 필요합니다." }));
+        return;
+      }
+      var seenNm = {};
+      var clean = [];
+      sBody.purposes.forEach(function (x) {
+        if (!x) return;
+        var nm = String(x.name || "").trim();
+        if (!nm || seenNm[nm]) return; // 빈 이름·중복 제외
+        seenNm[nm] = 1;
+        var conv = VALID_CONV.indexOf(x.conv) >= 0 ? x.conv : "invitation";
+        clean.push({ name: nm, conv: conv });
+      });
+      if (!clean.length) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "최소 1개 이상의 목적이 필요합니다." }));
+        return;
+      }
+      appSettings.purposes = clean;
+      saveSettings();
+      console.log("[설정] 캠페인 목적 저장: " + clean.length + "개");
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, purposes: appSettings.purposes }));
+      return;
+    }
+
     // ── 발송 전 수신거부 체크: 발송양식 업로드 → chk_sms=N 대조 ──
     if (pathname === "/api/optout-check" && req.method === "POST") {
       var ocBody = await parseBody(req);
@@ -8149,7 +8372,7 @@ var server = http.createServer(async function (req, res) {
       if (!sendDateTime || sendDateTime.length < 10) { res.writeHead(400); res.end(JSON.stringify({ error: "발송일이 없습니다" })); return; }
       try {
         var purpose = (camp.purpose || "").trim();
-        var conv1d = 0, conv2d = 0;
+        var conv1d = 0, conv2d = 0, cinfo1 = { count: 0 }, cinfo2 = { count: 0 };
         // 발송 시각 기준 24시간/48시간 윈도우
         var end24h = addHours(sendDateTime, 24);
         var end48h = addHours(sendDateTime, 48);
@@ -8160,42 +8383,9 @@ var server = http.createServer(async function (req, res) {
           // 현재 시각과 윈도우 끝 중 더 이른 시각을 실제 endDate로 사용 (미래 범위 방지)
           var eff24h = now < end24h ? now : end24h;
           var eff48h = now < end48h ? now : end48h;
-          if (purpose.indexOf("샘플") >= 0 && purpose.indexOf("원주문") < 0 && purpose.indexOf("답례품") < 0) {
-            // 당일 샘플 전환 → 샘플 + 청첩장 모두 트래킹 (중복 제거)
-            var ds1 = await trackSampleOrders(memberIds, sendDateTime, eff24h);
-            var do1 = await trackInvitationOrders(memberIds, sendDateTime, eff24h);
-            var dset1 = {}; ds1.forEach(function(r){dset1[r.MEMBER_ID]=1;}); do1.forEach(function(r){dset1[r.MEMBER_ID]=1;});
-            conv1d = Object.keys(dset1).length;
-            var ds2 = await trackSampleOrders(memberIds, sendDateTime, eff48h);
-            var do2 = await trackInvitationOrders(memberIds, sendDateTime, eff48h);
-            var dset2 = {}; ds2.forEach(function(r){dset2[r.MEMBER_ID]=1;}); do2.forEach(function(r){dset2[r.MEMBER_ID]=1;});
-            conv2d = Object.keys(dset2).length;
-          } else if (purpose.indexOf("원주문") >= 0) {
-            conv1d = (await trackInvitationOrders(memberIds, sendDateTime, eff24h)).length;
-            conv2d = (await trackInvitationOrders(memberIds, sendDateTime, eff48h)).length;
-          } else if (purpose.indexOf("답례품") >= 0) {
-            conv1d = (await trackReturnGiftOrders(memberIds, sendDateTime, eff24h)).length;
-            conv2d = (await trackReturnGiftOrders(memberIds, sendDateTime, eff48h)).length;
-          } else if (purpose.indexOf("부가") >= 0 || purpose.indexOf("상품") >= 0) {
-            // 부가상품 + 답례품 모두 트래킹 (중복 제거)
-            var ap1 = await trackAdditionalProductOrders(memberIds, sendDateTime, eff24h);
-            var rg1 = await trackReturnGiftOrders(memberIds, sendDateTime, eff24h);
-            var apset1 = {}; ap1.forEach(function(r){apset1[r.MEMBER_ID]=1;}); rg1.forEach(function(r){apset1[r.MEMBER_ID]=1;});
-            conv1d = Object.keys(apset1).length;
-            var ap2 = await trackAdditionalProductOrders(memberIds, sendDateTime, eff48h);
-            var rg2 = await trackReturnGiftOrders(memberIds, sendDateTime, eff48h);
-            var apset2 = {}; ap2.forEach(function(r){apset2[r.MEMBER_ID]=1;}); rg2.forEach(function(r){apset2[r.MEMBER_ID]=1;});
-            conv2d = Object.keys(apset2).length;
-          } else {
-            var ms1 = await trackSampleOrders(memberIds, sendDateTime, eff24h);
-            var mo1 = await trackInvitationOrders(memberIds, sendDateTime, eff24h);
-            var set1 = {}; ms1.forEach(function(r){set1[r.MEMBER_ID]=1;}); mo1.forEach(function(r){set1[r.MEMBER_ID]=1;});
-            conv1d = Object.keys(set1).length;
-            var ms2 = await trackSampleOrders(memberIds, sendDateTime, eff48h);
-            var mo2 = await trackInvitationOrders(memberIds, sendDateTime, eff48h);
-            var set2 = {}; ms2.forEach(function(r){set2[r.MEMBER_ID]=1;}); mo2.forEach(function(r){set2[r.MEMBER_ID]=1;});
-            conv2d = Object.keys(set2).length;
-          }
+          cinfo1 = await trackConversionInfo(purpose, memberIds, sendDateTime, eff24h);
+          cinfo2 = await trackConversionInfo(purpose, memberIds, sendDateTime, eff48h);
+          conv1d = cinfo1.count; conv2d = cinfo2.count;
         }
         // 결제금액(매출): 전환 주문의 settle_price 합계 (샘플 제외)
         var rev1d = 0, rev2d = 0;
@@ -8205,8 +8395,8 @@ var server = http.createServer(async function (req, res) {
         }
         var sendCount = camp.send_count || memberIds.length;
         camp.conversions = {
-          "1d": { count: conv1d, rate: sendCount > 0 ? conv1d / sendCount : 0 },
-          "2d": { count: conv2d, rate: sendCount > 0 ? conv2d / sendCount : 0 }
+          "1d": buildConvObj(cinfo1, sendCount),
+          "2d": buildConvObj(cinfo2, sendCount)
         };
         camp.revenue = { "1d": rev1d, "2d": rev2d };
         fs.writeFileSync(cdPathAc, JSON.stringify(cdDataAc, null, 2), "utf-8");
@@ -8244,7 +8434,7 @@ var server = http.createServer(async function (req, res) {
         if (!sd || sd.length < 10) continue;
         try {
           var purpose2 = (c.purpose || "").trim();
-          var c1d = 0, c2d = 0;
+          var c1d = 0, c2d = 0, binfo1 = { count: 0 }, binfo2 = { count: 0 };
           var e24h = addHours(sd, 24);
           var e48h = addHours(sd, 48);
           var now2 = nowKstStr();
@@ -8252,40 +8442,9 @@ var server = http.createServer(async function (req, res) {
           if (canQ) {
             var ef24 = now2 < e24h ? now2 : e24h;
             var ef48 = now2 < e48h ? now2 : e48h;
-            if (purpose2.indexOf("샘플") >= 0 && purpose2.indexOf("원주문") < 0 && purpose2.indexOf("답례품") < 0) {
-              var bs1 = await trackSampleOrders(mIds, sd, ef24);
-              var bo1 = await trackInvitationOrders(mIds, sd, ef24);
-              var bset1 = {}; bs1.forEach(function(r){bset1[r.MEMBER_ID]=1;}); bo1.forEach(function(r){bset1[r.MEMBER_ID]=1;});
-              c1d = Object.keys(bset1).length;
-              var bs2 = await trackSampleOrders(mIds, sd, ef48);
-              var bo2 = await trackInvitationOrders(mIds, sd, ef48);
-              var bset2 = {}; bs2.forEach(function(r){bset2[r.MEMBER_ID]=1;}); bo2.forEach(function(r){bset2[r.MEMBER_ID]=1;});
-              c2d = Object.keys(bset2).length;
-            } else if (purpose2.indexOf("원주문") >= 0) {
-              c1d = (await trackInvitationOrders(mIds, sd, ef24)).length;
-              c2d = (await trackInvitationOrders(mIds, sd, ef48)).length;
-            } else if (purpose2.indexOf("답례품") >= 0) {
-              c1d = (await trackReturnGiftOrders(mIds, sd, ef24)).length;
-              c2d = (await trackReturnGiftOrders(mIds, sd, ef48)).length;
-            } else if (purpose2.indexOf("부가") >= 0 || purpose2.indexOf("상품") >= 0) {
-              var bap1 = await trackAdditionalProductOrders(mIds, sd, ef24);
-              var brg1 = await trackReturnGiftOrders(mIds, sd, ef24);
-              var bapset1 = {}; bap1.forEach(function(r){bapset1[r.MEMBER_ID]=1;}); brg1.forEach(function(r){bapset1[r.MEMBER_ID]=1;});
-              c1d = Object.keys(bapset1).length;
-              var bap2 = await trackAdditionalProductOrders(mIds, sd, ef48);
-              var brg2 = await trackReturnGiftOrders(mIds, sd, ef48);
-              var bapset2 = {}; bap2.forEach(function(r){bapset2[r.MEMBER_ID]=1;}); brg2.forEach(function(r){bapset2[r.MEMBER_ID]=1;});
-              c2d = Object.keys(bapset2).length;
-            } else {
-              var ss1 = await trackSampleOrders(mIds, sd, ef24);
-              var so1 = await trackInvitationOrders(mIds, sd, ef24);
-              var st1 = {}; ss1.forEach(function(r){st1[r.MEMBER_ID]=1;}); so1.forEach(function(r){st1[r.MEMBER_ID]=1;});
-              c1d = Object.keys(st1).length;
-              var ss2 = await trackSampleOrders(mIds, sd, ef48);
-              var so2 = await trackInvitationOrders(mIds, sd, ef48);
-              var st2 = {}; ss2.forEach(function(r){st2[r.MEMBER_ID]=1;}); so2.forEach(function(r){st2[r.MEMBER_ID]=1;});
-              c2d = Object.keys(st2).length;
-            }
+            binfo1 = await trackConversionInfo(purpose2, mIds, sd, ef24);
+            binfo2 = await trackConversionInfo(purpose2, mIds, sd, ef48);
+            c1d = binfo1.count; c2d = binfo2.count;
           }
           var rv1 = 0, rv2 = 0;
           if (canQ) {
@@ -8294,8 +8453,8 @@ var server = http.createServer(async function (req, res) {
           }
           var sc = c.send_count || mIds.length;
           c.conversions = {
-            "1d": { count: c1d, rate: sc > 0 ? c1d / sc : 0 },
-            "2d": { count: c2d, rate: sc > 0 ? c2d / sc : 0 }
+            "1d": buildConvObj(binfo1, sc),
+            "2d": buildConvObj(binfo2, sc)
           };
           c.revenue = { "1d": rv1, "2d": rv2 };
           updated++;
@@ -9207,6 +9366,7 @@ async function start() {
   loadCampaignHistory();
   loadExtractionHistory();
   loadRefuseList();
+  loadSettings();
 
   // HTTP 서버를 먼저 listen → /health 가 DB 연결과 무관하게 즉시 응답(배포 헬스체크 통과).
   server.listen(PORT, "0.0.0.0", function () {
