@@ -70,6 +70,8 @@ var dbConfig = {
 };
 
 var pool = null;
+// 전환수 자동 조회(일괄) 백그라운드 작업 상태 — 프록시 타임아웃 회피용
+var autoConvJob = { running: false, startedAt: null, finishedAt: null, total: 0, done: 0, updated: 0, attempted: 0, errors: 0, error: null };
 var cartSchema = { available: false, memberCol: null, cardSeqCol: null, dateCol: null };
 var campaignHistory = [];
 var CAMPAIGN_HISTORY_PATH = path.join(DATA_DIR, "campaign-history.json");
@@ -1377,6 +1379,105 @@ function buildConvObj(info, sendCount) {
   var o = { count: count, rate: sendCount > 0 ? count / sendCount : 0 };
   if (info && info.sample != null) { o.sample = info.sample; o.invitation = info.invitation; }
   return o;
+}
+
+// ── 전환수 자동 조회(일괄) 백그라운드 작업 ──
+// 308개 캠페인 × 4쿼리를 동기 처리하면 수분이 걸려 리버스 프록시가 504(HTML)를 반환하고
+// 프론트의 res.json()이 "Unexpected token <"로 터진다. 그래서 즉시 응답 + 백그라운드 실행 + 폴링으로 바꾼다.
+function acApplySplit(recipients, split) {
+  if (!split || split === "all") return recipients;
+  var half = Math.ceil(recipients.length / 2);
+  if (split === "A") return recipients.slice(0, half);
+  if (split === "B") return recipients.slice(half);
+  return recipients;
+}
+
+// 캠페인 1건 처리. 반환: { updated:0|1, attempted:0|1, error:null|Error }
+async function acProcessCampaign(c) {
+  if (!c.extraction_id || c.type === "취소") return { updated: 0, attempted: 0, error: null };
+  var extRec = null;
+  for (var exi = 0; exi < extractionHistory.length; exi++) {
+    if (extractionHistory[exi].id === c.extraction_id) { extRec = extractionHistory[exi]; break; }
+  }
+  if (!extRec || !extRec.recipients || extRec.recipients.length === 0) return { updated: 0, attempted: 0, error: null };
+  var splitRec = acApplySplit(extRec.recipients, c.extraction_split);
+  var mIds = splitRec.map(function (r) { return r.uid; }).filter(Boolean);
+  if (mIds.length === 0) return { updated: 0, attempted: 0, error: null };
+  var sd = (c.send_date || "").replace("T", " ");
+  if (sd.length === 10) sd += " 00:00:00";
+  if (!sd || sd.length < 10) return { updated: 0, attempted: 1, error: null };
+  try {
+    var purpose = (c.purpose || "").trim();
+    var binfo1 = { count: 0 }, binfo2 = { count: 0 }, rv1 = 0, rv2 = 0;
+    var e24h = addHours(sd, 24);
+    var e48h = addHours(sd, 48);
+    var now2 = nowKstStr();
+    if (now2 > sd) {
+      var ef24 = now2 < e24h ? now2 : e24h;
+      var ef48 = now2 < e48h ? now2 : e48h;
+      // 독립적인 4개 조회를 병렬 실행 (pool max 10 이내)
+      var rArr = await Promise.all([
+        trackConversionInfo(purpose, mIds, sd, ef24),
+        trackConversionInfo(purpose, mIds, sd, ef48),
+        trackConversionRevenue(purpose, mIds, sd, ef24),
+        trackConversionRevenue(purpose, mIds, sd, ef48)
+      ]);
+      binfo1 = rArr[0]; binfo2 = rArr[1]; rv1 = rArr[2]; rv2 = rArr[3];
+    }
+    var sc = c.send_count || mIds.length;
+    c.conversions = { "1d": buildConvObj(binfo1, sc), "2d": buildConvObj(binfo2, sc) };
+    c.revenue = { "1d": rv1, "2d": rv2 };
+    return { updated: 1, attempted: 1, error: null };
+  } catch (e2) {
+    console.log("[전환자동일괄] 캠페인 에러:", e2.message);
+    return { updated: 0, attempted: 1, error: e2 };
+  }
+}
+
+// 전체 캠페인을 제한된 동시성으로 처리하고 파일에 저장. autoConvJob 진행상황을 갱신한다.
+async function runAutoConvAllJob() {
+  try {
+    var cdPath = CAMPAIGN_DATA_PATH;
+    var cdData = fs.existsSync(cdPath) ? JSON.parse(fs.readFileSync(cdPath, "utf8")) : { campaigns: [], records: [] };
+    var camps = cdData.campaigns || [];
+    autoConvJob.total = camps.length;
+    var CONC = 3; // 캠페인 3건 동시 × 건당 4쿼리 → 최대 ~12요청, pool(10)에서 소폭 큐잉
+    var nextIdx = 0;
+    var firstErr = null;
+    async function worker() {
+      while (true) {
+        var i = nextIdx++; // await 이전이라 원자적 — 워커 간 인덱스 경쟁 없음
+        if (i >= camps.length) break;
+        var out = await acProcessCampaign(camps[i]);
+        autoConvJob.done++;
+        autoConvJob.attempted += out.attempted;
+        autoConvJob.updated += out.updated;
+        if (out.error) { autoConvJob.errors++; if (!firstErr) firstErr = out.error; }
+      }
+    }
+    var workers = [];
+    for (var w = 0; w < CONC; w++) workers.push(worker());
+    await Promise.all(workers);
+    fs.writeFileSync(cdPath, JSON.stringify(cdData, null, 2), "utf-8");
+    console.log("[전환자동일괄] " + autoConvJob.updated + "건 업데이트, 시도 " + autoConvJob.attempted + ", 오류 " + autoConvJob.errors);
+    // 한 건도 갱신 못했고 DB 오류가 있었으면 원인을 표면화
+    if (autoConvJob.updated === 0 && autoConvJob.errors > 0 && firstErr) {
+      var d = firstErr.message || "(메시지 없음)";
+      if (firstErr.code) d += " [code:" + firstErr.code + "]";
+      if (firstErr.number) d += " [SQL:" + firstErr.number + "]";
+      if (firstErr.originalError && firstErr.originalError.message && firstErr.originalError.message !== firstErr.message) {
+        d += " / 원본: " + firstErr.originalError.message;
+      }
+      if (!pool || !pool.connected) d += " [pool:disconnected]";
+      autoConvJob.error = "전환 조회 DB 오류 (" + autoConvJob.errors + "/" + autoConvJob.attempted + "건 실패): " + d;
+    }
+  } catch (e) {
+    console.log("[전환자동일괄] 작업 실패:", e.message);
+    autoConvJob.error = e.message;
+  } finally {
+    autoConvJob.finishedAt = nowKstStr();
+    autoConvJob.running = false;
+  }
 }
 
 async function checkSampleHistory(memberIds) {
@@ -5369,21 +5470,52 @@ function restoreCampaignData(input){
   reader.readAsText(file);
 }
 
-// 전환수 자동 조회 (일괄)
+// 전환수 자동 조회 (일괄) — 백그라운드 작업 시작 후 진행상황을 폴링한다.
+// (서버가 즉시 응답하므로 프록시 504/HTML 응답으로 인한 JSON 파싱 오류가 발생하지 않는다)
 async function autoConvAll(){
   var btn=document.getElementById('btnAutoConvAll');
-  btn.disabled=true;btn.textContent='조회 중...';
+  btn.disabled=true;btn.textContent='조회 시작...';btn.style.background='#7b1fa2';
+  function resetBtn(){btn.textContent='전환수 자동 조회';btn.style.background='#7b1fa2';btn.disabled=false;}
+  // 프록시가 HTML 에러 페이지를 반환하는 경우를 방어적으로 처리
+  async function readJson(res){
+    var ct=res.headers.get('content-type')||'';
+    if(ct.indexOf('json')===-1){
+      throw new Error('서버 응답이 JSON이 아닙니다 (HTTP '+res.status+'). 잠시 후 다시 시도해주세요.');
+    }
+    return await res.json();
+  }
   try{
     var res=await fetch('api/campaign-auto-conv-all',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
-    var data=await res.json();
-    if(data.ok){
-      btn.textContent='완료! ('+data.updated+'건 업데이트)';btn.style.background='#166534';
-      cdLoaded=false;await loadCampaignDashboard();
-      setTimeout(function(){btn.textContent='전환수 자동 조회';btn.style.background='#7b1fa2';btn.disabled=false;},3000);
-    }else{throw new Error(data.error||'응답 오류');}
+    var data=await readJson(res);
+    if(!data.ok) throw new Error(data.error||'응답 오류');
+    var errCount=0;
+    async function poll(){
+      try{
+        var r=await fetch('api/campaign-auto-conv-status',{headers:{'Accept':'application/json'}});
+        var s=await readJson(r);
+        errCount=0;
+        var job=s.job||{};
+        if(job.running){
+          btn.textContent='조회 중 '+(job.done||0)+'/'+(job.total||0);
+          setTimeout(poll,1500);
+          return;
+        }
+        if(job.error){alert('전환수 자동 조회 실패: '+job.error);resetBtn();return;}
+        btn.textContent='완료! ('+(job.updated||0)+'건 업데이트)';btn.style.background='#166534';
+        cdLoaded=false;await loadCampaignDashboard();
+        setTimeout(resetBtn,3000);
+      }catch(e){
+        // 폴링 중 일시적 오류는 재시도 (연속 10회 실패 시 중단)
+        errCount++;
+        if(errCount<10){setTimeout(poll,2000);return;}
+        alert('전환수 자동 조회 상태 확인 실패: '+e.message);
+        resetBtn();
+      }
+    }
+    setTimeout(poll,1500);
   }catch(e){
     alert('전환수 자동 조회 실패: '+e.message);
-    btn.textContent='전환수 자동 조회';btn.style.background='#7b1fa2';btn.disabled=false;
+    resetBtn();
   }
 }
 
@@ -8442,72 +8574,24 @@ var server = http.createServer(async function (req, res) {
 
     // 전환수 일괄 자동 조회
     if (pathname === "/api/campaign-auto-conv-all" && req.method === "POST") {
-      var cdPathAll = CAMPAIGN_DATA_PATH;
-      var cdDataAll = fs.existsSync(cdPathAll) ? JSON.parse(fs.readFileSync(cdPathAll, "utf8")) : { campaigns: [], records: [] };
-      var results = [];
-      var updated = 0;
-      var acAttempted = 0, acErrCount = 0, acFirstErr = null;
-      for (var ci = 0; ci < (cdDataAll.campaigns || []).length; ci++) {
-        var c = cdDataAll.campaigns[ci];
-        if (!c.extraction_id || c.type === "취소") continue;
-        var extRec = null;
-        for (var exi2 = 0; exi2 < extractionHistory.length; exi2++) {
-          if (extractionHistory[exi2].id === c.extraction_id) { extRec = extractionHistory[exi2]; break; }
-        }
-        if (!extRec || !extRec.recipients || extRec.recipients.length === 0) continue;
-        var splitRec = applySplit(extRec.recipients, c.extraction_split);
-        var mIds = splitRec.map(function(r) { return r.uid; }).filter(Boolean);
-        if (mIds.length === 0) continue;
-        acAttempted++;
-        var sd = (c.send_date || "").replace("T", " ");
-        if (sd.length === 10) sd += " 00:00:00";
-        if (!sd || sd.length < 10) continue;
-        try {
-          var purpose2 = (c.purpose || "").trim();
-          var c1d = 0, c2d = 0, binfo1 = { count: 0 }, binfo2 = { count: 0 };
-          var e24h = addHours(sd, 24);
-          var e48h = addHours(sd, 48);
-          var now2 = nowKstStr();
-          var canQ = now2 > sd;
-          if (canQ) {
-            var ef24 = now2 < e24h ? now2 : e24h;
-            var ef48 = now2 < e48h ? now2 : e48h;
-            binfo1 = await trackConversionInfo(purpose2, mIds, sd, ef24);
-            binfo2 = await trackConversionInfo(purpose2, mIds, sd, ef48);
-            c1d = binfo1.count; c2d = binfo2.count;
-          }
-          var rv1 = 0, rv2 = 0;
-          if (canQ) {
-            rv1 = await trackConversionRevenue(purpose2, mIds, sd, ef24);
-            rv2 = await trackConversionRevenue(purpose2, mIds, sd, ef48);
-          }
-          var sc = c.send_count || mIds.length;
-          c.conversions = {
-            "1d": buildConvObj(binfo1, sc),
-            "2d": buildConvObj(binfo2, sc)
-          };
-          c.revenue = { "1d": rv1, "2d": rv2 };
-          updated++;
-          results.push({ index: ci, purpose: purpose2, conv1d: c1d, conv2d: c2d, rev1d: rv1, rev2d: rv2 });
-        } catch (e2) { acErrCount++; if (!acFirstErr) acFirstErr = e2; console.log("[전환자동일괄] 캠페인 " + ci + " 에러:", e2.message); }
-      }
-      fs.writeFileSync(cdPathAll, JSON.stringify(cdDataAll, null, 2), "utf-8");
-      console.log("[전환자동일괄] " + updated + "건 업데이트, 시도 " + acAttempted + ", 오류 " + acErrCount);
-      // 한 건도 갱신 못했고 DB 오류가 있었으면 → 원인을 숨기지 말고 표면화(code/SQL번호/원본)
-      if (updated === 0 && acErrCount > 0 && acFirstErr) {
-        var acDetail = acFirstErr.message || "(메시지 없음)";
-        if (acFirstErr.code) acDetail += " [code:" + acFirstErr.code + "]";
-        if (acFirstErr.number) acDetail += " [SQL:" + acFirstErr.number + "]";
-        if (acFirstErr.originalError && acFirstErr.originalError.message && acFirstErr.originalError.message !== acFirstErr.message) {
-          acDetail += " / 원본: " + acFirstErr.originalError.message;
-        }
-        if (!pool || !pool.connected) acDetail += " [pool:disconnected]";
+      // 동기 처리 시 수분이 걸려 프록시가 504(HTML)를 반환 → 프론트 JSON 파싱 실패.
+      // 즉시 응답하고 백그라운드로 실행한 뒤, 프론트가 상태를 폴링한다.
+      if (autoConvJob.running) {
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: false, error: "전환 조회 DB 오류 (" + acErrCount + "/" + acAttempted + "건 실패): " + acDetail }));
+        res.end(JSON.stringify({ ok: true, started: false, running: true, job: autoConvJob }));
         return;
       }
+      autoConvJob = { running: true, startedAt: nowKstStr(), finishedAt: null, total: 0, done: 0, updated: 0, attempted: 0, errors: 0, error: null };
+      runAutoConvAllJob(); // 의도적으로 await 하지 않음 (백그라운드 실행)
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: true, updated: updated, attempted: acAttempted, errors: acErrCount, details: results }));
+      res.end(JSON.stringify({ ok: true, started: true, job: autoConvJob }));
+      return;
+    }
+
+    // 전환수 자동 조회(일괄) 진행상황 폴링
+    if (pathname === "/api/campaign-auto-conv-status" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, job: autoConvJob }));
       return;
     }
 
