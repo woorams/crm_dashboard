@@ -58,6 +58,43 @@ var DATA_DIR = process.env.DATA_DIR || __dirname;
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) { /* noop */ }
 var CAMPAIGN_DATA_PATH = path.join(DATA_DIR, "crm-campaign-data.json");
 
+// 장부 파일(crm-campaign-data.json)은 여러 요청·백그라운드 잡이 함께 쓴다.
+// 원자적 저장(임시파일 기록 → rename 교체)으로 크래시·동시 쓰기에도 파일이 절대 깨지지 않게 한다.
+// (rename은 같은 디렉터리 내에서 원자적이라, 읽는 쪽은 항상 '이전 완전본' 또는 '새 완전본'만 본다)
+function saveCampaignDataFile(obj) {
+  var json = JSON.stringify(obj, null, 2);
+  var tmp = CAMPAIGN_DATA_PATH + ".tmp";
+  fs.writeFileSync(tmp, json, "utf-8");
+  try {
+    fs.renameSync(tmp, CAMPAIGN_DATA_PATH); // 리눅스/윈도우 모두 기존 파일을 원자적으로 교체
+  } catch (e) {
+    // 드물게 rename 실패(파일 잠금 등) 시 직접 기록으로 폴백 — 데이터 유실만은 방지
+    fs.writeFileSync(CAMPAIGN_DATA_PATH, json, "utf-8");
+    try { fs.unlinkSync(tmp); } catch (e2) { /* noop */ }
+  }
+}
+
+// 오래 걸리는 전환조회는 시작 시점의 옛 사본을 들고 있다가 마지막에 통째로 덮어쓰면,
+// 그 사이 등록·저장된 캠페인/기록을 되돌린다(lost update). 이를 막기 위해:
+// 저장 직전 파일을 '다시 읽어', 실제로 계산한 캠페인의 전환/매출만 현재 데이터에 얹어 원자적으로 저장한다.
+// updates: [{ i, send_date, purpose, conversions, revenue }] — i는 스냅샷 인덱스.
+// 인덱스가 밀렸거나(삭제 등) 다른 캠페인이면 건너뛴다(엉뚱한 곳에 덮어쓰기 방지).
+function applyConvUpdatesAndSave(updates) {
+  var fresh = fs.existsSync(CAMPAIGN_DATA_PATH)
+    ? JSON.parse(fs.readFileSync(CAMPAIGN_DATA_PATH, "utf8"))
+    : { campaigns: [], records: [] };
+  var fc = fresh.campaigns || [];
+  for (var u = 0; u < updates.length; u++) {
+    var upd = updates[u];
+    var dst = fc[upd.i];
+    if (dst && dst.send_date === upd.send_date && dst.purpose === upd.purpose) {
+      dst.conversions = upd.conversions;
+      dst.revenue = upd.revenue;
+    }
+  }
+  saveCampaignDataFile(fresh);
+}
+
 var dbConfig = {
   server: env.DB_SERVER,
   port: parseInt(env.DB_PORT || "1433"),
@@ -1444,6 +1481,7 @@ async function runAutoConvAllJob() {
     var CONC = 3; // 캠페인 3건 동시 × 건당 4쿼리 → 최대 ~12요청, pool(10)에서 소폭 큐잉
     var nextIdx = 0;
     var firstErr = null;
+    var updates = []; // 실제 계산된 캠페인만 기록 → 저장 직전 최신 파일에 병합(동시 저장분 보존)
     async function worker() {
       while (true) {
         var i = nextIdx++; // await 이전이라 원자적 — 워커 간 인덱스 경쟁 없음
@@ -1452,13 +1490,18 @@ async function runAutoConvAllJob() {
         autoConvJob.done++;
         autoConvJob.attempted += out.attempted;
         autoConvJob.updated += out.updated;
+        if (out.updated) {
+          var c = camps[i];
+          updates.push({ i: i, send_date: c.send_date, purpose: c.purpose, conversions: c.conversions, revenue: c.revenue });
+        }
         if (out.error) { autoConvJob.errors++; if (!firstErr) firstErr = out.error; }
       }
     }
     var workers = [];
     for (var w = 0; w < CONC; w++) workers.push(worker());
     await Promise.all(workers);
-    fs.writeFileSync(cdPath, JSON.stringify(cdData, null, 2), "utf-8");
+    // 옛 사본을 통째로 덮어쓰지 않고, 계산된 전환/매출만 '최신 파일'에 병합해 원자적으로 저장
+    applyConvUpdatesAndSave(updates);
     console.log("[전환자동일괄] " + autoConvJob.updated + "건 업데이트, 시도 " + autoConvJob.attempted + ", 오류 " + autoConvJob.errors);
     // 한 건도 갱신 못했고 DB 오류가 있었으면 원인을 표면화
     if (autoConvJob.updated === 0 && autoConvJob.errors > 0 && firstErr) {
@@ -8052,7 +8095,7 @@ var server = http.createServer(async function (req, res) {
           urlReplaced = true;
         }
       }
-      fs.writeFileSync(cdPath4, JSON.stringify(cdData4, null, 2), "utf-8");
+      saveCampaignDataFile(cdData4);
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true, seq: newSeq, url_replaced: urlReplaced }));
       return;
@@ -8132,7 +8175,7 @@ var server = http.createServer(async function (req, res) {
         });
         campUpdated++;
       });
-      fs.writeFileSync(cdPath5, JSON.stringify(cdData5, null, 2), "utf-8");
+      saveCampaignDataFile(cdData5);
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true, updated: updated, campaigns_updated: campUpdated }));
       return;
@@ -8162,7 +8205,7 @@ var server = http.createServer(async function (req, res) {
           }
         });
       }
-      fs.writeFileSync(cdPathSc, JSON.stringify(cdDataSc, null, 2), "utf-8");
+      saveCampaignDataFile(cdDataSc);
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true }));
       return;
@@ -8185,7 +8228,7 @@ var server = http.createServer(async function (req, res) {
       if (!cvCamp.conversions) cvCamp.conversions = {};
       var sendCnt = cvCamp.send_count || 1;
       cvCamp.conversions[cvSlot] = { count: cvCount, rate: cvCount / sendCnt };
-      fs.writeFileSync(cdPathCv, JSON.stringify(cdDataCv, null, 2), "utf-8");
+      saveCampaignDataFile(cdDataCv);
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true }));
       return;
@@ -8217,7 +8260,7 @@ var server = http.createServer(async function (req, res) {
       camp.message = upBody.message || "";
       camp.extraction_id = upBody.extraction_id ? parseInt(upBody.extraction_id) : (camp.extraction_id || null);
       camp.extraction_split = upBody.extraction_split || camp.extraction_split || "all";
-      fs.writeFileSync(cdPathUp, JSON.stringify(cdDataUp, null, 2), "utf-8");
+      saveCampaignDataFile(cdDataUp);
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true }));
       return;
@@ -8235,7 +8278,7 @@ var server = http.createServer(async function (req, res) {
         return;
       }
       cdDataDel.campaigns.splice(delIdx, 1);
-      fs.writeFileSync(cdPathDel, JSON.stringify(cdDataDel, null, 2), "utf-8");
+      saveCampaignDataFile(cdDataDel);
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true, remaining: cdDataDel.campaigns.length }));
       return;
@@ -8257,7 +8300,7 @@ var server = http.createServer(async function (req, res) {
         }
       });
       if (changed) {
-        fs.writeFileSync(cdPath, JSON.stringify(cdData, null, 2), "utf-8");
+        saveCampaignDataFile(cdData);
       }
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify(cdData));
@@ -8277,7 +8320,7 @@ var server = http.createServer(async function (req, res) {
         campaigns: impBody.campaigns,
         records: Array.isArray(impBody.records) ? impBody.records : []
       };
-      fs.writeFileSync(CAMPAIGN_DATA_PATH, JSON.stringify(impData, null, 2), "utf-8");
+      saveCampaignDataFile(impData);
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true, campaigns: impData.campaigns.length, records: impData.records.length }));
       return;
@@ -8309,7 +8352,7 @@ var server = http.createServer(async function (req, res) {
         clicks: { "1h": { count: 0, rate: 0 }, "6h": { count: 0, rate: 0 }, "12h": { count: 0, rate: 0 }, "24h": { count: 0, rate: 0 }, "48h": { count: 0, rate: 0 }, "72h": { count: 0, rate: 0 }, "7d": { count: 0, rate: 0 }, "total": { count: 0, rate: 0 } },
         conversions: { "1d": { count: 0, rate: 0 }, "2d": { count: 0, rate: 0 } }
       });
-      fs.writeFileSync(cdPath2, JSON.stringify(cdData2, null, 2), "utf-8");
+      saveCampaignDataFile(cdData2);
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true, total: cdData2.campaigns.length }));
       return;
@@ -8333,7 +8376,7 @@ var server = http.createServer(async function (req, res) {
         return;
       }
       cdData3.campaigns[idx].type = newStatus;
-      fs.writeFileSync(cdPath3, JSON.stringify(cdData3, null, 2), "utf-8");
+      saveCampaignDataFile(cdData3);
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true, index: idx, status: newStatus }));
       return;
@@ -8561,7 +8604,8 @@ var server = http.createServer(async function (req, res) {
           "2d": buildConvObj(cinfo2, sendCount)
         };
         camp.revenue = { "1d": rev1d, "2d": rev2d };
-        fs.writeFileSync(cdPathAc, JSON.stringify(cdDataAc, null, 2), "utf-8");
+        // 옛 사본 통째 덮어쓰기 대신 이 캠페인의 전환/매출만 최신 파일에 병합 저장
+        applyConvUpdatesAndSave([{ i: campIdx, send_date: camp.send_date, purpose: camp.purpose, conversions: camp.conversions, revenue: camp.revenue }]);
         console.log("[전환자동] 캠페인 " + campIdx + " (" + purpose + "): 1d=" + conv1d + ", 2d=" + conv2d + ", 매출2d=" + rev2d + " (대상:" + memberIds.length + "명)");
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: true, conv1d: conv1d, conv2d: conv2d, rev1d: rev1d, rev2d: rev2d, members: memberIds.length, purpose: purpose }));
