@@ -4050,6 +4050,740 @@ function renderTrend(){
   document.getElementById('trContent').innerHTML = html;
 }
 
+// ═══ 주차별 베스트 성과 ═══
+var wbRendered = false;
+async function renderWeeklyBest() {
+  if (wbRendered) return;
+  try {
+    var res = await fetch('api/weekly-best');
+    var data = await res.json();
+    document.getElementById('wbContent').innerHTML = data.html || 'No data';
+    wbRendered = true;
+  } catch(e) { document.getElementById('wbContent').innerHTML = 'Error: ' + e.message; }
+}
+
+// ═══ AI 마케팅 분석 에이전트 ═══
+var aiContextRendered = false;
+var aiHistory = [];
+
+async function renderAiContext() {
+  if (aiContextRendered) return;
+  try {
+    var res = await fetch('api/ai-context');
+    var data = await res.json();
+    document.getElementById('aiContextCards').innerHTML = data.html || '';
+    aiContextRendered = true;
+  } catch(e) { /* ignore */ }
+}
+
+function buildInlineCharts(query, camps) {
+  var q = query.toLowerCase();
+  var W1 = new Date(2025,11,28);
+  function getWn(d){return Math.floor((new Date(d.slice(0,10))-W1)/(7*86400000))+1;}
+  function bar(label,val,maxVal,color,suffix){
+    var pct=maxVal>0?Math.max(val/maxVal*100,3):3;
+    return '<div style="display:flex;align-items:center;gap:5px;margin:2px 0;font-size:11px"><div style="width:75px;text-align:right;color:#555;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+label+'</div><div style="flex:1;background:#f1f5f9;border-radius:3px;height:18px;overflow:hidden"><div style="width:'+pct+'%;background:'+color+';height:100%;border-radius:3px;display:flex;align-items:center;padding-left:4px;font-size:9px;color:#fff;font-weight:700;min-width:fit-content">'+(suffix||val)+'</div></div><div style="width:40px;text-align:right;font-weight:700;font-size:10px;color:#334155">'+(suffix||val)+'</div></div>';
+  }
+  function kpi(label,val,color){return '<div style="text-align:center;padding:8px;background:#fff;border:1px solid #e8e8e8;border-radius:6px"><div style="font-size:18px;font-weight:800;color:'+(color||'#1e293b')+'">'+val+'</div><div style="font-size:9px;color:#888;margin-top:1px">'+label+'</div></div>';}
+  var html = '';
+
+  // 전환률 트렌드 / 추이
+  if (q.indexOf('트렌드')>=0 || q.indexOf('추이')>=0 || q.indexOf('주차')>=0) {
+    var wd={};camps.forEach(function(c){if(!c.send_date)return;var w=getWn(c.send_date);if(!wd[w])wd[w]={s:0,cv:0};wd[w].s+=c.send_count||0;var cv=c.conversions||{};wd[w].cv+=cv['2d']?parseInt(cv['2d'].count)||0:0;});
+    var wks=Object.keys(wd).map(Number).sort().slice(-8);
+    var maxR=0;wks.forEach(function(w){var r=wd[w].s>0?wd[w].cv/wd[w].s*100:0;if(r>maxR)maxR=r;});
+    html += '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;margin-bottom:10px"><div style="font-size:11px;font-weight:700;color:#475569;margin-bottom:6px">주차별 전환률 추이</div>';
+    wks.forEach(function(w){var d=wd[w];var r=d.s>0?(d.cv/d.s*100):0;var c=r>=1.5?'#059669':r>=0.5?'#3b82f6':'#94a3b8';html+=bar('W'+w,r,maxR||1,c,r.toFixed(1)+'% ('+d.cv+'건)');});
+    html += '</div>';
+  }
+
+  // 소구 패턴 / 목적별
+  if (q.indexOf('소구')>=0 || q.indexOf('패턴')>=0 || q.indexOf('목적')>=0) {
+    var pm={};camps.forEach(function(c){var p=c.purpose||'기타';if(!pm[p])pm[p]={s:0,cv:0,n:0};pm[p].s+=c.send_count||0;pm[p].n++;var cv=c.conversions||{};pm[p].cv+=cv['2d']?parseInt(cv['2d'].count)||0:0;});
+    var pColors={'당일 샘플 전환':'#3b82f6','원주문 전환':'#059669','답례품 전환':'#f59e0b','부가 상품 전환':'#8b5cf6'};
+    var sorted=Object.keys(pm).sort(function(a,b){var ra=pm[a].s>0?pm[a].cv/pm[a].s:0;var rb=pm[b].s>0?pm[b].cv/pm[b].s:0;return rb-ra;});
+    var maxP=0;sorted.forEach(function(p){var r=pm[p].s>0?pm[p].cv/pm[p].s*100:0;if(r>maxP)maxP=r;});
+    html += '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;margin-bottom:10px"><div style="font-size:11px;font-weight:700;color:#475569;margin-bottom:6px">목적별 전환률 비교</div>';
+    sorted.forEach(function(p){var v=pm[p];var r=v.s>0?(v.cv/v.s*100):0;html+=bar(p.replace(' 전환',''),r,maxP||1,pColors[p]||'#64748b',r.toFixed(1)+'% ('+v.cv+'/'+v.s.toLocaleString()+')');});
+    html += '</div>';
+  }
+
+  // AB 테스트
+  if (q.indexOf('ab')>=0 || q.indexOf('AB')>=0 || q.indexOf('테스트')>=0 || q.indexOf('비교')>=0) {
+    var abGroups={};
+    camps.filter(function(c){return c.extraction_id&&c.extraction_split&&c.extraction_split!=='all';}).forEach(function(c){
+      var k=c.extraction_id+'_'+(c.send_date||'').slice(0,10)+'_'+c.purpose;
+      if(!abGroups[k])abGroups[k]=[];abGroups[k].push(c);
+    });
+    var abPairs=Object.values(abGroups).filter(function(g){return g.length>=2;});
+    // 소구포인트 쌍 기준 합산
+    var abMerged={};
+    abPairs.forEach(function(pair){
+      var iKey=pair.map(function(c){return c.extraction_split+':'+c.incentive;}).sort().join('|');
+      var mKey=pair[0].purpose+'|'+iKey;
+      if(!abMerged[mKey])abMerged[mKey]={purpose:pair[0].purpose,splits:{}};
+      pair.forEach(function(c){var sp=c.extraction_split;if(!abMerged[mKey].splits[sp])abMerged[mKey].splits[sp]={incentive:c.incentive,s:0,cv:0};abMerged[mKey].splits[sp].s+=c.send_count||0;var cv=c.conversions||{};abMerged[mKey].splits[sp].cv+=cv['2d']?parseInt(cv['2d'].count)||0:0;});
+    });
+    var abResults=Object.values(abMerged).filter(function(m){return Object.values(m.splits).some(function(s){return s.cv>0;});});
+    if(abResults.length>0){
+      html += '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;margin-bottom:10px"><div style="font-size:11px;font-weight:700;color:#475569;margin-bottom:6px">A/B 테스트 결과 요약</div>';
+      html += '<table style="width:100%;border-collapse:collapse;font-size:10px"><tr style="background:#f1f5f9"><th style="padding:4px;text-align:left">목적</th><th style="padding:4px">그룹</th><th style="padding:4px">소구포인트</th><th style="padding:4px">발송</th><th style="padding:4px">전환</th><th style="padding:4px">전환률</th><th style="padding:4px">결과</th></tr>';
+      abResults.forEach(function(m){
+        var splits=Object.values(m.splits);var maxR=-1,winSp=null;
+        splits.forEach(function(s){var r=s.s>0?s.cv/s.s:0;if(r>maxR){maxR=r;winSp=s;}});
+        splits.forEach(function(s){
+          var r=s.s>0?(s.cv/s.s*100).toFixed(1):'0.0';var isW=s===winSp&&maxR>0;
+          html+='<tr style="'+(isW?'background:#ecfdf5;font-weight:700':'color:#888')+'"><td style="padding:3px;font-size:9px">'+m.purpose.replace(' 전환','')+'</td><td style="padding:3px;text-align:center;font-weight:700">'+s.incentive.charAt(1)+'</td><td style="padding:3px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+s.incentive+'">'+s.incentive+'</td><td style="padding:3px;text-align:center">'+s.s+'</td><td style="padding:3px;text-align:center;font-weight:700">'+s.cv+'</td><td style="padding:3px;text-align:center;color:'+(isW?'#059669':'#999')+'">'+r+'%</td><td style="padding:3px;text-align:center">'+(isW?'<span style="background:#059669;color:#fff;padding:1px 5px;border-radius:3px;font-size:9px">WIN</span>':'')+'</td></tr>';
+        });
+      });
+      html += '</table></div>';
+    }
+  }
+
+  // 성공 요인 / 세그먼트
+  if (q.indexOf('성공')>=0 || q.indexOf('세그먼트')>=0) {
+    var totalS=0,totalCv=0,totalCost=0;
+    camps.forEach(function(c){totalS+=c.send_count||0;totalCost+=c.cost||0;var cv=c.conversions||{};totalCv+=cv['2d']?parseInt(cv['2d'].count)||0:0;});
+    var avgR=totalS>0?(totalCv/totalS*100).toFixed(1):'0.0';
+    var cpa=totalCv>0?Math.round(totalCost/totalCv).toLocaleString():'-';
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-bottom:10px">';
+    html += kpi('총 캠페인',camps.length);
+    html += kpi('총 발송',totalS.toLocaleString());
+    html += kpi('총 전환',totalCv,'#059669');
+    html += kpi('전환당 비용','₩'+cpa,'#3b82f6');
+    html += '</div>';
+  }
+
+  // 전략 제안
+  if (q.indexOf('전략')>=0 || q.indexOf('제안')>=0) {
+    var pm2={};camps.forEach(function(c){var p=c.purpose||'기타';if(!pm2[p])pm2[p]={s:0,cv:0};pm2[p].s+=c.send_count||0;var cv=c.conversions||{};pm2[p].cv+=cv['2d']?parseInt(cv['2d'].count)||0:0;});
+    var sorted2=Object.keys(pm2).sort(function(a,b){var ra=pm2[a].s>0?pm2[a].cv/pm2[a].s:0;var rb=pm2[b].s>0?pm2[b].cv/pm2[b].s:0;return rb-ra;});
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px">';
+    html += kpi('최고 전환 목적',sorted2[0]?sorted2[0].replace(' 전환',''):'N/A','#059669');
+    var bestR=sorted2[0]&&pm2[sorted2[0]].s>0?(pm2[sorted2[0]].cv/pm2[sorted2[0]].s*100).toFixed(1)+'%':'0%';
+    html += kpi('최고 전환률',bestR,'#059669');
+    html += '</div>';
+  }
+
+  return html;
+}
+
+function aiQuick(text) {
+  document.getElementById('aiInput').value = text;
+  aiSend();
+}
+
+async function aiSend() {
+  var input = document.getElementById('aiInput');
+  var msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+
+  var msgBox = document.getElementById('aiMessages');
+  var _o='<', _c='<'+'/';
+  msgBox.innerHTML += _o+'div class="ai-msg user">'+_o+'div class="bubble">' + msg.replace(/[<>]/g,function(c){return c==='<'?'&lt;':'&gt;';}) + _c+'div>'+_c+'div>';
+  msgBox.scrollTop = msgBox.scrollHeight;
+
+  var btn = document.getElementById('aiSendBtn');
+  btn.disabled = true; btn.textContent = '분석 중...';
+
+  // 캠페인 데이터 요약 생성
+  var campaigns = (cdData.campaigns || cdData).filter(function(c){ return c.type !== '취소' && c.send_count > 0; });
+  var summary = campaigns.map(function(c){
+    var cv = c.conversions || {};
+    var cl = c.clicks || {};
+    return {
+      date: (c.send_date||'').slice(0,16), purpose: c.purpose, target: (c.target||'').split(String.fromCharCode(10)).join(' '),
+      depth1: c.depth1, incentive: c.incentive, send_count: c.send_count,
+      click_48h: cl['48h'] ? cl['48h'].count : 0, click_rate_48h: cl['48h'] ? (cl['48h'].rate*100).toFixed(1)+'%' : '0%',
+      conv_1d: cv['1d'] ? cv['1d'].count : 0, conv_1d_rate: cv['1d'] ? (cv['1d'].rate*100).toFixed(1)+'%' : '',
+      conv_2d: cv['2d'] ? cv['2d'].count : 0, conv_2d_rate: cv['2d'] ? (cv['2d'].rate*100).toFixed(1)+'%' : '',
+      split: c.extraction_split || 'all'
+    };
+  });
+
+  aiHistory.push({ role: 'user', content: msg });
+
+  try {
+    var res = await fetch('api/ai-analysis', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: aiHistory, campaignData: summary })
+    });
+    var data = await res.json();
+    if (data.reply) {
+      aiHistory.push({ role: 'assistant', content: data.reply });
+      var chartHtml = buildInlineCharts(msg, campaigns);
+      var formatted = data.reply.replace(/[<>]/g,function(c){return c==='<'?'&lt;':'&gt;';}).replace(new RegExp('[*][*](.+?)[*][*]','g'),function(_,t){return '<'+'b>'+t+'<'+'/b>';}).split(String.fromCharCode(10)).join('<'+'br>');
+      msgBox.innerHTML += _o+'div class="ai-msg assistant">'+_o+'div class="bubble">' + chartHtml + formatted + _c+'div>'+_c+'div>';
+    } else {
+      msgBox.innerHTML += _o+'div class="ai-msg assistant">'+_o+'div class="bubble" style="color:#c00">오류: ' + (data.error||'응답 없음') + _c+'div>'+_c+'div>';
+    }
+  } catch(e) {
+    msgBox.innerHTML += _o+'div class="ai-msg assistant">'+_o+'div class="bubble" style="color:#c00">네트워크 오류: ' + e.message + _c+'div>'+_c+'div>';
+  }
+  msgBox.scrollTop = msgBox.scrollHeight;
+  btn.disabled = false; btn.textContent = '분석';
+}
+
+async function loadCampaignDashboard() {
+  if (cdLoaded) { renderDashboard(); return; }
+  var res = await fetch('api/campaign-data');
+  cdData = await res.json();
+  cdLoaded = true;
+  var campaigns = cdData.campaigns || cdData;
+  // 필터 옵션
+  var purposes = [...new Set(campaigns.map(function(c){return c.purpose}).filter(Boolean))];
+  var channels = [...new Set(campaigns.map(function(c){return c.channel}).filter(Boolean))];
+  var types = [...new Set(campaigns.map(function(c){return c.type}).filter(Boolean))];
+  var depths = [...new Set(campaigns.map(function(c){return c.depth1}).filter(Boolean))];
+  // 재로딩 시 옵션이 누적 중복되지 않도록 기본 옵션으로 초기화 후 추가
+  var sel1 = document.getElementById('cdPurposeFilter');
+  sel1.innerHTML = '<option value="all">전체 목적</option>';
+  purposes.forEach(function(p){ sel1.innerHTML += '<option value="'+escHtml(p)+'">'+escHtml(p)+'</option>'; });
+  var sel2 = document.getElementById('cdChannelFilter');
+  sel2.innerHTML = '<option value="all">전체 채널</option>';
+  channels.forEach(function(ch){ sel2.innerHTML += '<option value="'+escHtml(ch)+'">'+escHtml(ch)+'</option>'; });
+  var sel3 = document.getElementById('cdTypeFilter');
+  sel3.innerHTML = '<option value="all">전체 상태</option>';
+  types.forEach(function(t){ sel3.innerHTML += '<option value="'+escHtml(t)+'">'+escHtml(t)+'</option>'; });
+  var sel4 = document.getElementById('cdDepthFilter');
+  sel4.innerHTML = '<option value="all">전체 세그먼트(Depth1)</option>';
+  depths.forEach(function(d){ sel4.innerHTML += '<option value="'+escHtml(d)+'">'+escHtml(d)+'</option>'; });
+  renderDashboard();
+}
+
+function getCampaigns() { return (cdData && cdData.campaigns) ? cdData.campaigns : (cdData || []); }
+function getRecords() { return (cdData && cdData.records) ? cdData.records : []; }
+
+function getFilteredCampaigns() {
+  var purpose = document.getElementById('cdPurposeFilter').value;
+  var channel = document.getElementById('cdChannelFilter').value;
+  var type = document.getElementById('cdTypeFilter').value;
+  var depth = document.getElementById('cdDepthFilter').value;
+  var dateFrom = document.getElementById('cdDateFrom').value;
+  var dateTo = document.getElementById('cdDateTo').value;
+  var all = getCampaigns();
+  var result = [];
+  for (var i = 0; i < all.length; i++) {
+    var c = all[i];
+    if (purpose !== 'all' && c.purpose !== purpose) continue;
+    if (channel !== 'all' && c.channel !== channel) continue;
+    if (type !== 'all' && c.type !== type) continue;
+    if (depth !== 'all' && c.depth1 !== depth) continue;
+    if (dateFrom && c.send_date < dateFrom) continue;
+    if (dateTo && c.send_date > dateTo + 'Z') continue;
+    c._globalIdx = i;
+    result.push(c);
+  }
+  return result;
+}
+
+var _filteredForModal = [];
+
+// 캠페인 매출(결제금액) 안전 추출 — revenue:{1d,2d} 숫자 저장값. 미동기화 캠페인은 0
+function cdRevenue(c, slot){
+  if(!c||!c.revenue) return 0;
+  var v=c.revenue[slot||'2d'];
+  if(v==null) return 0;
+  if(typeof v==='object') v=v.amount!=null?v.amount:v.count;
+  var n=parseInt(v); return isNaN(n)?0:n;
+}
+function renderDashboard() {
+  try { _renderDashboardInner(); } catch(e) { console.error('[renderDashboard ERROR]', e); }
+}
+function _renderDashboardInner() {
+  // 어제 성과 + 오늘 예정 (필터 무관, 전체 캠페인 기준)
+  var allCamps = getCampaigns();
+  var now = new Date();
+  var todayStr = now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0');
+  var yd = new Date(now); yd.setDate(yd.getDate()-1);
+  var yesterdayStr = yd.getFullYear()+'-'+String(yd.getMonth()+1).padStart(2,'0')+'-'+String(yd.getDate()).padStart(2,'0');
+
+  // 어제 성과
+  var yc = allCamps.filter(function(c){return(c.send_date||'').slice(0,10)===yesterdayStr && c.type!=='취소';});
+  var yEl = document.getElementById('cdYesterdayStats');
+  document.getElementById('cdYesterdayTitle').textContent='어제 성과 ('+yesterdayStr+')';
+  if(yc.length>0){
+    var ySent=0,yCost=0,yClk=0,yConv=0;
+    yc.forEach(function(c){ySent+=c.send_count||0;yCost+=c.cost||0;if(c.clicks&&c.clicks['24h'])yClk+=parseInt(c.clicks['24h'].count)||0;if(c.conversions&&c.conversions['1d'])yConv+=parseInt(c.conversions['1d'].count)||0;});
+    var yRate=ySent>0?(yClk/ySent*100).toFixed(1)+'%':'0%';
+    yEl.innerHTML='<span><b>'+yc.length+'</b>건 캠페인</span><span>발송 <b>'+ySent.toLocaleString()+'</b></span><span>비용 <b>'+yCost.toLocaleString()+'</b>원</span><span style="color:#1a73e8">클릭 <b>'+yClk+'</b> ('+yRate+')</span><span style="color:#137333">전환 <b>'+yConv+'</b></span>';
+  }else{yEl.innerHTML='<span style="color:#999">발송 내역 없음</span>';}
+
+  // 오늘 예정
+  var tc = allCamps.filter(function(c){return(c.send_date||'').slice(0,10)===todayStr && (c.type==='예정'||c.type==='완료');});
+  var tEl = document.getElementById('cdTodayStats');
+  document.getElementById('cdTodayTitle').textContent='오늘 ('+todayStr+')';
+  if(tc.length>0){
+    var tSent=0,tCost=0,tScheduled=0,tDone=0;
+    tc.forEach(function(c){tSent+=c.send_count||0;tCost+=c.cost||0;if(c.type==='예정')tScheduled++;else tDone++;});
+    var parts=[];
+    if(tScheduled>0) parts.push('<span style="color:#1e40af"><b>'+tScheduled+'</b>건 예정</span>');
+    if(tDone>0) parts.push('<span style="color:#166534"><b>'+tDone+'</b>건 완료</span>');
+    parts.push('<span>발송 <b>'+tSent.toLocaleString()+'</b></span>');
+    parts.push('<span>비용 <b>'+tCost.toLocaleString()+'</b>원</span>');
+    tEl.innerHTML=parts.join('');
+  }else{tEl.innerHTML='<span style="color:#999">예정 없음</span>';}
+
+  var filtered = getFilteredCampaigns();
+  _filteredForModal = filtered;
+  var totalSent=0,totalCost=0,totalRev=0,cr24Sum=0,cr24N=0,cv1dSum=0,cv1dN=0,cv2dSum=0,cv2dN=0;
+  filtered.forEach(function(c){
+    totalSent+=c.send_count||0; totalCost+=c.cost||0;
+    totalRev+=cdRevenue(c,'2d');
+    if(c.clicks&&c.clicks['24h']&&c.send_count>0){var _cr=parseFloat(c.clicks['24h'].rate);if(!isNaN(_cr)){cr24Sum+=_cr;cr24N++;}}
+    if(c.conversions&&c.conversions['1d']&&c.send_count>0){var _cv1=parseFloat(c.conversions['1d'].rate);if(!isNaN(_cv1)){cv1dSum+=_cv1;cv1dN++;}}
+    if(c.conversions&&c.conversions['2d']&&c.send_count>0){var _cv2=parseFloat(c.conversions['2d'].rate);if(!isNaN(_cv2)){cv2dSum+=_cv2;cv2dN++;}}
+  });
+  document.getElementById('cdTotalCampaigns').textContent=filtered.length;
+  document.getElementById('cdTotalSent').textContent=totalSent.toLocaleString();
+  document.getElementById('cdTotalCost').textContent=totalCost.toLocaleString()+'원';
+  document.getElementById('cdTotalRevenue').textContent='₩'+totalRev.toLocaleString();
+  document.getElementById('cdRoas').textContent=totalCost>0?Math.round(totalRev/totalCost*100).toLocaleString()+'%':'-';
+  document.getElementById('cdAvgClickRate').textContent=cr24N?(cr24Sum/cr24N*100).toFixed(1)+'%':'-';
+  document.getElementById('cdAvgConvRate').textContent=cv1dN?(cv1dSum/cv1dN*100).toFixed(1)+'%':'-';
+  document.getElementById('cdAvgConvRate7d').textContent=cv2dN?(cv2dSum/cv2dN*100).toFixed(1)+'%':'-';
+
+  // 클릭률 시간대별 차트
+  var slots=['1h','6h','12h','24h','48h','72h','7d'];
+  var slotLabels=['1시간','6시간','12시간','24시간','48시간','72시간','7일'];
+  var maxRate=0;
+  var avgs=slots.map(function(s){var sum=0,n=0;filtered.forEach(function(c){if(c.clicks&&c.clicks[s]&&c.send_count>0){var rv=parseFloat(c.clicks[s].rate);if(!isNaN(rv)){sum+=rv;n++;}}});var v=n?sum/n*100:0;if(v>maxRate)maxRate=v;return v;});
+  var chartH='',labelH='';
+  avgs.forEach(function(avg,i){
+    var h=maxRate>0?Math.max(4,avg/maxRate*90):4;
+    chartH+='<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end"><div style="font-size:10px;font-weight:600;color:#1a73e8;margin-bottom:2px">'+avg.toFixed(1)+'%</div><div style="width:80%;height:'+h+'px;background:linear-gradient(180deg,#4285f4,#1a73e8);border-radius:3px 3px 0 0"></div></div>';
+    labelH+='<div style="flex:1;text-align:center;font-size:10px;color:#666">'+slotLabels[i]+'</div>';
+  });
+  document.getElementById('cdClickChart').innerHTML=chartH;
+  document.getElementById('cdClickLabels').innerHTML=labelH;
+
+  // 목적별 요약
+  var pm={};
+  filtered.forEach(function(c){
+    var p=c.purpose||'기타';if(!pm[p])pm[p]={n:0,sent:0,clkTotal:0,convTotal:0,cost:0,rev:0};
+    var m=pm[p];m.n++;m.sent+=c.send_count||0;m.cost+=c.cost||0;m.rev+=cdRevenue(c,'2d');
+    if(c.clicks&&c.clicks['total'])m.clkTotal+=parseInt(c.clicks['total'].count)||0;
+    var cv1=c.conversions&&c.conversions['1d']?parseInt(c.conversions['1d'].count)||0:0;
+    var cv2=c.conversions&&c.conversions['2d']?parseInt(c.conversions['2d'].count)||0:0;
+    m.convTotal+=Math.max(cv1,cv2);
+  });
+  var ptb=document.querySelector('#cdPurposeTable tbody');ptb.innerHTML='';
+  Object.keys(pm).forEach(function(p){var m=pm[p];
+    var cr=m.sent>0?(m.clkTotal/m.sent*100).toFixed(1)+'%':'-';
+    var cvr=m.sent>0?(m.convTotal/m.sent*100).toFixed(1)+'%':'-';
+    var roas=m.cost>0?Math.round(m.rev/m.cost*100).toLocaleString()+'%':'-';
+    var roasColor=m.cost>0&&m.rev/m.cost>=1?'#137333':'#999';
+    ptb.innerHTML+='<tr><td style="font-weight:600;text-align:left">'+p+'</td><td style="text-align:right">'+m.n+'</td><td style="text-align:right">'+m.sent.toLocaleString()+'</td><td class="td-click" style="text-align:right;font-weight:600;color:#1a73e8">'+m.clkTotal.toLocaleString()+'</td><td class="td-click" style="text-align:right;color:#1a73e8">'+cr+'</td><td class="td-conv" style="text-align:right;font-weight:600;color:#137333">'+m.convTotal.toLocaleString()+'</td><td class="td-conv" style="text-align:right;color:#137333">'+cvr+'</td><td class="td-conv" style="text-align:right;color:#137333">₩'+m.rev.toLocaleString()+'</td><td class="td-conv" style="text-align:right;font-weight:700;color:'+roasColor+'">'+roas+'</td></tr>';
+  });
+
+  // 일자별 요약
+  console.log('[DEBUG] 일자별 요약 시작, filtered:', filtered.length);
+  var dm={};
+  filtered.forEach(function(c){
+    var d=(c.send_date||'').slice(0,10);
+    if(!d||d.length!==10||d.charAt(4)!=='-'||d.charAt(7)!=='-'||isNaN(parseInt(d)))return;
+    if(!dm[d])dm[d]={n:0,sent:0,clkTotal:0,convTotal:0};
+    var m=dm[d];m.n++;m.sent+=c.send_count||0;
+    if(c.clicks&&c.clicks['total'])m.clkTotal+=parseInt(c.clicks['total'].count)||0;
+    var cv1=c.conversions&&c.conversions['1d']?parseInt(c.conversions['1d'].count)||0:0;
+    var cv2=c.conversions&&c.conversions['2d']?parseInt(c.conversions['2d'].count)||0:0;
+    m.convTotal+=Math.max(cv1,cv2);
+  });
+  var dtb=document.querySelector('#cdDateTable tbody');
+  if(dtb){
+    dtb.innerHTML='';
+    Object.keys(dm).sort().reverse().forEach(function(d){var m=dm[d];
+      dtb.innerHTML+='<tr><td style="text-align:left">'+d+'</td><td style="text-align:right">'+m.n+'</td><td style="text-align:right">'+m.sent.toLocaleString()+'</td><td class="td-click" style="text-align:right;color:#1a73e8">'+m.clkTotal+'</td><td class="td-conv" style="text-align:right;color:#137333">'+m.convTotal+'</td></tr>';
+    });
+  }
+
+  // 캠페인 상세 - 최신순 정렬
+  filtered.sort(function(a,b){var da=a.send_date||'';var db=b.send_date||'';if(!da&&db)return 1;if(da&&!db)return -1;return db.localeCompare(da);});
+  _sortedFiltered=filtered;
+  _filteredForModal=filtered;
+  // 목적 필터 옵션 채우기
+  var pSel=document.getElementById('cdCampPurposeFilter');
+  if(pSel){
+    var curP=pSel.value;
+    var purposes=[...new Set(filtered.map(function(c){return c.purpose}).filter(Boolean))].sort();
+    pSel.innerHTML='<option value="">전체</option>';
+    purposes.forEach(function(p){var opt=document.createElement('option');opt.value=p;opt.textContent=p;pSel.appendChild(opt);});
+    pSel.value=curP;
+  }
+  renderCampaignTable();
+}
+var _sortedFiltered=[];
+var cdCampPage=1;
+function _fmtDateStr(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+function applyCampDateQuick(){
+  var v=document.getElementById('cdCampDateQuick').value;
+  var fromEl=document.getElementById('cdCampDateFrom');
+  var toEl=document.getElementById('cdCampDateTo');
+  if(v==='all'){fromEl.value='';toEl.value='';}
+  else if(v==='today'){var t=_fmtDateStr(new Date());fromEl.value=t;toEl.value=t;}
+  else if(v==='yesterday'){var y=new Date();y.setDate(y.getDate()-1);var ys=_fmtDateStr(y);fromEl.value=ys;toEl.value=ys;}
+  else if(v){var days=parseInt(v);var f=new Date();f.setDate(f.getDate()-days+1);fromEl.value=_fmtDateStr(f);toEl.value=_fmtDateStr(new Date());}
+  document.getElementById('cdCampDateQuick').value='';
+  cdCampPage=1;renderCampaignTable();
+}
+function renderCampaignTable(){
+  var dateFrom=(document.getElementById('cdCampDateFrom')||{}).value||'';
+  var dateTo=(document.getElementById('cdCampDateTo')||{}).value||'';
+  var purposeFilter=(document.getElementById('cdCampPurposeFilter')||{}).value||'';
+  var filtered=_sortedFiltered;
+  if(dateFrom||dateTo||purposeFilter){
+    filtered=filtered.filter(function(c){
+      if(purposeFilter&&c.purpose!==purposeFilter)return false;
+      var d=(c.send_date||'').slice(0,10);
+      if(dateFrom&&(!d||d<dateFrom))return false;
+      if(dateTo&&(!d||d>dateTo))return false;
+      return true;
+    });
+  }
+  var pageSize=parseInt(document.getElementById('cdCampPageSize').value)||50;
+  var totalPages=Math.max(1,Math.ceil(filtered.length/pageSize));
+  if(cdCampPage<1)cdCampPage=1;if(cdCampPage>totalPages)cdCampPage=totalPages;
+  var start=(cdCampPage-1)*pageSize;
+  var paged=filtered.slice(start,start+pageSize);
+  document.getElementById('cdCampPageInfo').textContent='총 '+filtered.length+'건 ('+cdCampPage+'/'+totalPages+'페이지)';
+  document.getElementById('cdCampPrev').disabled=cdCampPage<=1;
+  document.getElementById('cdCampNext').disabled=cdCampPage>=totalPages;
+  var ctb=document.querySelector('#cdCampaignTable tbody');
+  function fCR(camp,slot,cls){
+    var hasUrlBreakdown = camp && camp.url_clicks && Object.keys(camp.url_clicks).length>=2;
+    if(hasUrlBreakdown){
+      var urls=Object.keys(camp.url_clicks);
+      var counts=urls.map(function(u){return Math.round(camp.url_clicks[u][slot]||0);});
+      var total=counts.reduce(function(a,b){return a+b;},0);
+      var sendCount=camp.send_count||0;
+      var rate=sendCount>0?(total/sendCount*100).toFixed(1):'0.0';
+      var color=total>0?(cls==='td-click'?'#1a73e8':'#137333'):'#999';
+      var disp=counts.length<=3?counts.join('+'):counts.slice(0,2).join('+')+'+…';
+      var fz=counts.length<=2?11:10;
+      var tip=urls.map(function(u,i){var sh=u.indexOf('//')>=0?u.slice(u.indexOf('//')+2):u;return '#'+(i+1)+' '+sh+': '+counts[i];}).join(' / ')+' = '+total;
+      return '<td class="'+cls+'" style="text-align:center;min-width:42px" title="'+tip+'"><div style="font-size:'+fz+'px;font-weight:'+(total>0?'700':'400')+';color:'+color+'">'+disp+'</div><div style="font-size:9px;color:#999">'+rate+'%</div></td>';
+    }
+    var obj=camp&&camp.clicks&&camp.clicks[slot];
+    if(!obj)return'<td class="'+cls+'" style="text-align:center;color:#ccc;min-width:42px">-</td>';
+    var c=Math.round(obj.count)||0;var rv=parseFloat(obj.rate);var r=isNaN(rv)?'0.0':(rv*100).toFixed(1);
+    var color2=c>0?(cls==='td-click'?'#1a73e8':'#137333'):'#999';
+    return'<td class="'+cls+'" style="text-align:center;min-width:42px"><div style="font-size:11px;font-weight:'+(c>0?'700':'400')+';color:'+color2+'">'+c+'</div><div style="font-size:9px;color:#999">'+r+'%</div></td>';
+  }
+  function statusBadge(t,gIdx){
+    var bg='#e5e7eb',fg='#374151';
+    if(t==='완료'){bg='#dcfce7';fg='#166534';}else if(t==='예정'){bg='#dbeafe';fg='#1e40af';}else if(t==='취소'){bg='#fee2e2';fg='#991b1b';}
+    var badge='<span style="display:inline-block;padding:1px 6px;border-radius:10px;font-size:9px;font-weight:600;background:'+bg+';color:'+fg+'">'+escHtml(t)+'</span>';
+    if(t==='예정'||t==='완료'){badge+=' <button onclick="openEditCampaign('+gIdx+')" style="border:none;background:#dbeafe;color:#1e40af;padding:1px 6px;border-radius:4px;font-size:9px;cursor:pointer;margin-left:2px" title="캠페인 수정">수정</button>';}
+    if(t==='예정'||t==='완료'){badge+=' <button onclick="cloneCampaign('+gIdx+')" style="border:none;background:#fde047;color:#854d0e;padding:1px 6px;border-radius:4px;font-size:9px;font-weight:700;cursor:pointer;margin-left:2px" title="이 캠페인을 복제하여 메시지 작성 탭에 새로 등록">복제</button>';}
+    if(t==='예정'){badge+=' <button onclick="changeCampaignStatus('+gIdx+',&#39;취소&#39;)" style="border:none;background:#fee2e2;color:#991b1b;padding:1px 6px;border-radius:4px;font-size:9px;cursor:pointer;margin-left:2px" title="취소로 변경">취소</button>';}
+    else if(t==='취소'){badge+=' <button onclick="changeCampaignStatus('+gIdx+',&#39;예정&#39;)" style="border:none;background:#dbeafe;color:#1e40af;padding:1px 6px;border-radius:4px;font-size:9px;cursor:pointer;margin-left:2px" title="예정으로 복원">복원</button>';badge+=' <button onclick="deleteCampaign('+gIdx+')" style="border:none;background:#374151;color:#fff;padding:1px 6px;border-radius:4px;font-size:9px;cursor:pointer;margin-left:2px" title="캠페인 삭제">삭제</button>';}
+    return badge;
+  }
+  function infoTd(v,mw){var s='text-align:left;font-size:10px;white-space:pre-line;line-height:1.2';if(mw)s+=';max-width:'+mw+'px;overflow:hidden;text-overflow:ellipsis';return'<td style="'+s+'" title="'+escHtml(v)+'">'+escHtml(v)+'</td>';}
+  function readyTd(c){
+    if(c.type!=='예정'){
+      return '<td style="text-align:center;color:#ccc;font-size:10px">-</td>';
+    }
+    var msg=c.message||'';
+    var hasBitly=msg.toLowerCase().indexOf('bit.ly/')>=0;
+    var hasPh=msg.indexOf('{#URL}')>=0;
+    var urlOk=hasBitly&&!hasPh;
+    var tgtOk=!!(c.extraction_id);
+    var allOk=urlOk&&tgtOk;
+    function chip(label,ok,tipOk,tipNg){
+      var bg=ok?'#dcfce7':'#fee2e2',fg=ok?'#166534':'#991b1b',mk=ok?'✓':'✗';
+      return '<span title="'+(ok?tipOk:tipNg)+'" style="display:inline-block;padding:1px 5px;border-radius:3px;font-size:9px;font-weight:700;background:'+bg+';color:'+fg+';margin:0 1px">'+mk+' '+label+'</span>';
+    }
+    var urlChip=chip('URL',urlOk,'Bitly URL 적용 완료','Bitly URL 미적용 — {#URL} 잔존 또는 bit.ly 누락');
+    var tgtChip=chip('대상',tgtOk,'대상자 추출이력 연동됨','대상자 추출이력 미연동 — 캠페인 수정에서 연동 필요');
+    var ringStyle=allOk?'border:1.5px solid #16a34a;background:#f0fdf4':'border:1.5px solid #f59e0b;background:#fffbeb';
+    var summary=allOk?'<span style="color:#16a34a;font-weight:800;font-size:11px" title="발송 준비 완료">●</span>':'<span style="color:#dc2626;font-weight:800;font-size:11px" title="발송 전 확인 필요">●</span>';
+    return '<td style="text-align:center;white-space:nowrap;padding:2px 4px"><div style="display:inline-block;padding:2px 4px;border-radius:5px;'+ringStyle+'">'+summary+' '+urlChip+tgtChip+'</div></td>';
+  }
+  var _prevDate='';
+  ctb.innerHTML=paged.map(function(c,pidx){
+    var idx=(_sortedFiltered.indexOf(c));
+    var _dayNames=['일','월','화','수','목','금','토'];
+    var _dtRaw=c.send_date?c.send_date.slice(0,16).replace('T',' '):'-';
+    var dt=_dtRaw;
+    if(c.send_date&&c.send_date.length>=10){var _dp=new Date(c.send_date.slice(0,10));if(!isNaN(_dp.getTime()))dt=_dtRaw+' ('+_dayNames[_dp.getDay()]+')';}
+    var msgBtn=c.message?'<button class="cd-msg-btn" onclick="openCdMsgModal('+idx+')">보기</button>':'<span style="color:#ccc">-</span>';
+    var pColor='#333';var p=(c.purpose||'').trim();
+    if(p.indexOf('답례품')>=0) pColor='#e65100';
+    else if(p.indexOf('당일')>=0&&p.indexOf('샘플')>=0) pColor='#2e7d32';
+    else if(p.indexOf('원주문')>=0) pColor='#1565c0';
+    else if(p.indexOf('샘플')>=0&&p.indexOf('전환')>=0) pColor='#7b1fa2';
+    var curDate=(c.send_date||'').slice(0,10);
+    var dateBorder=(_prevDate&&curDate!==_prevDate)?'border-top:3px solid #333;':'';
+    _prevDate=curDate;
+    return '<tr style="'+dateBorder+'">'+
+      '<td style="text-align:center"><input type="checkbox" class="cdSelCb" value="'+c._globalIdx+'" onclick="cdSelCbClick(event,this)" style="cursor:pointer"></td>'+
+      '<td style="white-space:nowrap">'+statusBadge(c.type,c._globalIdx)+'</td>'+
+      readyTd(c)+
+      '<td style="white-space:nowrap;font-size:10px">'+dt+'</td>'+
+      '<td>'+msgBtn+'</td>'+
+      '<td style="text-align:left;font-weight:700;font-size:10px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:'+pColor+'" title="'+escHtml(c.purpose)+'">'+escHtml(c.purpose)+'</td>'+
+      infoTd(c.target||'-',140)+
+      infoTd(c.depth1||'-')+
+      infoTd(c.depth2||'-')+
+      infoTd(c.depth3||'-')+
+      infoTd(c.depth4||'-')+
+      infoTd(c.extra_condition||'-',120)+
+      infoTd(c.incentive||'-',120)+
+      '<td style="text-align:right;cursor:pointer" onclick="editSendCountCell('+c._globalIdx+',this)" title="클릭하여 수정">'+(c.send_count||0).toLocaleString()+'</td>'+
+      '<td style="text-align:right;font-size:11px;color:#666">'+(c.cost||0).toLocaleString()+'</td>'+
+      (function(){var rev=cdRevenue(c,'2d');var cost=c.cost||0;var roas=cost>0&&rev>0?Math.round(rev/cost*100):null;var rc=roas!=null&&roas>=100?'#137333':'#999';return'<td style="text-align:right;font-size:10px"><div style="color:#137333;font-weight:600">'+(rev>0?'₩'+rev.toLocaleString():'-')+'</div><div style="font-weight:700;color:'+rc+'">'+(roas!=null?roas.toLocaleString()+'%':'-')+'</div></td>';})()+
+      fCR(c,'1h','td-click')+
+      fCR(c,'6h','td-click')+
+      fCR(c,'12h','td-click')+
+      fCR(c,'24h','td-click')+
+      fCR(c,'48h','td-click')+
+      fCR(c,'total','td-click')+
+      fConvEdit(c._globalIdx,'1d',c.conversions&&c.conversions['1d'],c.send_count)+
+      (function(){var c1=c.conversions&&c.conversions['1d']?Math.round(c.conversions['1d'].count)||0:0;var c2=c.conversions&&c.conversions['2d']?Math.round(c.conversions['2d'].count)||0:0;var gap=Math.max(c2-c1,0);var r=c.send_count>0?(gap/c.send_count*100).toFixed(1):'0.0';var color=gap>0?'#137333':'#999';return'<td class="td-conv" style="text-align:center;min-width:42px;cursor:pointer" onclick="editConvCell('+c._globalIdx+',&#39;2d&#39;,this)" title="24~48시간 구간 (클릭하여 수정)"><div style="font-size:11px;font-weight:'+(gap>0?'700':'400')+';color:'+color+'">'+gap+'</div><div style="font-size:9px;color:#999">'+r+'%</div></td>';})()+
+      (function(){var o2=c.conversions&&c.conversions['2d'];var c1=c.conversions&&c.conversions['1d']?Math.round(c.conversions['1d'].count)||0:0;var c2=o2?Math.round(o2.count)||0:0;var t=Math.max(c1,c2);var r=c.send_count>0?(t/c.send_count*100).toFixed(1):'0.0';var color=t>0?'#137333':'#999';var bd=(o2&&o2.sample!=null)?'<div style="font-size:8px;color:#7b1fa2;white-space:nowrap" title="샘플 신청 / 청첩장 주문 (48h 기준)">샘플 '+o2.sample+'·원 '+o2.invitation+'</div>':'';return'<td class="td-conv" style="text-align:center;min-width:42px"><div style="font-size:11px;font-weight:'+(t>0?'700':'400')+';color:'+color+'">'+t+'</div><div style="font-size:9px;color:#999">'+r+'%</div>'+bd+'</td>';})()+
+      '</tr>';
+  }).join('');
+  _lastCbIdx=-1; // 재렌더 시 shift 범위 앵커 초기화
+  if(typeof updateBatchCloneCount==='function')updateBatchCloneCount(); // 렌더 후 선택/카운트 동기화
+}
+
+function fConvEdit(gIdx,slot,obj,sendCount){
+  var cnt=obj?Math.round(obj.count):0;
+  var rate=sendCount>0?(cnt/sendCount*100).toFixed(1):'0.0';
+  var color=cnt>0?'#137333':'#999';
+  return'<td class="td-conv" style="text-align:center;min-width:42px;cursor:pointer" onclick="editConvCell('+gIdx+',&#39;'+slot+'&#39;,this)" title="클릭하여 수정"><div style="font-size:11px;font-weight:'+(cnt>0?'700':'400')+';color:'+color+'">'+cnt+'</div><div style="font-size:9px;color:#999">'+rate+'%</div></td>';
+}
+
+function editSendCountCell(gIdx,td){
+  var cur=parseInt(td.textContent.replace(/,/g,''))||0;
+  td.innerHTML='<input type="number" value="'+cur+'" style="width:70px;padding:2px 4px;border:1px solid #1a73e8;border-radius:3px;font-size:12px;text-align:right" onblur="saveSendCount('+gIdx+',this)" onkeydown="if(event.key===&#39;Enter&#39;)this.blur()" autofocus>';
+  td.querySelector('input').focus();
+  td.querySelector('input').select();
+}
+
+async function saveSendCount(gIdx,input){
+  var val=parseInt(input.value)||0;
+  try{
+    var res=await fetch('api/campaign-sendcount-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:gIdx,count:val})});
+    var data=await res.json();
+    if(data.ok){cdLoaded=false;loadCampaignDashboard();}
+  }catch(e){alert('저장 실패: '+e.message);}
+}
+
+function editConvCell(gIdx,slot,td){
+  var el=td.querySelector('span')||td.querySelector('div');var cur=parseInt(el?el.textContent:td.textContent)||0;
+  td.innerHTML='<input type="number" value="'+cur+'" style="width:50px;padding:2px 4px;border:1px solid #1a73e8;border-radius:3px;font-size:12px;text-align:right" onblur="saveConvCell('+gIdx+',&#39;'+slot+'&#39;,this)" onkeydown="if(event.key===&#39;Enter&#39;)this.blur()" autofocus>';
+  td.querySelector('input').focus();
+  td.querySelector('input').select();
+}
+
+async function saveConvCell(gIdx,slot,input){
+  var val=parseInt(input.value)||0;
+  try{
+    var res=await fetch('api/campaign-conv-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({index:gIdx,slot:slot,count:val})});
+    var data=await res.json();
+    if(data.ok){cdLoaded=false;loadCampaignDashboard();}
+  }catch(e){alert('저장 실패: '+e.message);}
+}
+
+function openCdMsgModal(idx) {
+  var c = _filteredForModal[idx]; if(!c) return;
+  document.getElementById('cdMsgChannel').textContent = c.channel || 'LMS';
+  var st = document.getElementById('cdMsgStatus');
+  st.textContent = c.type || '';
+  if(c.type==='완료'){st.style.background='#dcfce7';st.style.color='#166534';}
+  else if(c.type==='예정'){st.style.background='#dbeafe';st.style.color='#1e40af';}
+  else if(c.type==='취소'){st.style.background='#fee2e2';st.style.color='#991b1b';}
+  else{st.style.background='#e5e7eb';st.style.color='#374151';}
+  document.getElementById('cdMsgDate').textContent = (c.send_date||'').slice(0,16);
+  document.getElementById('cdMsgPurpose').textContent = c.purpose || '';
+  document.getElementById('cdMsgTarget').textContent = c.target || '';
+  document.getElementById('cdMsgDepth').textContent = [c.depth1,c.depth2,c.depth3,c.depth4].filter(function(x){return x&&x!=='-'&&x!=='X'}).join(' / ') || '-';
+  document.getElementById('cdMsgIncentive').textContent = c.incentive || c.extra_condition || '-';
+  document.getElementById('cdMsgSendInfo').textContent = (c.send_count||0).toLocaleString()+'건 / '+(c.cost||0).toLocaleString()+'원';
+  // 메시지 본문 - URL을 링크로 변환
+  var body = escHtml(c.message||'').replace(new RegExp('(https?://[^\\\\s&<]+)','g'),'<a href="$1" target="_blank" style="color:#1a73e8">$1</a>');
+  document.getElementById('cdMsgBody').innerHTML = body || '<span style="color:#999">메시지 없음</span>';
+  // 클릭/전환 요약
+  var clkSlots=['1h','6h','12h','24h','48h','72h','7d'];
+  var clkLabels=['1h','6h','12h','24h','48h','72h','7d'];
+  var clkHtml=clkSlots.map(function(s,i){var o=c.clicks&&c.clicks[s];return'<span style="margin-right:8px">'+clkLabels[i]+': <b style="color:#1a73e8">'+(o?o.count:0)+'</b></span>';}).join('');
+  document.getElementById('cdMsgClicks').innerHTML=clkHtml;
+  var cvSlots=['1d','2d','3d','4d','5d','7d','14d','15d+'];
+  var cvLabels=['24h','48h','3d','4d','5d','7d','14d','15d+'];
+  var cvHtml=cvSlots.map(function(s,i){var o=c.conversions&&c.conversions[s];return'<span style="margin-right:8px">'+cvLabels[i]+': <b style="color:#137333">'+(o?o.count:0)+'</b></span>';}).join('');
+  document.getElementById('cdMsgConvs').innerHTML=cvHtml;
+  var modal=document.getElementById('cdMsgModal');
+  modal.style.display='flex';
+  modal.onclick=function(e){if(e.target===modal)closeCdMsgModal();};
+}
+function closeCdMsgModal(){document.getElementById('cdMsgModal').style.display='none';}
+
+// ═══ 캠페인 칸반 (BETA) ═══
+var _kbInited = false;
+var _kbList = [];
+var KB_PURPOSE_COLOR = {
+  '당일 샘플 전환':'#1a73e8',
+  '원주문 전환':'#137333',
+  '답례품 전환':'#e37400',
+  '부가 상품 전환':'#7b1fa2'
+};
+
+function kbInitFilter(){
+  var fromEl = document.getElementById('kbDateFrom');
+  var toEl = document.getElementById('kbDateTo');
+  if (!fromEl || !toEl) return;
+  var camps = (cdData && cdData.campaigns) ? cdData.campaigns : [];
+  var dates = camps.map(function(c){return (c.send_date||'').slice(0,10);}).filter(Boolean).sort();
+  var latest = dates[dates.length-1] || new Date().toISOString().slice(0,10);
+  var d = new Date(latest);
+  var d2 = new Date(d.getTime() - 29*24*3600*1000);
+  fromEl.value = d2.toISOString().slice(0,10);
+  toEl.value = latest;
+  _kbInited = true;
+}
+
+function kbResetFilter(){
+  _kbInited = false;
+  kbInitFilter();
+  document.getElementById('kbPurpose').value = 'all';
+  document.getElementById('kbSort').value = 'date_desc';
+  renderKanban();
+}
+
+function kbClassify(c){
+  if (c.type === '취소') return 'cancel';
+  if (c.type === '예정') return 'scheduled';
+  // 완료: 발송 후 경과 시간으로 분류
+  var sd = c.send_date ? new Date(c.send_date.replace(' ', 'T')) : null;
+  if (!sd || isNaN(sd.getTime())) return 'done';
+  var now = new Date();
+  if (sd > now) return 'scheduled'; // 완료지만 미래 시각인 경우
+  var diffH = (now - sd) / 3600000;
+  return diffH < 48 ? 'measuring' : 'done';
+}
+
+function kbCardHtml(c, idx){
+  var purpose = c.purpose || '기타';
+  var pColor = KB_PURPOSE_COLOR[purpose] || '#64748b';
+  var pShort = purpose.replace(' 전환','');
+  var dt = (c.send_date||'').slice(5,16).replace('T',' ');
+  var target = (c.target||'').split(String.fromCharCode(10))[0].slice(0,28) || '-';
+  var incentive = (c.incentive||c.extra_condition||'').split(String.fromCharCode(10))[0].slice(0,32);
+  var send = parseInt(c.send_count||0);
+  var cl = c.clicks||{}, cv = c.conversions||{};
+  var clkTot = cl.total ? parseInt(cl.total.count||0) : 0;
+  var ctr = send>0 ? (clkTot/send*100) : 0;
+  var cv2 = cv['2d'] ? parseInt(cv['2d'].count||0) : 0;
+  var cv1 = cv['1d'] ? parseInt(cv['1d'].count||0) : 0;
+  var cvr = send>0 ? (cv2/send*100) : 0;
+  var cvr1 = send>0 ? (cv1/send*100) : 0;
+  var cvrClass = cvr>=2 ? 'kb-stat-good' : cvr>=0.5 ? 'kb-stat-warn' : 'kb-stat-bad';
+  var status = kbClassify(c);
+  var stats = '';
+  if (status === 'scheduled') {
+    stats = '<span>발송 예정 <b>'+send.toLocaleString()+'</b>건</span>';
+  } else if (status === 'cancel') {
+    stats = '<span style="color:#9ca3af">발송 취소</span>';
+  } else {
+    stats = '<span>발송 <b>'+send.toLocaleString()+'</b></span>'+
+            '<span>클릭 <b style="color:#1a73e8">'+ctr.toFixed(1)+'%</b></span>'+
+            (status==='measuring'
+              ? '<span>전환(1d) <b class="'+(cvr1>=1?'kb-stat-good':'kb-stat-warn')+'">'+cvr1.toFixed(1)+'%</b></span>'
+              : '<span>전환(2d) <b class="'+cvrClass+'">'+cvr.toFixed(1)+'%</b></span>');
+  }
+  // 측정 중 카드는 진행률(%) 표시
+  var progress = '';
+  if (status === 'measuring') {
+    var sd = new Date(c.send_date.replace(' ', 'T'));
+    var diffH = (new Date() - sd) / 3600000;
+    var pct = Math.min(100, diffH/48*100);
+    progress = '<div class="kb-progress"><div style="width:'+pct.toFixed(0)+'%"></div></div>';
+  }
+  return '<div class="kb-card" style="border-left-color:'+pColor+'" onclick="kbOpenCard('+idx+')">'+
+    '<div class="kb-card-head">'+
+      '<span class="kb-tag" style="background:'+pColor+'">'+escHtml(pShort)+'</span>'+
+      '<span class="kb-date">'+escHtml(dt)+'</span>'+
+    '</div>'+
+    '<div class="kb-target" title="'+escHtml(c.target||'')+'">'+escHtml(target)+'</div>'+
+    (incentive ? '<div class="kb-incentive" title="'+escHtml(c.incentive||c.extra_condition||'')+'">💡 '+escHtml(incentive)+'</div>' : '')+
+    '<div class="kb-stats">'+stats+'</div>'+
+    progress+
+  '</div>';
+}
+
+function kbOpenCard(idx){
+  var c = _kbList[idx]; if(!c) return;
+  // 기존 대시보드 모달 재사용 — _filteredForModal 임시 치환
+  var tmp = window._filteredForModal;
+  window._filteredForModal = _kbList;
+  openCdMsgModal(idx);
+  // 다음 대시보드 렌더가 _filteredForModal을 재설정함
+}
+
+function renderKanban(){
+  if (!cdData || !cdData.campaigns) return;
+  if (!_kbInited) kbInitFilter();
+  var from = document.getElementById('kbDateFrom').value || '0000-00-00';
+  var to = document.getElementById('kbDateTo').value || '9999-99-99';
+  var pf = document.getElementById('kbPurpose').value;
+  var sort = document.getElementById('kbSort').value;
+
+  var filtered = cdData.campaigns.filter(function(c){
+    if (!c.send_date) return false;
+    var d = c.send_date.slice(0,10);
+    if (d < from || d > to) return false;
+    if (pf !== 'all' && c.purpose !== pf) return false;
+    return true;
+  });
+
+  // 정렬
+  filtered.sort(function(a,b){
+    var sa = parseInt(a.send_count||0), sb = parseInt(b.send_count||0);
+    var ctrA = sa>0 && a.clicks && a.clicks.total ? a.clicks.total.count/sa : 0;
+    var ctrB = sb>0 && b.clicks && b.clicks.total ? b.clicks.total.count/sb : 0;
+    var cvrA = sa>0 && a.conversions && a.conversions['2d'] ? a.conversions['2d'].count/sa : 0;
+    var cvrB = sb>0 && b.conversions && b.conversions['2d'] ? b.conversions['2d'].count/sb : 0;
+    if (sort === 'date_asc') return (a.send_date||'').localeCompare(b.send_date||'');
+    if (sort === 'cvr_desc') return cvrB - cvrA;
+    if (sort === 'ctr_desc') return ctrB - ctrA;
+    if (sort === 'send_desc') return sb - sa;
+    return (b.send_date||'').localeCompare(a.send_date||''); // date_desc default
+  });
+
+  _kbList = filtered;
+
+  var buckets = { scheduled:[], measuring:[], done:[], cancel:[] };
+  filtered.forEach(function(c, i){
+    buckets[kbClassify(c)].push({ html: kbCardHtml(c, i) });
+  });
+
+  function fill(id, arr){
+    var el = document.getElementById(id);
+    if (!arr.length) { el.innerHTML = '<div class="kb-empty">해당 단계 캠페인 없음</div>'; return; }
+    el.innerHTML = arr.map(function(x){return x.html;}).join('');
+  }
+  fill('kbColScheduled', buckets.scheduled);
+  fill('kbColMeasuring', buckets.measuring);
+  fill('kbColDone', buckets.done);
+  fill('kbColCancel', buckets.cancel);
+
+  document.getElementById('kbCntScheduled').textContent = buckets.scheduled.length;
+  document.getElementById('kbCntMeasuring').textContent = buckets.measuring.length;
+  document.getElementById('kbCntDone').textContent = buckets.done.length;
+  document.getElementById('kbCntCancel').textContent = buckets.cancel.length;
+
+  document.getElementById('kbKpiTotal').textContent = filtered.length;
+  document.getElementById('kbKpiScheduled').textContent = buckets.scheduled.length;
+  document.getElementById('kbKpiMeasuring').textContent = buckets.measuring.length;
+  document.getElementById('kbKpiDone').textContent = buckets.done.length;
+  document.getElementById('kbKpiCancel').textContent = buckets.cancel.length;
+}
+
+
 // ═══ URL 생성 & Bitly ═══
 var _selectedCampaignIdx = -1;
 
