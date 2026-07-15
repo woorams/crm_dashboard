@@ -6522,10 +6522,20 @@ var server = http.createServer(async function (req, res) {
           var tbl = ident(sp.get("table"));
           if (sp.get("sample")) {
             var colList = (sp.get("columns") || "").split(",").map(function (c) { return c.trim(); }).filter(Boolean).map(ident);
-            var topN = Math.min(parseInt(sp.get("top")) || 5, 20);
+            var topN = Math.min(parseInt(sp.get("top")) || 5, 30);
             var sel = colList.length ? colList.map(function (c) { return "[" + c + "]"; }).join(",") : "*";
-            var sr = await pool.request().query("SELECT TOP " + topN + " " + sel + " FROM " + pfx + "dbo.[" + tbl + "] WITH (NOLOCK)");
-            out.sample = sr.recordset;
+            var orderSql = sp.get("orderby") ? (" ORDER BY [" + ident(sp.get("orderby")) + "] DESC") : "";
+            var whereSql = "";
+            if (sp.get("wherecol") && sp.get("whereval")) {
+              var wc = ident(sp.get("wherecol"));
+              var wreq0 = pool.request();
+              wreq0.input("wv", sql.VarChar(50), sp.get("whereval"));
+              var sr = await wreq0.query("SELECT TOP " + topN + " " + sel + " FROM " + pfx + "dbo.[" + tbl + "] WITH (NOLOCK) WHERE [" + wc + "] = @wv" + orderSql);
+              out.sample = sr.recordset;
+            } else {
+              var sr2 = await pool.request().query("SELECT TOP " + topN + " " + sel + " FROM " + pfx + "dbo.[" + tbl + "] WITH (NOLOCK)" + orderSql);
+              out.sample = sr2.recordset;
+            }
           } else {
             var rq2 = pool.request();
             rq2.input("t", sql.VarChar(128), tbl);
