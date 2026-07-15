@@ -6502,6 +6502,37 @@ var server = http.createServer(async function (req, res) {
       return;
     }
 
+    // [임시 진단] 모바일청첩장(TB_Invitation)에 예식 일시(시간 포함) 데이터가 있는지 확인용. 확인 후 제거 예정.
+    if (pathname === "/api/_invitation-schema" && req.method === "GET") {
+      try {
+        if (!pool) pool = await sql.connect(dbConfig);
+        var colsRes = await pool.request().query(
+          "SELECT COLUMN_NAME, DATA_TYPE FROM barunson.INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'TB_Invitation' ORDER BY ORDINAL_POSITION"
+        );
+        var invCols = colsRes.recordset || [];
+        // 예식 일시 후보: 타입이 date/datetime/time 이거나 이름에 date/time/wedd/marry/예식 포함 (이름·연락처 등 PII 컬럼은 제외)
+        var cand = invCols.filter(function (c) {
+          var n = (c.COLUMN_NAME || "").toLowerCase();
+          var t = (c.DATA_TYPE || "").toLowerCase();
+          return /date|time/.test(t) || /(date|time|wedd|marry|yesik|예식|dttm|dtm)/.test(n);
+        }).map(function (c) { return c.COLUMN_NAME; });
+        var invSamples = [];
+        if (cand.length) {
+          var selCols = cand.map(function (c) { return "[" + c + "]"; }).join(", ");
+          var sampRes = await pool.request().query(
+            "SELECT TOP 5 " + selCols + " FROM barunson.dbo.TB_Invitation WITH (NOLOCK) ORDER BY Regist_DateTime DESC"
+          );
+          invSamples = sampRes.recordset || [];
+        }
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, columns: invCols, candidateTimeColumns: cand, samples: invSamples }));
+      } catch (e) {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+      return;
+    }
+
     // Bitly API: 단축 URL 생성
     if (pathname === "/api/bitly-shorten" && req.method === "POST") {
       var bBody = await parseBody(req);
