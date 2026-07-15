@@ -6502,30 +6502,41 @@ var server = http.createServer(async function (req, res) {
       return;
     }
 
-    // [임시 진단] 모바일청첩장(TB_Invitation)에 예식 일시(시간 포함) 데이터가 있는지 확인용. 확인 후 제거 예정.
-    if (pathname === "/api/_invitation-schema" && req.method === "GET") {
+    // [임시 진단] 읽기전용 스키마/샘플 탐색기 — 종이청첩장의 예식 일시 데이터 위치 확인용. 확인 후 제거 예정.
+    // ?cols=<컬럼명패턴>  |  ?table=<T>  |  ?table=<T>&sample=1&columns=a,b&top=5  |  &db=barunson (기본 현재 DB)
+    if (pathname === "/api/_schema" && req.method === "GET") {
       try {
         if (!pool) pool = await sql.connect(dbConfig);
-        var colsRes = await pool.request().query(
-          "SELECT COLUMN_NAME, DATA_TYPE FROM barunson.INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'TB_Invitation' ORDER BY ORDINAL_POSITION"
-        );
-        var invCols = colsRes.recordset || [];
-        // 예식 일시 후보: 타입이 date/datetime/time 이거나 이름에 date/time/wedd/marry/예식 포함 (이름·연락처 등 PII 컬럼은 제외)
-        var cand = invCols.filter(function (c) {
-          var n = (c.COLUMN_NAME || "").toLowerCase();
-          var t = (c.DATA_TYPE || "").toLowerCase();
-          return /date|time/.test(t) || /(date|time|wedd|marry|yesik|예식|dttm|dtm)/.test(n);
-        }).map(function (c) { return c.COLUMN_NAME; });
-        var invSamples = [];
-        if (cand.length) {
-          var selCols = cand.map(function (c) { return "[" + c + "]"; }).join(", ");
-          var sampRes = await pool.request().query(
-            "SELECT TOP 5 " + selCols + " FROM barunson.dbo.TB_Invitation WITH (NOLOCK) ORDER BY Regist_DateTime DESC"
-          );
-          invSamples = sampRes.recordset || [];
+        var sp = parsedUrl.searchParams;
+        var dbName = sp.get("db") || "";
+        if (dbName && !/^[A-Za-z0-9_]+$/.test(dbName)) throw new Error("bad db");
+        var pfx = dbName ? (dbName + ".") : "";
+        var ident = function (v) { if (!/^[A-Za-z0-9_]+$/.test(v)) throw new Error("bad identifier: " + v); return v; };
+        var out = { ok: true, db: dbName || "(current)" };
+        if (sp.get("cols")) {
+          var rq = pool.request();
+          rq.input("pat", sql.VarChar(100), "%" + sp.get("cols") + "%");
+          var cr = await rq.query("SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE FROM " + pfx + "INFORMATION_SCHEMA.COLUMNS WHERE COLUMN_NAME LIKE @pat ORDER BY TABLE_NAME, ORDINAL_POSITION");
+          out.matches = cr.recordset;
+        } else if (sp.get("table")) {
+          var tbl = ident(sp.get("table"));
+          if (sp.get("sample")) {
+            var colList = (sp.get("columns") || "").split(",").map(function (c) { return c.trim(); }).filter(Boolean).map(ident);
+            var topN = Math.min(parseInt(sp.get("top")) || 5, 20);
+            var sel = colList.length ? colList.map(function (c) { return "[" + c + "]"; }).join(",") : "*";
+            var sr = await pool.request().query("SELECT TOP " + topN + " " + sel + " FROM " + pfx + "dbo.[" + tbl + "] WITH (NOLOCK)");
+            out.sample = sr.recordset;
+          } else {
+            var rq2 = pool.request();
+            rq2.input("t", sql.VarChar(128), tbl);
+            var cr2 = await rq2.query("SELECT COLUMN_NAME, DATA_TYPE FROM " + pfx + "INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME=@t ORDER BY ORDINAL_POSITION");
+            out.columns = cr2.recordset;
+          }
+        } else {
+          out.usage = "?cols=<pattern> | ?table=<T> | ?table=<T>&sample=1&columns=a,b&top=5 | &db=barunson";
         }
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: true, columns: invCols, candidateTimeColumns: cand, samples: invSamples }));
+        res.end(JSON.stringify(out));
       } catch (e) {
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: false, error: e.message }));
