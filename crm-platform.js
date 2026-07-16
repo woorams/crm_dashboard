@@ -690,6 +690,9 @@ function buildQuery(filters) {
     "  CASE WHEN u.wedd_year IS NOT NULL AND u.wedd_year <> '' AND u.wedd_year <> '0'\n" +
     "    THEN DATEDIFF(DAY, GETDATE(), CAST(u.wedd_year + '-' + RIGHT('0'+COALESCE(NULLIF(u.wedd_month,''),'1'),2) + '-' + RIGHT('0'+COALESCE(NULLIF(u.wedd_day,''),'1'),2) AS DATE))\n" +
     "    ELSE NULL END AS [잔여일수],\n" +
+    // 예식시간: 종이청첩장 주문 시 고객이 입력한 값(custom_order_plistAddD). 예식일이 있을 때만 노출.
+    "  CASE WHEN u.wedd_year IS NOT NULL AND u.wedd_year <> '' AND u.wedd_year <> '0'\n" +
+    "    THEN wt.wedd_time ELSE NULL END AS [예식시간],\n" +
     "  cpn.coupon_names AS [소지쿠폰],\n" +
     "  cvw.card_view_cnt AS [카드조회수],\n" +
     "  CASE u.REFERER_SALES_GUBUN WHEN 'SB' THEN '바른손카드' WHEN 'BM' THEN 'M카드' WHEN 'B' THEN '바른손몰' WHEN 'SS' THEN '프리미어페이퍼' ELSE COALESCE(u.REFERER_SALES_GUBUN,'기타') END AS [가입사이트]\n";
@@ -710,12 +713,30 @@ function buildQuery(filters) {
     "  SELECT COUNT(*) AS card_view_cnt\n" +
     "  FROM S5_TodayViewItems tv WITH (NOLOCK)\n" +
     "  WHERE tv.uid = u.uid\n" +
-    ") cvw\n";
+    ") cvw\n" +
+    // 예식시간은 종이청첩장 주문 상세에만 있다(회원정보엔 날짜만 있고 UserInfo.WeddDate도 시각이 전부 00:00).
+    // 경로: custom_order.member_id → custom_order_plist.order_seq → .id = custom_order_plistAddD.pid
+    // 반드시 '회원의 예식일과 같은 날짜'의 주문만 채택한다. 다른 날짜(과거/재주문) 주문의 시간을 끌어오면
+    // 예식 1시간 전 발송 같은 용도에서 엉뚱한 시각으로 오발송된다.
+    "OUTER APPLY (\n" +
+    "  SELECT TOP 1\n" +
+    "    LTRIM(RTRIM(COALESCE(pad.event_ampm,''))) + ' ' + LTRIM(RTRIM(pad.event_hour)) + ':' +\n" +
+    "      RIGHT('0' + LTRIM(RTRIM(COALESCE(NULLIF(pad.event_minute,''),'0'))), 2) AS wedd_time\n" +
+    "  FROM custom_order co2 WITH (NOLOCK)\n" +
+    "  INNER JOIN custom_order_plist cpl WITH (NOLOCK) ON cpl.order_seq = co2.order_seq\n" +
+    "  INNER JOIN custom_order_plistAddD pad WITH (NOLOCK) ON pad.pid = cpl.id\n" +
+    "  WHERE co2.member_id = u.uid\n" +
+    "    AND pad.event_hour IS NOT NULL AND LTRIM(RTRIM(pad.event_hour)) <> ''\n" +
+    "    AND pad.event_year = u.wedd_year\n" +
+    "    AND RIGHT('0'+LTRIM(RTRIM(COALESCE(pad.event_month,''))),2) = RIGHT('0'+COALESCE(NULLIF(u.wedd_month,''),'1'),2)\n" +
+    "    AND RIGHT('0'+LTRIM(RTRIM(COALESCE(pad.event_day,''))),2) = RIGHT('0'+COALESCE(NULLIF(u.wedd_day,''),'1'),2)\n" +
+    "  ORDER BY co2.order_date DESC\n" +
+    ") wt\n";
 
   var query;
   if (isAllSites) {
     // 전체 사이트: 휴대폰번호 기준 중복 제거 (가장 최근 가입 1건만)
-    query = "SELECT TOP (" + limit + ") [이름],[휴대폰번호],[회원ID],[가입일],[예식일],[잔여일수],[소지쿠폰],[카드조회수],[가입사이트] FROM (\n" +
+    query = "SELECT TOP (" + limit + ") [이름],[휴대폰번호],[회원ID],[가입일],[예식일],[예식시간],[잔여일수],[소지쿠폰],[카드조회수],[가입사이트] FROM (\n" +
       "  SELECT\n" + selectCols + ",\n" +
       "    ROW_NUMBER() OVER (PARTITION BY u.hand_phone1+u.hand_phone2+u.hand_phone3 ORDER BY u.reg_date DESC) AS _rn\n" +
       "  " + fromClause +
@@ -861,7 +882,7 @@ function buildAdminExcel(rows, campaignName) {
   ];
 
   // === 시트2: 대상자 raw (전체 데이터) ===
-  var rawData = [["이름", "휴대폰번호", "회원ID", "가입일", "예식일", "잔여일수", "소지쿠폰", "카드조회수"]];
+  var rawData = [["이름", "휴대폰번호", "회원ID", "가입일", "예식일", "예식시간", "잔여일수", "소지쿠폰", "카드조회수"]];
   for (var j = 0; j < rows.length; j++) {
     var d = rows[j];
     rawData.push([
@@ -870,6 +891,7 @@ function buildAdminExcel(rows, campaignName) {
       d["회원ID"] || "",
       d["가입일"] || "",
       d["예식일"] || "",
+      d["예식시간"] || "",
       d["잔여일수"] != null ? d["잔여일수"] : "",
       d["소지쿠폰"] || "",
       d["카드조회수"] != null ? d["카드조회수"] : 0
@@ -878,7 +900,7 @@ function buildAdminExcel(rows, campaignName) {
   var ws2 = XLSX.utils.aoa_to_sheet(rawData);
   ws2["!cols"] = [
     { wch: 10 }, { wch: 16 }, { wch: 20 }, { wch: 12 },
-    { wch: 12 }, { wch: 10 }, { wch: 40 }, { wch: 10 }
+    { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 40 }, { wch: 10 }
   ];
 
   XLSX.utils.book_append_sheet(wb, ws1, "message_upload");
@@ -6418,12 +6440,12 @@ function renderExtResult(data) {
   if (data.rows.length === 0) {
     html += '<div class="empty-state"><p>조건에 맞는 대상자가 없습니다</p></div>';
   } else {
-    html += '<div class="table-wrap"><table class="ext-table"><thead><tr><th>No</th><th>이름</th><th>휴대폰번호</th><th>회원ID</th><th>가입일</th><th>예식일</th><th>잔여일수</th><th>소지쿠폰</th><th>카드조회수</th></tr></thead><tbody>';
+    html += '<div class="table-wrap"><table class="ext-table"><thead><tr><th>No</th><th>이름</th><th>휴대폰번호</th><th>회원ID</th><th>가입일</th><th>예식일</th><th>예식시간</th><th>잔여일수</th><th>소지쿠폰</th><th>카드조회수</th></tr></thead><tbody>';
     data.rows.forEach(function(r, i) {
       var daysLeft = r['잔여일수'] != null ? (r['잔여일수'] < 0 ? '<span style="color:#9ca3af">' + r['잔여일수'] + '일</span>' : r['잔여일수'] === 0 ? '<span style="color:#dc2626;font-weight:bold">D-Day</span>' : '<span style="color:#2563eb;font-weight:bold">D-' + r['잔여일수'] + '</span>') : '-';
       var cvCnt = r['카드조회수'] != null ? r['카드조회수'] : 0;
       var cvDisplay = cvCnt > 0 ? '<span style="color:#2563eb;font-weight:600">' + cvCnt + '</span>' : '<span style="color:#ccc">0</span>';
-      html += '<tr><td>' + (i+1) + '</td><td>' + escHtml(r['이름']) + '</td><td>' + escHtml(r['휴대폰번호']) + '</td><td>' + escHtml(r['회원ID']) + '</td><td>' + escHtml(r['가입일']) + '</td><td>' + escHtml(r['예식일']||'-') + '</td><td>' + daysLeft + '</td><td>' + escHtml(r['소지쿠폰']||'') + '</td><td style="text-align:center">' + cvDisplay + '</td></tr>';
+      html += '<tr><td>' + (i+1) + '</td><td>' + escHtml(r['이름']) + '</td><td>' + escHtml(r['휴대폰번호']) + '</td><td>' + escHtml(r['회원ID']) + '</td><td>' + escHtml(r['가입일']) + '</td><td>' + escHtml(r['예식일']||'-') + '</td><td>' + escHtml(r['예식시간']||'-') + '</td><td>' + daysLeft + '</td><td>' + escHtml(r['소지쿠폰']||'') + '</td><td style="text-align:center">' + cvDisplay + '</td></tr>';
     });
     html += '</tbody></table></div>';
   }
@@ -7355,7 +7377,28 @@ var server = http.createServer(async function (req, res) {
                         "MIN(ExpirationDate) AS min_exp, MAX(ExpirationDate) AS max_exp FROM UserBasket WITH (NOLOCK)",
             // ExpirationDate가 '마지막활동+60일'인지 '생성+60일'인지 확인 (SQL 프리필터 설계 근거)
             expsample: "SELECT TOP 5 ExpirationDate, CardItemCount, LEN(BasketJsonData) AS json_len, BasketJsonData " +
-                       "FROM UserBasket WITH (NOLOCK) WHERE CardItemCount > 0 ORDER BY ExpirationDate DESC"
+                       "FROM UserBasket WITH (NOLOCK) WHERE CardItemCount > 0 ORDER BY ExpirationDate DESC",
+            // 예식시간 OUTER APPLY가 실제로 도는지 + 채움율. 예식일 있는 최근 회원 30명 기준.
+            weddtime: "SELECT TOP 30 u.uid, " +
+                      "  u.wedd_year + '-' + RIGHT('0'+COALESCE(NULLIF(u.wedd_month,''),'1'),2) + '-' + RIGHT('0'+COALESCE(NULLIF(u.wedd_day,''),'1'),2) AS wedd_date, " +
+                      "  wt.wedd_time " +
+                      "FROM S2_UserInfo u WITH (NOLOCK) " +
+                      "OUTER APPLY ( " +
+                      "  SELECT TOP 1 LTRIM(RTRIM(COALESCE(pad.event_ampm,''))) + ' ' + LTRIM(RTRIM(pad.event_hour)) + ':' + " +
+                      "    RIGHT('0' + LTRIM(RTRIM(COALESCE(NULLIF(pad.event_minute,''),'0'))), 2) AS wedd_time " +
+                      "  FROM custom_order co2 WITH (NOLOCK) " +
+                      "  INNER JOIN custom_order_plist cpl WITH (NOLOCK) ON cpl.order_seq = co2.order_seq " +
+                      "  INNER JOIN custom_order_plistAddD pad WITH (NOLOCK) ON pad.pid = cpl.id " +
+                      "  WHERE co2.member_id = u.uid " +
+                      "    AND pad.event_hour IS NOT NULL AND LTRIM(RTRIM(pad.event_hour)) <> '' " +
+                      "    AND pad.event_year = u.wedd_year " +
+                      "    AND RIGHT('0'+LTRIM(RTRIM(COALESCE(pad.event_month,''))),2) = RIGHT('0'+COALESCE(NULLIF(u.wedd_month,''),'1'),2) " +
+                      "    AND RIGHT('0'+LTRIM(RTRIM(COALESCE(pad.event_day,''))),2) = RIGHT('0'+COALESCE(NULLIF(u.wedd_day,''),'1'),2) " +
+                      "  ORDER BY co2.order_date DESC " +
+                      ") wt " +
+                      "WHERE u.wedd_year IS NOT NULL AND u.wedd_year <> '' AND u.wedd_year <> '0' " +
+                      "  AND EXISTS (SELECT 1 FROM custom_order co3 WITH (NOLOCK) WHERE co3.member_id = u.uid) " +
+                      "ORDER BY u.reg_date DESC"
           };
           var pKey = sp.get("probe");
           if (!probes[pKey]) throw new Error("unknown probe: " + pKey);
