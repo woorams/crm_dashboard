@@ -7343,6 +7343,31 @@ var server = http.createServer(async function (req, res) {
         var pfx = dbName ? (dbName + ".") : "";
         var ident = function (v) { if (!/^[A-Za-z0-9_]+$/.test(v)) throw new Error("bad identifier: " + v); return v; };
         var out = { ok: true, db: dbName || "(current)" };
+        // [임시] 고정 프로브. 사용자 SQL을 받지 않고 미리 정한 진단 쿼리만 실행한다.
+        if (sp.get("probe")) {
+          var probes = {
+            // OPENJSON은 호환성수준 130 미만이면 'WITH' 근처 구문오류가 난다. 원인 확정용.
+            compat: "SELECT DB_NAME() AS db_name, compatibility_level, @@VERSION AS version " +
+                    "FROM sys.databases WHERE database_id = DB_ID()",
+            openjson: "SELECT TOP 1 CardSeq FROM OPENJSON('[{\"CardSeq\":7}]') " +
+                      "WITH (CardSeq int '$.CardSeq') AS j",
+            basketsize: "SELECT COUNT(*) AS total_baskets, SUM(CASE WHEN CardItemCount > 0 THEN 1 ELSE 0 END) AS with_cards, " +
+                        "MIN(ExpirationDate) AS min_exp, MAX(ExpirationDate) AS max_exp FROM UserBasket WITH (NOLOCK)",
+            // ExpirationDate가 '마지막활동+60일'인지 '생성+60일'인지 확인 (SQL 프리필터 설계 근거)
+            expsample: "SELECT TOP 5 ExpirationDate, CardItemCount, LEN(BasketJsonData) AS json_len, BasketJsonData " +
+                       "FROM UserBasket WITH (NOLOCK) WHERE CardItemCount > 0 ORDER BY ExpirationDate DESC"
+          };
+          var pKey = sp.get("probe");
+          if (!probes[pKey]) throw new Error("unknown probe: " + pKey);
+          var pStart = Date.now();
+          var pRes = await pool.request().query(probes[pKey]);
+          out.probe = pKey;
+          out.elapsedMs = Date.now() - pStart;
+          out.rows = pRes.recordset;
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+          res.end(JSON.stringify(out));
+          return;
+        }
         // [임시] 장바구니(UserBasket+OPENJSON) 조건 검증용. buildCartExistsSql을 그대로 태워
         // OPENJSON 지원·시간대 파싱·건수를 실제로 확인한다. 검증 후 진단기와 함께 제거.
         if (sp.get("carttest")) {
