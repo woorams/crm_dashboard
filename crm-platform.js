@@ -690,7 +690,7 @@ function buildQuery(filters) {
     "  CASE WHEN u.wedd_year IS NOT NULL AND u.wedd_year <> '' AND u.wedd_year <> '0'\n" +
     "    THEN DATEDIFF(DAY, GETDATE(), CAST(u.wedd_year + '-' + RIGHT('0'+COALESCE(NULLIF(u.wedd_month,''),'1'),2) + '-' + RIGHT('0'+COALESCE(NULLIF(u.wedd_day,''),'1'),2) AS DATE))\n" +
     "    ELSE NULL END AS [잔여일수],\n" +
-    // 예식시간: 종이청첩장 주문 시 고객이 입력한 값(custom_order_plistAddD). 예식일이 있을 때만 노출.
+    // 예식시간: 청첩장 주문 시 고객이 입력한 값(custom_order_WeddInfo). 예식일이 있을 때만 노출.
     "  CASE WHEN u.wedd_year IS NOT NULL AND u.wedd_year <> '' AND u.wedd_year <> '0'\n" +
     "    THEN wt.wedd_time ELSE NULL END AS [예식시간],\n" +
     "  cpn.coupon_names AS [소지쿠폰],\n" +
@@ -714,22 +714,26 @@ function buildQuery(filters) {
     "  FROM S5_TodayViewItems tv WITH (NOLOCK)\n" +
     "  WHERE tv.uid = u.uid\n" +
     ") cvw\n" +
-    // 예식시간은 종이청첩장 주문 상세에만 있다(회원정보엔 날짜만 있고 UserInfo.WeddDate도 시각이 전부 00:00).
-    // 경로: custom_order.member_id → custom_order_plist.order_seq → .id = custom_order_plistAddD.pid
-    // 반드시 '회원의 예식일과 같은 날짜'의 주문만 채택한다. 다른 날짜(과거/재주문) 주문의 시간을 끌어오면
-    // 예식 1시간 전 발송 같은 용도에서 엉뚱한 시각으로 오발송된다.
+    // 예식시간은 청첩장 주문 시 고객이 입력한 값에만 있다. 회원정보(S2_UserInfo)엔 wedd_hour/minute
+    // 컬럼이 있지만 실제로 채워지지 않고(빈 문자열), UserInfo.WeddDate도 시각부가 전부 00:00이다.
+    // 주력 저장소는 custom_order_WeddInfo이며 custom_order.weddinfo_id로 연결된다
+    // (weddinfo_id는 보통 자기 order_seq지만, 이전 주문의 예식정보를 재사용하면 다른 값이 들어온다).
+    // custom_order_plistAddD에도 같은 필드가 있으나 '카드내지인쇄' 계열에서만 쓰여 채움율이 1% 수준이라 쓰지 않는다.
+    //
+    // 반드시 '회원 프로필의 예식일과 같은 날짜'의 주문만 채택한다. 프로필 예식일이 실제 주문(청첩장에
+    // 인쇄된) 날짜와 다른 회원이 꽤 있어서, 날짜를 안 맞추면 엉뚱한 예식의 시각을 가져온다.
     "OUTER APPLY (\n" +
     "  SELECT TOP 1\n" +
-    "    LTRIM(RTRIM(COALESCE(pad.event_ampm,''))) + ' ' + LTRIM(RTRIM(pad.event_hour)) + ':' +\n" +
-    "      RIGHT('0' + LTRIM(RTRIM(COALESCE(NULLIF(pad.event_minute,''),'0'))), 2) AS wedd_time\n" +
+    "    LTRIM(RTRIM(COALESCE(wi.event_ampm,''))) + ' ' + LTRIM(RTRIM(wi.event_hour)) + ':' +\n" +
+    "      RIGHT('0' + LTRIM(RTRIM(COALESCE(NULLIF(wi.event_minute,''),'0'))), 2) AS wedd_time\n" +
     "  FROM custom_order co2 WITH (NOLOCK)\n" +
-    "  INNER JOIN custom_order_plist cpl WITH (NOLOCK) ON cpl.order_seq = co2.order_seq\n" +
-    "  INNER JOIN custom_order_plistAddD pad WITH (NOLOCK) ON pad.pid = cpl.id\n" +
+    "  INNER JOIN custom_order_WeddInfo wi WITH (NOLOCK)\n" +
+    "    ON wi.order_seq = COALESCE(NULLIF(co2.weddinfo_id, 0), co2.order_seq)\n" +
     "  WHERE co2.member_id = u.uid\n" +
-    "    AND pad.event_hour IS NOT NULL AND LTRIM(RTRIM(pad.event_hour)) <> ''\n" +
-    "    AND pad.event_year = u.wedd_year\n" +
-    "    AND RIGHT('0'+LTRIM(RTRIM(COALESCE(pad.event_month,''))),2) = RIGHT('0'+COALESCE(NULLIF(u.wedd_month,''),'1'),2)\n" +
-    "    AND RIGHT('0'+LTRIM(RTRIM(COALESCE(pad.event_day,''))),2) = RIGHT('0'+COALESCE(NULLIF(u.wedd_day,''),'1'),2)\n" +
+    "    AND wi.event_hour IS NOT NULL AND LTRIM(RTRIM(wi.event_hour)) <> ''\n" +
+    "    AND wi.event_year = u.wedd_year\n" +
+    "    AND RIGHT('0'+LTRIM(RTRIM(COALESCE(wi.event_month,''))),2) = RIGHT('0'+COALESCE(NULLIF(u.wedd_month,''),'1'),2)\n" +
+    "    AND RIGHT('0'+LTRIM(RTRIM(COALESCE(wi.event_Day,''))),2) = RIGHT('0'+COALESCE(NULLIF(u.wedd_day,''),'1'),2)\n" +
     "  ORDER BY co2.order_date DESC\n" +
     ") wt\n";
 
@@ -7378,27 +7382,29 @@ var server = http.createServer(async function (req, res) {
             // ExpirationDate가 '마지막활동+60일'인지 '생성+60일'인지 확인 (SQL 프리필터 설계 근거)
             expsample: "SELECT TOP 5 ExpirationDate, CardItemCount, LEN(BasketJsonData) AS json_len, BasketJsonData " +
                        "FROM UserBasket WITH (NOLOCK) WHERE CardItemCount > 0 ORDER BY ExpirationDate DESC",
-            // 예식시간 OUTER APPLY가 실제로 도는지 + 채움율. 예식일 있는 최근 회원 30명 기준.
-            weddtime: "SELECT TOP 30 u.uid, " +
+            // 예식시간 채움율 — 이번주 예식자(D-0~D+7) 중 청첩장 주문 이력이 있는 회원 기준.
+            // '주문 있는 회원 대비 시간 확보율'이 실사용 지표라 EXISTS(custom_order)로 좁힌다.
+            weddtime: "SELECT TOP 40 " +
                       "  u.wedd_year + '-' + RIGHT('0'+COALESCE(NULLIF(u.wedd_month,''),'1'),2) + '-' + RIGHT('0'+COALESCE(NULLIF(u.wedd_day,''),'1'),2) AS wedd_date, " +
                       "  wt.wedd_time " +
                       "FROM S2_UserInfo u WITH (NOLOCK) " +
                       "OUTER APPLY ( " +
-                      "  SELECT TOP 1 LTRIM(RTRIM(COALESCE(pad.event_ampm,''))) + ' ' + LTRIM(RTRIM(pad.event_hour)) + ':' + " +
-                      "    RIGHT('0' + LTRIM(RTRIM(COALESCE(NULLIF(pad.event_minute,''),'0'))), 2) AS wedd_time " +
+                      "  SELECT TOP 1 LTRIM(RTRIM(COALESCE(wi.event_ampm,''))) + ' ' + LTRIM(RTRIM(wi.event_hour)) + ':' + " +
+                      "    RIGHT('0' + LTRIM(RTRIM(COALESCE(NULLIF(wi.event_minute,''),'0'))), 2) AS wedd_time " +
                       "  FROM custom_order co2 WITH (NOLOCK) " +
-                      "  INNER JOIN custom_order_plist cpl WITH (NOLOCK) ON cpl.order_seq = co2.order_seq " +
-                      "  INNER JOIN custom_order_plistAddD pad WITH (NOLOCK) ON pad.pid = cpl.id " +
+                      "  INNER JOIN custom_order_WeddInfo wi WITH (NOLOCK) " +
+                      "    ON wi.order_seq = COALESCE(NULLIF(co2.weddinfo_id, 0), co2.order_seq) " +
                       "  WHERE co2.member_id = u.uid " +
-                      "    AND pad.event_hour IS NOT NULL AND LTRIM(RTRIM(pad.event_hour)) <> '' " +
-                      "    AND pad.event_year = u.wedd_year " +
-                      "    AND RIGHT('0'+LTRIM(RTRIM(COALESCE(pad.event_month,''))),2) = RIGHT('0'+COALESCE(NULLIF(u.wedd_month,''),'1'),2) " +
-                      "    AND RIGHT('0'+LTRIM(RTRIM(COALESCE(pad.event_day,''))),2) = RIGHT('0'+COALESCE(NULLIF(u.wedd_day,''),'1'),2) " +
+                      "    AND wi.event_hour IS NOT NULL AND LTRIM(RTRIM(wi.event_hour)) <> '' " +
+                      "    AND wi.event_year = u.wedd_year " +
+                      "    AND RIGHT('0'+LTRIM(RTRIM(COALESCE(wi.event_month,''))),2) = RIGHT('0'+COALESCE(NULLIF(u.wedd_month,''),'1'),2) " +
+                      "    AND RIGHT('0'+LTRIM(RTRIM(COALESCE(wi.event_Day,''))),2) = RIGHT('0'+COALESCE(NULLIF(u.wedd_day,''),'1'),2) " +
                       "  ORDER BY co2.order_date DESC " +
                       ") wt " +
                       "WHERE u.wedd_year IS NOT NULL AND u.wedd_year <> '' AND u.wedd_year <> '0' " +
-                      "  AND EXISTS (SELECT 1 FROM custom_order co3 WITH (NOLOCK) WHERE co3.member_id = u.uid) " +
-                      "ORDER BY u.reg_date DESC"
+                      "  AND TRY_CONVERT(date, u.wedd_year + RIGHT('0'+COALESCE(NULLIF(u.wedd_month,''),'1'),2) + RIGHT('0'+COALESCE(NULLIF(u.wedd_day,''),'1'),2)) " +
+                      "      BETWEEN CAST(GETDATE() AS date) AND DATEADD(day, 7, CAST(GETDATE() AS date)) " +
+                      "  AND EXISTS (SELECT 1 FROM custom_order co3 WITH (NOLOCK) WHERE co3.member_id = u.uid) "
           };
           var pKey = sp.get("probe");
           if (!probes[pKey]) throw new Error("unknown probe: " + pKey);
