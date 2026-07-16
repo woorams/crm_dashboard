@@ -450,6 +450,35 @@ async function ensureCartSchema() {
   }
 }
 
+// ── 예식일/예식시간 공통 정의 ──────────────────────────────────────────
+// 회원 프로필(S2_UserInfo.wedd_*)의 예식일은 가입 때 넣고 안 고치는 경우가 많아, 실제로 청첩장에
+// 인쇄해 돌린 주문서(custom_order_WeddInfo)의 예식일과 다른 회원이 존재한다. 주문서가 더 정확하므로
+// 주문서 우선, 주문 이력이 없으면 프로필로 보완한다(그래야 D-30/D-60/금주예식자 도달범위가 유지됨).
+// 필터·표시·잔여일수가 어긋나지 않도록 표현식을 여기서 한 번만 정의해 공유한다.
+var WEDD_PROFILE_YMD =
+  "CASE WHEN u.wedd_year IS NOT NULL AND u.wedd_year <> '' AND u.wedd_year <> '0'\n" +
+  "    THEN u.wedd_year + RIGHT('0' + COALESCE(NULLIF(u.wedd_month,''),'1'), 2) + RIGHT('0' + COALESCE(NULLIF(u.wedd_day,''),'1'), 2)\n" +
+  "    ELSE NULL END";
+// 유효 예식일(YYYYMMDD). 주문서 → 없으면 프로필.
+var WEDD_EFF_YMD = "COALESCE(wt.event_ymd, " + WEDD_PROFILE_YMD + ")";
+// weddinfo_id는 보통 자기 order_seq지만, 이전 주문의 예식정보를 재사용하면 다른 주문의 seq가 들어온다.
+var WEDD_ORDER_APPLY =
+  "OUTER APPLY (\n" +
+  "  SELECT TOP 1\n" +
+  "    wi.event_year + RIGHT('0'+LTRIM(RTRIM(COALESCE(wi.event_month,''))),2)\n" +
+  "      + RIGHT('0'+LTRIM(RTRIM(COALESCE(wi.event_Day,''))),2) AS event_ymd,\n" +
+  "    CASE WHEN wi.event_hour IS NOT NULL AND LTRIM(RTRIM(wi.event_hour)) <> ''\n" +
+  "      THEN LTRIM(RTRIM(COALESCE(wi.event_ampm,''))) + ' ' + LTRIM(RTRIM(wi.event_hour)) + ':'\n" +
+  "           + RIGHT('0' + LTRIM(RTRIM(COALESCE(NULLIF(wi.event_minute,''),'0'))), 2)\n" +
+  "      ELSE NULL END AS wedd_time\n" +
+  "  FROM custom_order co2 WITH (NOLOCK)\n" +
+  "  INNER JOIN custom_order_WeddInfo wi WITH (NOLOCK)\n" +
+  "    ON wi.order_seq = COALESCE(NULLIF(co2.weddinfo_id, 0), co2.order_seq)\n" +
+  "  WHERE co2.member_id = u.uid\n" +
+  "    AND wi.event_year IS NOT NULL AND LTRIM(RTRIM(wi.event_year)) <> '' AND wi.event_year <> '0'\n" +
+  "  ORDER BY co2.order_date DESC\n" +
+  ") wt\n";
+
 function buildQuery(filters) {
   var inputs = [];
   var baseConditions = [];
@@ -570,25 +599,30 @@ function buildQuery(filters) {
   }
 
   if (filters.weddingDateFrom || filters.weddingDateTo) {
-    // 예식일은 baseConditions 최상단에 추가하여 DB가 먼저 필터링하도록 함
-    var wp = ["u.wedd_year IS NOT NULL", "u.wedd_year <> ''", "u.wedd_year <> '0'"];
     var fromDate = filters.weddingDateFrom ? filters.weddingDateFrom.replace(/-/g, "") : null;
     var toDate = filters.weddingDateTo ? addDay(filters.weddingDateTo).replace(/-/g, "") : null;
-    // wedd_year 단독 필터로 범위 대폭 축소
-    if (fromDate) wp.push("u.wedd_year >= '" + fromDate.substring(0, 4) + "'");
-    if (toDate) wp.push("u.wedd_year <= '" + toDate.substring(0, 4) + "'");
-    // 정밀 필터 (년월일 결합)
-    var wExpr = "u.wedd_year + RIGHT('0' + COALESCE(NULLIF(u.wedd_month,''),'1'), 2) + RIGHT('0' + COALESCE(NULLIF(u.wedd_day,''),'1'), 2)";
+    var profileExpr = "u.wedd_year + RIGHT('0' + COALESCE(NULLIF(u.wedd_month,''),'1'), 2) + RIGHT('0' + COALESCE(NULLIF(u.wedd_day,''),'1'), 2)";
+    var orderExpr = "wt.event_ymd";
+
+    // 사전 필터(슈퍼셋): 프로필 연도 또는 주문서 연도가 범위 안. 정밀조건 전에 후보를 줄여
+    // 기존의 'wedd_year로 먼저 좁히는' 성능 특성을 최대한 유지한다.
+    var yearPre = [];
+    if (fromDate) yearPre.push("(u.wedd_year >= '" + fromDate.substring(0, 4) + "' OR LEFT(wt.event_ymd,4) >= '" + fromDate.substring(0, 4) + "')");
+    if (toDate) yearPre.push("(u.wedd_year <= '" + toDate.substring(0, 4) + "' OR LEFT(wt.event_ymd,4) <= '" + toDate.substring(0, 4) + "')");
+
+    // 정밀 필터: 유효 예식일(주문서 우선, 없으면 프로필) 기준.
+    // 주문 이력이 없는 회원은 wt.event_ymd가 NULL이라 프로필 값이 그대로 쓰인다 → 기존 동작 그대로.
+    var wp = [WEDD_EFF_YMD + " IS NOT NULL"];
+    for (var yp = 0; yp < yearPre.length; yp++) wp.push(yearPre[yp]);
     if (fromDate) {
       inputs.push({ name: "weddFrom", type: sql.VarChar(8), value: fromDate });
-      wp.push(wExpr + " >= @weddFrom");
+      wp.push(WEDD_EFF_YMD + " >= @weddFrom");
     }
     if (toDate) {
       inputs.push({ name: "weddTo", type: sql.VarChar(8), value: toDate });
-      wp.push(wExpr + " < @weddTo");
+      wp.push(WEDD_EFF_YMD + " < @weddTo");
     }
-    // baseConditions 맨 앞에 삽입 → WHERE절에서 가장 먼저 평가
-    baseConditions.unshift("(" + wp.join(" AND ") + ")");
+    baseConditions.unshift("(" + wp.join("\n    AND ") + ")");
   }
 
   if (filters.wishcard === "Y" || filters.wishcard === "N") {
@@ -684,15 +718,13 @@ function buildQuery(filters) {
     "  u.hand_phone1 + '-' + u.hand_phone2 + '-' + u.hand_phone3 AS [휴대폰번호],\n" +
     "  u.uid AS [회원ID],\n" +
     "  CONVERT(varchar, u.reg_date, 23) AS [가입일],\n" +
-    "  CASE WHEN u.wedd_year IS NOT NULL AND u.wedd_year <> '' AND u.wedd_year <> '0'\n" +
-    "    THEN u.wedd_year + '-' + RIGHT('0'+COALESCE(NULLIF(u.wedd_month,''),'1'),2) + '-' + RIGHT('0'+COALESCE(NULLIF(u.wedd_day,''),'1'),2)\n" +
+    // 예식일: 주문서(청첩장에 인쇄된 값) 우선, 주문 이력이 없으면 프로필 그대로 → 미구매 회원은 기존과 동일.
+    "  CASE WHEN " + WEDD_EFF_YMD + " IS NOT NULL\n" +
+    "    THEN LEFT(" + WEDD_EFF_YMD + ",4) + '-' + SUBSTRING(" + WEDD_EFF_YMD + ",5,2) + '-' + RIGHT(" + WEDD_EFF_YMD + ",2)\n" +
     "    ELSE NULL END AS [예식일],\n" +
-    "  CASE WHEN u.wedd_year IS NOT NULL AND u.wedd_year <> '' AND u.wedd_year <> '0'\n" +
-    "    THEN DATEDIFF(DAY, GETDATE(), CAST(u.wedd_year + '-' + RIGHT('0'+COALESCE(NULLIF(u.wedd_month,''),'1'),2) + '-' + RIGHT('0'+COALESCE(NULLIF(u.wedd_day,''),'1'),2) AS DATE))\n" +
-    "    ELSE NULL END AS [잔여일수],\n" +
-    // 예식시간: 청첩장 주문 시 고객이 입력한 값(custom_order_WeddInfo). 예식일이 있을 때만 노출.
-    "  CASE WHEN u.wedd_year IS NOT NULL AND u.wedd_year <> '' AND u.wedd_year <> '0'\n" +
-    "    THEN wt.wedd_time ELSE NULL END AS [예식시간],\n" +
+    "  DATEDIFF(DAY, GETDATE(), TRY_CONVERT(date, " + WEDD_EFF_YMD + ")) AS [잔여일수],\n" +
+    // 예식시간: 주문서에 고객이 입력한 값. 주문 이력이 없으면 값 자체가 없어 공백.
+    "  wt.wedd_time AS [예식시간],\n" +
     "  cpn.coupon_names AS [소지쿠폰],\n" +
     "  cvw.card_view_cnt AS [카드조회수],\n" +
     "  CASE u.REFERER_SALES_GUBUN WHEN 'SB' THEN '바른손카드' WHEN 'BM' THEN 'M카드' WHEN 'B' THEN '바른손몰' WHEN 'SS' THEN '프리미어페이퍼' ELSE COALESCE(u.REFERER_SALES_GUBUN,'기타') END AS [가입사이트]\n";
@@ -714,28 +746,7 @@ function buildQuery(filters) {
     "  FROM S5_TodayViewItems tv WITH (NOLOCK)\n" +
     "  WHERE tv.uid = u.uid\n" +
     ") cvw\n" +
-    // 예식시간은 청첩장 주문 시 고객이 입력한 값에만 있다. 회원정보(S2_UserInfo)엔 wedd_hour/minute
-    // 컬럼이 있지만 실제로 채워지지 않고(빈 문자열), UserInfo.WeddDate도 시각부가 전부 00:00이다.
-    // 주력 저장소는 custom_order_WeddInfo이며 custom_order.weddinfo_id로 연결된다
-    // (weddinfo_id는 보통 자기 order_seq지만, 이전 주문의 예식정보를 재사용하면 다른 값이 들어온다).
-    // custom_order_plistAddD에도 같은 필드가 있으나 '카드내지인쇄' 계열에서만 쓰여 채움율이 1% 수준이라 쓰지 않는다.
-    //
-    // 반드시 '회원 프로필의 예식일과 같은 날짜'의 주문만 채택한다. 프로필 예식일이 실제 주문(청첩장에
-    // 인쇄된) 날짜와 다른 회원이 꽤 있어서, 날짜를 안 맞추면 엉뚱한 예식의 시각을 가져온다.
-    "OUTER APPLY (\n" +
-    "  SELECT TOP 1\n" +
-    "    LTRIM(RTRIM(COALESCE(wi.event_ampm,''))) + ' ' + LTRIM(RTRIM(wi.event_hour)) + ':' +\n" +
-    "      RIGHT('0' + LTRIM(RTRIM(COALESCE(NULLIF(wi.event_minute,''),'0'))), 2) AS wedd_time\n" +
-    "  FROM custom_order co2 WITH (NOLOCK)\n" +
-    "  INNER JOIN custom_order_WeddInfo wi WITH (NOLOCK)\n" +
-    "    ON wi.order_seq = COALESCE(NULLIF(co2.weddinfo_id, 0), co2.order_seq)\n" +
-    "  WHERE co2.member_id = u.uid\n" +
-    "    AND wi.event_hour IS NOT NULL AND LTRIM(RTRIM(wi.event_hour)) <> ''\n" +
-    "    AND wi.event_year = u.wedd_year\n" +
-    "    AND RIGHT('0'+LTRIM(RTRIM(COALESCE(wi.event_month,''))),2) = RIGHT('0'+COALESCE(NULLIF(u.wedd_month,''),'1'),2)\n" +
-    "    AND RIGHT('0'+LTRIM(RTRIM(COALESCE(wi.event_Day,''))),2) = RIGHT('0'+COALESCE(NULLIF(u.wedd_day,''),'1'),2)\n" +
-    "  ORDER BY co2.order_date DESC\n" +
-    ") wt\n";
+    WEDD_ORDER_APPLY;
 
   var query;
   if (isAllSites) {
@@ -7382,29 +7393,18 @@ var server = http.createServer(async function (req, res) {
             // ExpirationDate가 '마지막활동+60일'인지 '생성+60일'인지 확인 (SQL 프리필터 설계 근거)
             expsample: "SELECT TOP 5 ExpirationDate, CardItemCount, LEN(BasketJsonData) AS json_len, BasketJsonData " +
                        "FROM UserBasket WITH (NOLOCK) WHERE CardItemCount > 0 ORDER BY ExpirationDate DESC",
-            // 예식시간 채움율 — 이번주 예식자(D-0~D+7) 중 청첩장 주문 이력이 있는 회원 기준.
-            // '주문 있는 회원 대비 시간 확보율'이 실사용 지표라 EXISTS(custom_order)로 좁힌다.
+            // 예식시간/예식일 검증 — 이번주 예식자(D-0~D+7) 기준. 유효예식일(주문서 우선, 없으면 프로필),
+            // 프로필 예식일, 주문서 예식일, 예식시간을 나란히 뽑아 불일치와 채움율을 동시에 본다.
             weddtime: "SELECT TOP 40 " +
-                      "  u.wedd_year + '-' + RIGHT('0'+COALESCE(NULLIF(u.wedd_month,''),'1'),2) + '-' + RIGHT('0'+COALESCE(NULLIF(u.wedd_day,''),'1'),2) AS wedd_date, " +
+                      "  " + WEDD_PROFILE_YMD + " AS profile_ymd, " +
+                      "  wt.event_ymd AS order_ymd, " +
+                      "  " + WEDD_EFF_YMD + " AS eff_ymd, " +
                       "  wt.wedd_time " +
                       "FROM S2_UserInfo u WITH (NOLOCK) " +
-                      "OUTER APPLY ( " +
-                      "  SELECT TOP 1 LTRIM(RTRIM(COALESCE(wi.event_ampm,''))) + ' ' + LTRIM(RTRIM(wi.event_hour)) + ':' + " +
-                      "    RIGHT('0' + LTRIM(RTRIM(COALESCE(NULLIF(wi.event_minute,''),'0'))), 2) AS wedd_time " +
-                      "  FROM custom_order co2 WITH (NOLOCK) " +
-                      "  INNER JOIN custom_order_WeddInfo wi WITH (NOLOCK) " +
-                      "    ON wi.order_seq = COALESCE(NULLIF(co2.weddinfo_id, 0), co2.order_seq) " +
-                      "  WHERE co2.member_id = u.uid " +
-                      "    AND wi.event_hour IS NOT NULL AND LTRIM(RTRIM(wi.event_hour)) <> '' " +
-                      "    AND wi.event_year = u.wedd_year " +
-                      "    AND RIGHT('0'+LTRIM(RTRIM(COALESCE(wi.event_month,''))),2) = RIGHT('0'+COALESCE(NULLIF(u.wedd_month,''),'1'),2) " +
-                      "    AND RIGHT('0'+LTRIM(RTRIM(COALESCE(wi.event_Day,''))),2) = RIGHT('0'+COALESCE(NULLIF(u.wedd_day,''),'1'),2) " +
-                      "  ORDER BY co2.order_date DESC " +
-                      ") wt " +
-                      "WHERE u.wedd_year IS NOT NULL AND u.wedd_year <> '' AND u.wedd_year <> '0' " +
-                      "  AND TRY_CONVERT(date, u.wedd_year + RIGHT('0'+COALESCE(NULLIF(u.wedd_month,''),'1'),2) + RIGHT('0'+COALESCE(NULLIF(u.wedd_day,''),'1'),2)) " +
-                      "      BETWEEN CAST(GETDATE() AS date) AND DATEADD(day, 7, CAST(GETDATE() AS date)) " +
-                      "  AND EXISTS (SELECT 1 FROM custom_order co3 WITH (NOLOCK) WHERE co3.member_id = u.uid) "
+                      WEDD_ORDER_APPLY +
+                      "WHERE " + WEDD_EFF_YMD + " IS NOT NULL " +
+                      "  AND TRY_CONVERT(date, " + WEDD_EFF_YMD + ") " +
+                      "      BETWEEN CAST(GETDATE() AS date) AND DATEADD(day, 7, CAST(GETDATE() AS date)) "
           };
           var pKey = sp.get("probe");
           if (!probes[pKey]) throw new Error("unknown probe: " + pKey);
