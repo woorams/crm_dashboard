@@ -103,6 +103,8 @@ var dbConfig = {
   database: "bar_shop1",
   options: { encrypt: true, trustServerCertificate: false },
   requestTimeout: 300000,
+  // 기본 15초로는 Azure SQL 접속이 순간적으로 지연될 때 "Failed to connect ... in 15000ms"로 죽는다(실측).
+  connectionTimeout: 30000,
   pool: { max: 10, min: 2, idleTimeoutMillis: 30000, acquireTimeoutMillis: 60000 },
 };
 
@@ -457,8 +459,23 @@ async function loadCardDivs(seqs) {
   }
 }
 
+// 장바구니 JSON은 건당 평균 ~3.7KB라 41,887건을 한 번에 읽으면 150MB가 넘고, 실제로 Azure SQL이
+// 연결을 끊어버린다(기간 조건 없는 조회가 11.5초에 실패하는 것을 실측). 그래서 페이지로 나눠 읽는다.
+// 기간 조건이 있으면 사전필터로 후보가 확 줄어 보통 1페이지에 끝난다.
+var CART_PAGE_SIZE = 4000;
+// 기간 없는 조회는 전체를 훑어야 해 비싸므로 짧게 캐시한다(장바구니는 수시로 바뀌어 길게 두면 안 됨).
+var cartOwnerCache = {};
+var CART_CACHE_MS = 3 * 60 * 1000;
+
 // 조건에 맞는 카드를 담은 회원 uid 집합. kind: 'inv'(청첩장 A01) | 'sample'(그 외)
 async function loadCartOwnerUids(kind, dateFrom, dateTo) {
+  var cacheKey = kind + "|" + (dateFrom || "") + "|" + (dateTo || "");
+  var hit = cartOwnerCache[cacheKey];
+  if (hit && Date.now() - hit.at < CART_CACHE_MS) {
+    console.log("[CART] 캐시 사용: " + cacheKey + " → " + Object.keys(hit.owners).length + "명");
+    return hit.owners;
+  }
+
   var where = ["ub.CardItemCount > 0"];
   var expInput = [];
   if (dateFrom) {
@@ -468,30 +485,38 @@ async function loadCartOwnerUids(kind, dateFrom, dateTo) {
     where.push("ub.ExpirationDate >= @expMin");
   }
   var t0 = Date.now();
-  // 장바구니 JSON을 통째로 읽어오는 무거운 쿼리라 콜드 상태 첫 실행에서 Azure SQL이 연결을
-  // 끊는 일이 실측됐다(첫 호출 실패 → 재시도 시 622명 정상). 읽기 전용이라 재시도 안전.
-  var rs = await runQueryWithRetry({
-    sql: "SELECT ui.UserId, ub.BasketJsonData\n" +
-      "FROM UserBasket ub WITH (NOLOCK)\n" +
-      "INNER JOIN UserInfo ui WITH (NOLOCK) ON ui.MemberId = ub.MemberId\n" +
-      "WHERE " + where.join(" AND "),
-    inputs: expInput
-  }, "CART");
   var owners = {};
   var pending = [];
-  for (var i = 0; i < rs.recordset.length; i++) {
-    var uid = rs.recordset[i].UserId;
-    var parsed;
-    try { parsed = JSON.parse(rs.recordset[i].BasketJsonData || "{}"); } catch (e) { continue; }
-    var cards = parsed.Cards || [];
-    for (var c = 0; c < cards.length; c++) {
-      var seq = cards[c].CardSeq;
-      if (!seq) continue;
-      var day = kstDateOf(cards[c].RegisterDate);
-      if (dateFrom && (!day || day < dateFrom)) continue;
-      if (dateTo && (!day || day > dateTo)) continue;
-      pending.push({ uid: uid, seq: seq });
+  var scanned = 0;
+  for (var page = 0; ; page++) {
+    // OFFSET/FETCH는 호환성수준 110에서 사용 가능. 정렬 키가 있어야 페이지가 안정적이다.
+    var rs = await runQueryWithRetry({
+      sql: "SELECT ui.UserId, ub.BasketJsonData\n" +
+        "FROM UserBasket ub WITH (NOLOCK)\n" +
+        "INNER JOIN UserInfo ui WITH (NOLOCK) ON ui.MemberId = ub.MemberId\n" +
+        "WHERE " + where.join(" AND ") + "\n" +
+        "ORDER BY ub.MemberId, ub.BasketType\n" +
+        "OFFSET " + (page * CART_PAGE_SIZE) + " ROWS FETCH NEXT " + CART_PAGE_SIZE + " ROWS ONLY",
+      inputs: expInput
+    }, "CART p" + page);
+    var recs = rs.recordset;
+    scanned += recs.length;
+    for (var i = 0; i < recs.length; i++) {
+      var uid = recs[i].UserId;
+      if (!uid) continue;
+      var parsed;
+      try { parsed = JSON.parse(recs[i].BasketJsonData || "{}"); } catch (e) { continue; }
+      var cards = parsed.Cards || [];
+      for (var c = 0; c < cards.length; c++) {
+        var seq = cards[c].CardSeq;
+        if (!seq) continue;
+        var day = kstDateOf(cards[c].RegisterDate);
+        if (dateFrom && (!day || day < dateFrom)) continue;
+        if (dateTo && (!day || day > dateTo)) continue;
+        pending.push({ uid: uid, seq: seq });
+      }
     }
+    if (recs.length < CART_PAGE_SIZE) break;
   }
   await loadCardDivs([...new Set(pending.map(function (p) { return p.seq; }))]);
   for (var k = 0; k < pending.length; k++) {
@@ -500,8 +525,9 @@ async function loadCartOwnerUids(kind, dateFrom, dateTo) {
     var match = kind === "inv" ? div === "A01" : div !== "A01";
     if (match) owners[pending[k].uid.toLowerCase()] = true;
   }
-  console.log("[CART] " + kind + " 후보장바구니 " + rs.recordset.length + "건 → 해당 회원 " +
+  console.log("[CART] " + kind + " 후보장바구니 " + scanned + "건 → 해당 회원 " +
     Object.keys(owners).length + "명 (" + (Date.now() - t0) + "ms)");
+  cartOwnerCache[cacheKey] = { at: Date.now(), owners: owners };
   return owners;
 }
 
@@ -843,6 +869,7 @@ async function checkMobileInvitation(uids, dateFrom, dateTo) {
 function isTransientDbError(e) {
   var m = String((e && e.message) || "");
   if (/unknown error has occurred/i.test(m)) return true;
+  if (/Failed to connect to .* in \d+ms/i.test(m)) return true;
   if (/ECONNRESET|ESOCKET|ETIMEOUT|Connection lost|Connection is closed/i.test(m)) return true;
   // Azure SQL 일시적 오류 번호
   return [40197, 40501, 40613, 49918, 49919, 49920, 4060, 10928, 10929, 233, 64].indexOf(e && e.number) >= 0;
