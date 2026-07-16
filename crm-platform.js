@@ -109,7 +109,9 @@ var dbConfig = {
 var pool = null;
 // 전환수 자동 조회(일괄) 백그라운드 작업 상태 — 프록시 타임아웃 회피용
 var autoConvJob = { running: false, startedAt: null, finishedAt: null, total: 0, done: 0, updated: 0, attempted: 0, errors: 0, error: null };
-var cartSchema = { available: false, memberCol: null, cardSeqCol: null, dateCol: null };
+// 장바구니 소스. 구 S4_CART는 2023-04-16 이후 신규 데이터가 없어(테이블 방치) 항상 0건이었다.
+// 현행 장바구니는 UserBasket이며, 담긴 카드 목록·담은 시각은 BasketJsonData(JSON) 안에 있다.
+var cartSchema = { available: false, dateCol: true };
 var campaignHistory = [];
 var CAMPAIGN_HISTORY_PATH = path.join(DATA_DIR, "campaign-history.json");
 
@@ -391,44 +393,48 @@ function isSafeColumnName(name) {
 // 2. 고객 추출 백엔드
 // ═══════════════════════════════════════════════════════════
 
+// 장바구니 소스 확인. 필요한 건 UserBasket(장바구니) + UserInfo(GUID↔uid 매핑) 두 개다.
+// S2_UserInfo에는 MemberId(GUID)가 없어 UserInfo.UserId를 경유해야 u.uid와 이어진다.
 async function discoverCartSchema(p) {
   try {
-    var colResult = await p.request().query(
-      "SELECT c.name AS col_name, t.name AS type_name " +
-      "FROM sys.columns c JOIN sys.types t ON c.user_type_id = t.user_type_id " +
-      "WHERE c.object_id = OBJECT_ID('S4_CART') ORDER BY c.column_id"
+    var chk = await p.request().query(
+      "SELECT " +
+      "  CASE WHEN OBJECT_ID('UserBasket') IS NULL THEN 0 ELSE 1 END AS has_basket, " +
+      "  CASE WHEN OBJECT_ID('UserInfo') IS NULL THEN 0 ELSE 1 END AS has_userinfo"
     );
-    if (!colResult.recordset.length) {
-      console.log("[CART] S4_CART 테이블 없음");
+    var row = chk.recordset[0] || {};
+    if (!row.has_basket || !row.has_userinfo) {
+      console.log("[CART] UserBasket/UserInfo 테이블 없음 → 장바구니 필터 비활성화");
       return;
     }
-    console.log("[CART] S4_CART 컬럼:", colResult.recordset.map(function (r) { return r.col_name; }).join(", "));
-
-    var memberCandidates = ["uid", "member_id", "user_id", "memberid", "userid", "cart_owner_id", "owner_id"];
-    var cardCandidates = ["card_seq", "cardseq", "card_code", "cardcode"];
-    // 담은 시각(등록일) 컬럼. 선호 순서대로 첫 매칭을 사용한다(수정일보다 등록일 우선).
-    var dateCandidates = ["reg_date", "regdate", "reg_dt", "reg_datetime", "regist_date",
-      "ins_date", "insert_date", "input_date", "create_date", "created_date", "created_at",
-      "cart_date", "write_date", "wdate", "regdate_time"];
-    var memberCol = colResult.recordset.find(function (r) { return memberCandidates.indexOf(r.col_name.toLowerCase()) >= 0; });
-    var cardCol = colResult.recordset.find(function (r) { return cardCandidates.indexOf(r.col_name.toLowerCase()) >= 0; });
-    // dateCandidates 순서를 우선순위로 사용: 후보 배열을 순회하며 먼저 발견되는 컬럼을 채택.
-    var dateCol = null;
-    for (var di = 0; di < dateCandidates.length && !dateCol; di++) {
-      dateCol = colResult.recordset.find(function (r) { return r.col_name.toLowerCase() === dateCandidates[di]; });
-    }
-
-    if (memberCol && cardCol && isSafeColumnName(memberCol.col_name) && isSafeColumnName(cardCol.col_name)) {
-      var dateColName = (dateCol && isSafeColumnName(dateCol.col_name)) ? dateCol.col_name : null;
-      cartSchema = { available: true, memberCol: memberCol.col_name, cardSeqCol: cardCol.col_name, dateCol: dateColName };
-      console.log("[CART] 매핑 성공: member=" + memberCol.col_name + ", card=" + cardCol.col_name +
-        ", date=" + (dateColName || "(없음 - 기간필터 비활성)"));
-    } else {
-      console.log("[CART] 컬럼 매핑 실패 → 장바구니 필터 비활성화");
-    }
+    // 담긴 카드는 JSON 안에 있어 OPENJSON이 필수. 호환성 수준이 낮으면(<130) 파싱이 불가하므로
+    // 실제로 한 번 실행해보고 판정한다(가정하지 않는다).
+    await p.request().query(
+      "SELECT TOP 1 jc.CardSeq FROM (SELECT CAST('{\"Cards\":[{\"CardSeq\":1,\"RegisterDate\":\"2026-01-01T00:00:00+09:00\"}]}' AS nvarchar(max)) AS j) t " +
+      "CROSS APPLY OPENJSON(t.j, '$.Cards') WITH (CardSeq int '$.CardSeq', RegisterDate datetimeoffset '$.RegisterDate') jc"
+    );
+    cartSchema = { available: true, dateCol: true };
+    console.log("[CART] 매핑 성공: UserBasket + UserInfo (OPENJSON 지원 확인)");
   } catch (err) {
-    console.log("[CART] 스키마 탐색 실패:", err.message);
+    console.log("[CART] 스키마 탐색 실패 → 장바구니 필터 비활성화:", err.message);
   }
+}
+
+// 장바구니 EXISTS 서브쿼리. divCond로 청첩장(A01)/샘플(그 외)을 가른다.
+// RegisterDate는 JSON에 "+09:00" 오프셋 포함 문자열이라, datetimeoffset으로 파싱한 뒤
+// KST 벽시계로 맞춰 비교한다(오프셋을 무시하면 9시간이 밀린다).
+function buildCartExistsSql(divCond, fromParam, toParam) {
+  var sub = ["ui.UserId = u.uid", divCond];
+  var kst = "CONVERT(datetime2, SWITCHOFFSET(jc.RegisterDate, '+09:00'))";
+  if (fromParam) sub.push(kst + " >= @" + fromParam);
+  if (toParam) sub.push(kst + " < @" + toParam);
+  return "SELECT 1\n" +
+    "      FROM UserInfo ui WITH (NOLOCK)\n" +
+    "      INNER JOIN UserBasket ub WITH (NOLOCK) ON ub.MemberId = ui.MemberId\n" +
+    "      CROSS APPLY OPENJSON(ub.BasketJsonData, '$.Cards')\n" +
+    "        WITH (CardSeq int '$.CardSeq', RegisterDate datetimeoffset '$.RegisterDate') jc\n" +
+    "      INNER JOIN S2_Card sc WITH (NOLOCK) ON jc.CardSeq = sc.Card_Seq\n" +
+    "      WHERE " + sub.join("\n        AND ");
 }
 
 // 시작 시 DB 콜드 커넥션이 한 번 실패/지연되면 startup의 1회성 discoverCartSchema가
@@ -536,31 +542,31 @@ function buildQuery(filters) {
 
   if (cartSchema.available && (filters.cartSample === "Y" || filters.cartSample === "N")) {
     var cop = filters.cartSample === "Y" ? "EXISTS" : "NOT EXISTS";
-    var csub = ["cart." + cartSchema.memberCol + " = u.uid", "sc.Card_Div <> 'A01'"];
-    // 담은 날짜 기간 조건(날짜 컬럼이 탐색된 경우에만). 종료일은 addDay로 당일 포함.
-    if (cartSchema.dateCol && filters.cartSampleDateFrom) {
-      inputs.push({ name: "cartSampleFrom", type: sql.VarChar(10), value: filters.cartSampleDateFrom });
-      csub.push("cart." + cartSchema.dateCol + " >= @cartSampleFrom");
+    // 담은 날짜 기간 조건. 종료일은 addDay로 당일 포함.
+    var csFrom = null, csTo = null;
+    if (filters.cartSampleDateFrom) {
+      inputs.push({ name: "cartSampleFrom", type: sql.VarChar(30), value: filters.cartSampleDateFrom });
+      csFrom = "cartSampleFrom";
     }
-    if (cartSchema.dateCol && filters.cartSampleDateTo) {
-      inputs.push({ name: "cartSampleTo", type: sql.VarChar(10), value: addDay(filters.cartSampleDateTo) });
-      csub.push("cart." + cartSchema.dateCol + " < @cartSampleTo");
+    if (filters.cartSampleDateTo) {
+      inputs.push({ name: "cartSampleTo", type: sql.VarChar(30), value: addDay(filters.cartSampleDateTo) });
+      csTo = "cartSampleTo";
     }
-    baseConditions.push(cop + " (\n      SELECT 1 FROM S4_CART cart WITH (NOLOCK)\n      INNER JOIN S2_Card sc WITH (NOLOCK) ON cart." + cartSchema.cardSeqCol + " = sc.Card_Seq\n      WHERE " + csub.join("\n        AND ") + "\n    )");
+    baseConditions.push(cop + " (\n      " + buildCartExistsSql("sc.Card_Div <> 'A01'", csFrom, csTo) + "\n    )");
   }
 
   if (cartSchema.available && (filters.cartInvitation === "Y" || filters.cartInvitation === "N")) {
     var ciop = filters.cartInvitation === "Y" ? "EXISTS" : "NOT EXISTS";
-    var cisub = ["cart." + cartSchema.memberCol + " = u.uid", "sc.Card_Div = 'A01'"];
-    if (cartSchema.dateCol && filters.cartInvDateFrom) {
-      inputs.push({ name: "cartInvFrom", type: sql.VarChar(10), value: filters.cartInvDateFrom });
-      cisub.push("cart." + cartSchema.dateCol + " >= @cartInvFrom");
+    var ciFrom = null, ciTo = null;
+    if (filters.cartInvDateFrom) {
+      inputs.push({ name: "cartInvFrom", type: sql.VarChar(30), value: filters.cartInvDateFrom });
+      ciFrom = "cartInvFrom";
     }
-    if (cartSchema.dateCol && filters.cartInvDateTo) {
-      inputs.push({ name: "cartInvTo", type: sql.VarChar(10), value: addDay(filters.cartInvDateTo) });
-      cisub.push("cart." + cartSchema.dateCol + " < @cartInvTo");
+    if (filters.cartInvDateTo) {
+      inputs.push({ name: "cartInvTo", type: sql.VarChar(30), value: addDay(filters.cartInvDateTo) });
+      ciTo = "cartInvTo";
     }
-    baseConditions.push(ciop + " (\n      SELECT 1 FROM S4_CART cart WITH (NOLOCK)\n      INNER JOIN S2_Card sc WITH (NOLOCK) ON cart." + cartSchema.cardSeqCol + " = sc.Card_Seq\n      WHERE " + cisub.join("\n        AND ") + "\n    )");
+    baseConditions.push(ciop + " (\n      " + buildCartExistsSql("sc.Card_Div = 'A01'", ciFrom, ciTo) + "\n    )");
   }
 
   if (filters.weddingDateFrom || filters.weddingDateTo) {
@@ -1861,10 +1867,11 @@ function buildStageQuery(stage, targetDate, excludeUids, limit) {
 
   var includeCs = stage === "D+3" || stage === "D+7";
 
+  // '장바구니에 뭔가 담겨있음' 판정. 카드 종류를 안 가리므로 JSON을 풀 필요 없이 CardItemCount로 충분.
   var cartExists = cartSchema.available
-    ? "EXISTS (SELECT 1 FROM S4_CART cart WITH (NOLOCK) WHERE cart." +
-      cartSchema.memberCol +
-      " = u.uid)"
+    ? "EXISTS (SELECT 1 FROM UserInfo ui WITH (NOLOCK)\n" +
+      "      INNER JOIN UserBasket ub WITH (NOLOCK) ON ub.MemberId = ui.MemberId\n" +
+      "      WHERE ui.UserId = u.uid AND ub.CardItemCount > 0)"
     : "0=1";
 
   var segmentCase =
@@ -3216,7 +3223,7 @@ function generateHTML() {
             <span class="date-sep">~</span>
             <input type="date" id="cartSampleDateTo">
           </div>
-          <span class="cart-disabled-note ${cartHiddenClass}" id="cartNote1">S4_CART 스키마 미발견 - 비활성</span>
+          <span class="cart-disabled-note ${cartHiddenClass}" id="cartNote1">장바구니 스키마 미발견 - 비활성</span>
         </div>
       </div>
 
@@ -3234,7 +3241,7 @@ function generateHTML() {
             <span class="date-sep">~</span>
             <input type="date" id="cartInvDateTo">
           </div>
-          <span class="cart-disabled-note ${cartHiddenClass}" id="cartNote2">S4_CART 스키마 미발견 - 비활성</span>
+          <span class="cart-disabled-note ${cartHiddenClass}" id="cartNote2">장바구니 스키마 미발견 - 비활성</span>
         </div>
       </div>
 
@@ -7336,6 +7343,31 @@ var server = http.createServer(async function (req, res) {
         var pfx = dbName ? (dbName + ".") : "";
         var ident = function (v) { if (!/^[A-Za-z0-9_]+$/.test(v)) throw new Error("bad identifier: " + v); return v; };
         var out = { ok: true, db: dbName || "(current)" };
+        // [임시] 장바구니(UserBasket+OPENJSON) 조건 검증용. buildCartExistsSql을 그대로 태워
+        // OPENJSON 지원·시간대 파싱·건수를 실제로 확인한다. 검증 후 진단기와 함께 제거.
+        if (sp.get("carttest")) {
+          await ensureCartSchema();
+          var ctDiv = sp.get("div") === "sample" ? "sc.Card_Div <> 'A01'" : "sc.Card_Div = 'A01'";
+          var ctReq = pool.request();
+          var ctFrom = null, ctTo = null;
+          if (sp.get("from")) { ctReq.input("ctFrom", sql.VarChar(30), sp.get("from")); ctFrom = "ctFrom"; }
+          if (sp.get("to")) { ctReq.input("ctTo", sql.VarChar(30), addDay(sp.get("to"))); ctTo = "ctTo"; }
+          var ctInner = buildCartExistsSql(ctDiv, ctFrom, ctTo);
+          var notOrdered = sp.get("noorder")
+            ? "\n  AND NOT EXISTS (\n      SELECT 1 FROM custom_order co WITH (NOLOCK)\n      INNER JOIN custom_order_item coi WITH (NOLOCK) ON co.order_seq = coi.order_seq\n      INNER JOIN S2_Card c WITH (NOLOCK) ON coi.card_seq = c.Card_Seq\n      WHERE co.member_id = u.uid AND c.Card_Div = 'A01' AND co.status_seq >= 1\n    )"
+            : "";
+          var ctSql = "SELECT TOP 10 u.uid, u.uname FROM S2_UserInfo u WITH (NOLOCK)\n" +
+            "WHERE EXISTS (\n      " + ctInner + "\n    )" + notOrdered;
+          var ctStart = Date.now();
+          var ctRes = await ctReq.query(ctSql);
+          out.cartSchema = cartSchema;
+          out.elapsedMs = Date.now() - ctStart;
+          out.sampleTop10 = ctRes.recordset;
+          out.sql = ctSql;
+          res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+          res.end(JSON.stringify(out));
+          return;
+        }
         if (sp.get("cols")) {
           var rq = pool.request();
           rq.input("pat", sql.VarChar(100), "%" + sp.get("cols") + "%");
