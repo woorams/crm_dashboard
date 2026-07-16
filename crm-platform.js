@@ -459,21 +459,24 @@ async function loadCardDivs(seqs) {
 
 // 조건에 맞는 카드를 담은 회원 uid 집합. kind: 'inv'(청첩장 A01) | 'sample'(그 외)
 async function loadCartOwnerUids(kind, dateFrom, dateTo) {
-  var rq = pool.request();
   var where = ["ub.CardItemCount > 0"];
+  var expInput = [];
   if (dateFrom) {
     var expMin = new Date(dateFrom + "T00:00:00Z");
     expMin.setUTCDate(expMin.getUTCDate() + CART_TTL_DAYS - CART_TTL_MARGIN_DAYS);
-    rq.input("expMin", sql.VarChar(10), expMin.toISOString().slice(0, 10));
+    expInput.push({ name: "expMin", type: sql.VarChar(10), value: expMin.toISOString().slice(0, 10) });
     where.push("ub.ExpirationDate >= @expMin");
   }
   var t0 = Date.now();
-  var rs = await rq.query(
-    "SELECT ui.UserId, ub.BasketJsonData\n" +
-    "FROM UserBasket ub WITH (NOLOCK)\n" +
-    "INNER JOIN UserInfo ui WITH (NOLOCK) ON ui.MemberId = ub.MemberId\n" +
-    "WHERE " + where.join(" AND ")
-  );
+  // 장바구니 JSON을 통째로 읽어오는 무거운 쿼리라 콜드 상태 첫 실행에서 Azure SQL이 연결을
+  // 끊는 일이 실측됐다(첫 호출 실패 → 재시도 시 622명 정상). 읽기 전용이라 재시도 안전.
+  var rs = await runQueryWithRetry({
+    sql: "SELECT ui.UserId, ub.BasketJsonData\n" +
+      "FROM UserBasket ub WITH (NOLOCK)\n" +
+      "INNER JOIN UserInfo ui WITH (NOLOCK) ON ui.MemberId = ub.MemberId\n" +
+      "WHERE " + where.join(" AND "),
+    inputs: expInput
+  }, "CART");
   var owners = {};
   var pending = [];
   for (var i = 0; i < rs.recordset.length; i++) {
