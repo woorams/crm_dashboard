@@ -2267,7 +2267,8 @@ function generateHTML() {
   body { font-family: "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; background: #f3f4f6; color: #1f2937; }
 
   /* ── 상단 네비게이션 ── */
-  .top-nav { background: linear-gradient(135deg, #1e3a5f, #2563eb); color: #fff; padding: 0 32px; display: flex; align-items: center; height: 56px; }
+  .top-nav { background: linear-gradient(135deg, #1e3a5f, #2563eb); color: #fff; padding: 0; }
+  .top-nav-inner { max-width: 1600px; margin: 0 auto; padding: 0 16px; display: flex; align-items: center; height: 56px; }
   .top-nav h1 { font-size: 18px; font-weight: 700; margin-right: auto; white-space: nowrap; }
   .tab-btn { background: none; border: none; color: rgba(255,255,255,.7); font-size: 14px; font-weight: 600; padding: 16px 20px; cursor: pointer; border-bottom: 3px solid transparent; transition: all .15s; font-family: inherit; }
   .tab-btn:hover { color: #fff; }
@@ -2411,13 +2412,15 @@ function generateHTML() {
 
 <!-- ═══ 상단 네비게이션 ═══ -->
 <div class="top-nav">
-  <h1>바른손 CRM 플랫폼</h1>
-  <button class="tab-btn" data-tab="campaign-dashboard" onclick="switchTab('campaign-dashboard')">캠페인 대시보드</button>
-  <button class="tab-btn active" data-tab="extraction" onclick="switchTab('extraction')">고객 추출</button>
-  <button class="tab-btn" data-tab="crm" onclick="switchTab('crm')" style="display:none">전환 추적</button>
-  <button class="tab-btn" data-tab="sample-inducement" onclick="switchTab('sample-inducement')" style="display:none">샘플 유도</button>
-  <button class="tab-btn" data-tab="refuse" onclick="switchTab('refuse')">수신거부</button>
-  <button class="tab-btn" data-tab="settings" onclick="switchTab('settings');renderSettingsPurposes()">설정</button>
+  <div class="top-nav-inner">
+    <h1>바른손 CRM 플랫폼</h1>
+    <button class="tab-btn" data-tab="campaign-dashboard" onclick="switchTab('campaign-dashboard')">캠페인 대시보드</button>
+    <button class="tab-btn active" data-tab="extraction" onclick="switchTab('extraction')">고객 추출</button>
+    <button class="tab-btn" data-tab="crm" onclick="switchTab('crm')" style="display:none">전환 추적</button>
+    <button class="tab-btn" data-tab="sample-inducement" onclick="switchTab('sample-inducement')" style="display:none">샘플 유도</button>
+    <button class="tab-btn" data-tab="refuse" onclick="switchTab('refuse')">수신거부</button>
+    <button class="tab-btn" data-tab="settings" onclick="switchTab('settings');renderSettingsPurposes()">설정</button>
+  </div>
 </div>
 
 <div class="container">
@@ -2508,6 +2511,12 @@ function generateHTML() {
           <input type="date" id="cdDateFrom" onchange="renderDashboard()" class="cd-seg-filter">
           <span>~</span>
           <input type="date" id="cdDateTo" onchange="renderDashboard()" class="cd-seg-filter">
+          <input type="text" id="cdTargetFilter" list="cdTargetList" oninput="cdKwRender()" class="cd-seg-filter" style="min-width:220px" autocomplete="off" placeholder="기간 조건 포함 (예: 샘플 2일 경과)">
+          <datalist id="cdTargetList"></datalist>
+          <input type="text" id="cdIncentiveFilter" list="cdIncentiveList" oninput="cdKwRender()" class="cd-seg-filter" style="min-width:180px" autocomplete="off" placeholder="소구 포인트 포함">
+          <datalist id="cdIncentiveList"></datalist>
+          <button onclick="cdResetFilters()" class="cd-seg-filter" style="cursor:pointer;background:#f3f4f6">초기화</button>
+          <span id="cdFilterCount" style="color:#666;margin-left:auto"></span>
         </div>
       </div>
       <!-- 클릭률 추이 차트 -->
@@ -4250,11 +4259,83 @@ async function loadCampaignDashboard() {
   var sel4 = document.getElementById('cdDepthFilter');
   sel4.innerHTML = '<option value="all">전체 세그먼트(Depth1)</option>';
   depths.forEach(function(d){ sel4.innerHTML += '<option value="'+escHtml(d)+'">'+escHtml(d)+'</option>'; });
+  cdFillKwLists(campaigns);
   renderDashboard();
+}
+
+// 기간조건/소구포인트 자동완성 목록. 원본값(386종)은 날짜가 붙어 다 달라서,
+// 날짜·괄호를 벗겨낸 '줄기'를 함께 넣어야 "샘플 2일 경과" 같은 검색이 바로 잡힌다.
+function cdStems(values) {
+  var freq = {};
+  values.forEach(function(v){
+    String(v).split('\\n').forEach(function(line){
+      var s = line
+        .replace(RE_PAREN, ' ')   // (26.06.14) 같은 괄호 날짜 제거
+        .replace(RE_DATE, ' ')    // 26.06.14 / 3/4 형태 제거
+        .replace(RE_DASH, ' ')
+        .replace(RE_WS, ' ')
+        .trim();
+      if (s.length >= 2) freq[s] = (freq[s] || 0) + 1;
+    });
+  });
+  return Object.keys(freq).sort(function(a,b){ return freq[b] - freq[a]; });
+}
+
+function cdFillKwLists(campaigns) {
+  var targets = [...new Set(campaigns.map(function(c){ return c.target; }).filter(Boolean))];
+  var incentives = [...new Set(campaigns.map(function(c){ return c.incentive; }).filter(Boolean))];
+  var tList = document.getElementById('cdTargetList');
+  if (tList) {
+    // 줄기를 먼저(자주 쓰는 순), 그 뒤 원본 전체값
+    var tOpts = cdStems(targets).concat(targets.map(function(t){ return String(t).replace(RE_WS,' ').trim(); }));
+    tList.innerHTML = [...new Set(tOpts)].slice(0, 300).map(function(o){ return '<option value="'+escHtml(o)+'">'; }).join('');
+  }
+  var iList = document.getElementById('cdIncentiveList');
+  if (iList) {
+    var iOpts = cdStems(incentives).concat(incentives.map(function(t){ return String(t).replace(RE_WS,' ').trim(); }));
+    iList.innerHTML = [...new Set(iOpts)].slice(0, 300).map(function(o){ return '<option value="'+escHtml(o)+'">'; }).join('');
+  }
 }
 
 function getCampaigns() { return (cdData && cdData.campaigns) ? cdData.campaigns : (cdData || []); }
 function getRecords() { return (cdData && cdData.records) ? cdData.records : []; }
+
+// 이 스크립트는 서버의 백틱 템플릿 리터럴 안에 있어 정규식 '리터럴'을 쓰면 이스케이프가
+// 소실된다(\/ 가 정규식을 조기 종료). 반드시 RegExp 생성자 + 4중 백슬래시로 작성할 것.
+var RE_WS = new RegExp('\\\\s+', 'g');
+var RE_PAREN = new RegExp('\\\\([^)]*\\\\)', 'g');
+var RE_DATE = new RegExp('\\\\d{1,4}[.\\\\-/]\\\\d{1,2}([.\\\\-/]\\\\d{1,2})?', 'g');
+var RE_DASH = new RegExp('[~\\\\-]', 'g');
+
+// 기간조건/소구포인트는 자유 텍스트(줄바꿈·날짜 포함)라 정확일치 대신 '포함' 매칭을 쓴다.
+// 검색어와 대상값 모두 공백을 한 칸으로 정규화해 줄바꿈 차이를 무시한다.
+function cdNorm(v) { return String(v == null ? '' : v).replace(RE_WS, ' ').trim().toLowerCase(); }
+
+// 공백으로 구분된 여러 키워드를 모두 포함해야 통과(AND). 예: "샘플 2일 경과"
+function cdKwMatch(value, kw) {
+  var hay = cdNorm(value);
+  var parts = cdNorm(kw).split(' ').filter(Boolean);
+  for (var i = 0; i < parts.length; i++) { if (hay.indexOf(parts[i]) === -1) return false; }
+  return true;
+}
+
+var _cdKwTimer = null;
+function cdKwRender() {
+  clearTimeout(_cdKwTimer);
+  _cdKwTimer = setTimeout(renderDashboard, 250);
+}
+
+function cdResetFilters() {
+  document.getElementById('cdPurposeFilter').value = 'all';
+  document.getElementById('cdChannelFilter').value = 'all';
+  document.getElementById('cdTypeFilter').value = 'all';
+  document.getElementById('cdDepthFilter').value = 'all';
+  document.getElementById('cdDateFrom').value = '';
+  document.getElementById('cdDateTo').value = '';
+  document.getElementById('cdTargetFilter').value = '';
+  document.getElementById('cdIncentiveFilter').value = '';
+  renderDashboard();
+}
 
 function getFilteredCampaigns() {
   var purpose = document.getElementById('cdPurposeFilter').value;
@@ -4263,6 +4344,10 @@ function getFilteredCampaigns() {
   var depth = document.getElementById('cdDepthFilter').value;
   var dateFrom = document.getElementById('cdDateFrom').value;
   var dateTo = document.getElementById('cdDateTo').value;
+  var tEl = document.getElementById('cdTargetFilter');
+  var iEl = document.getElementById('cdIncentiveFilter');
+  var targetKw = tEl ? tEl.value.trim() : '';
+  var incentiveKw = iEl ? iEl.value.trim() : '';
   var all = getCampaigns();
   var result = [];
   for (var i = 0; i < all.length; i++) {
@@ -4273,9 +4358,13 @@ function getFilteredCampaigns() {
     if (depth !== 'all' && c.depth1 !== depth) continue;
     if (dateFrom && c.send_date < dateFrom) continue;
     if (dateTo && c.send_date > dateTo + 'Z') continue;
+    if (targetKw && !cdKwMatch(c.target, targetKw)) continue;
+    if (incentiveKw && !cdKwMatch(c.incentive, incentiveKw)) continue;
     c._globalIdx = i;
     result.push(c);
   }
+  var cntEl = document.getElementById('cdFilterCount');
+  if (cntEl) cntEl.textContent = result.length + ' / ' + all.length + '건';
   return result;
 }
 
