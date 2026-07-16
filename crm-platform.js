@@ -785,17 +785,40 @@ async function checkMobileInvitation(uids, dateFrom, dateTo) {
   return miSet;
 }
 
+// Azure SQL은 무거운 콜드 쿼리에서 연결을 끊는 일시적 오류(transient fault)를 낸다.
+// 실제로 예식일 조회 첫 실행이 14초에 "An unknown error has occurred."로 죽고, 재시도하면
+// 1.5~3초에 정상 응답했다(requestTimeout은 300초라 드라이버 타임아웃이 아님).
+// 조회는 읽기 전용이라 재시도해도 부작용이 없다. 문법 오류 등 영구적 오류는 그대로 던진다.
+function isTransientDbError(e) {
+  var m = String((e && e.message) || "");
+  if (/unknown error has occurred/i.test(m)) return true;
+  if (/ECONNRESET|ESOCKET|ETIMEOUT|Connection lost|Connection is closed/i.test(m)) return true;
+  // Azure SQL 일시적 오류 번호
+  return [40197, 40501, 40613, 49918, 49919, 49920, 4060, 10928, 10929, 233, 64].indexOf(e && e.number) >= 0;
+}
+
+async function runQueryWithRetry(built, label) {
+  for (var attempt = 1; attempt <= 2; attempt++) {
+    var request = pool.request();
+    for (var i = 0; i < built.inputs.length; i++) {
+      var inp = built.inputs[i];
+      request.input(inp.name, inp.type, inp.value);
+    }
+    try {
+      return await request.query(built.sql);
+    } catch (e) {
+      if (attempt >= 2 || !isTransientDbError(e)) throw e;
+      console.log("[" + label + "] 일시적 DB 오류 → 재시도: " + e.message);
+    }
+  }
+}
+
 async function executeQuery(filters) {
   var built = buildQuery(filters);
-  var request = pool.request();
-  for (var i = 0; i < built.inputs.length; i++) {
-    var inp = built.inputs[i];
-    request.input(inp.name, inp.type, inp.value);
-  }
   console.log("\n[SQL]", built.sql);
   console.log("[PARAMS]", built.inputs.map(function (x) { return x.name + "=" + x.value; }).join(", ") || "(없음)");
   var t0 = Date.now();
-  var result = await request.query(built.sql);
+  var result = await runQueryWithRetry(built, "조회");
   var rows = result.recordset;
   var elapsed = Date.now() - t0;
   console.log("[결과] " + rows.length + "건 (" + elapsed + "ms)");
