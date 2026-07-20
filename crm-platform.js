@@ -111,6 +111,10 @@ var dbConfig = {
 var pool = null;
 // 전환수 자동 조회(일괄) 백그라운드 작업 상태 — 프록시 타임아웃 회피용
 var autoConvJob = { running: false, startedAt: null, finishedAt: null, total: 0, done: 0, updated: 0, attempted: 0, errors: 0, error: null };
+// 고객추출 조회 백그라운드 작업 — 장바구니 필터가 걸린 조회는 UserBasket 전수 스캔이라 프록시
+// 타임아웃(~30-60초)을 넘겨 504(HTML)를 부른다. 그런 조회만 즉시 접수 후 백그라운드 실행 + 폴링.
+var queryJobs = {};
+var QUERY_JOB_TTL_MS = 5 * 60 * 1000; // 완료 후 5분 지난 잡은 정리(메모리 누수 방지)
 // 장바구니 소스. 구 S4_CART는 2023-04-16 이후 신규 데이터가 없어(테이블 방치) 항상 0건이었다.
 // 현행 장바구니는 UserBasket이며, 담긴 카드 목록·담은 시각은 BasketJsonData(JSON) 안에 있다.
 var cartSchema = { available: false, dateCol: true };
@@ -462,7 +466,9 @@ async function loadCardDivs(seqs) {
 // 장바구니 JSON은 건당 평균 ~3.7KB라 41,887건을 한 번에 읽으면 150MB가 넘고, 실제로 Azure SQL이
 // 연결을 끊어버린다(기간 조건 없는 조회가 11.5초에 실패하는 것을 실측). 그래서 페이지로 나눠 읽는다.
 // 기간 조건이 있으면 사전필터로 후보가 확 줄어 보통 1페이지에 끝난다.
-var CART_PAGE_SIZE = 4000;
+// 페이지당 4000건(~15MB)은 Azure SQL이 자주 연결을 끊어(전수 스캔 시 p0부터 ECONNRESET 빈발)
+// 스캔이 실패했다. 2000건(~7MB)으로 낮춰 읽기당 부하를 줄이고 재시도 성공률을 높인다.
+var CART_PAGE_SIZE = 2000;
 // 기간 없는 조회는 전체를 훑어야 해 비싸므로 짧게 캐시한다(장바구니는 수시로 바뀌어 길게 두면 안 됨).
 var cartOwnerCache = {};
 var CART_CACHE_MS = 3 * 60 * 1000;
@@ -875,8 +881,11 @@ function isTransientDbError(e) {
   return [40197, 40501, 40613, 49918, 49919, 49920, 4060, 10928, 10929, 233, 64].indexOf(e && e.number) >= 0;
 }
 
+// 무거운 조회(특히 장바구니 전수 스캔)는 Azure SQL이 커넥션을 자주 끊어(ECONNRESET/unknown error)
+// 2회로는 부족했다. 재시도를 늘리고 백오프를 줘 풀 내 죽은 커넥션이 회복될 시간을 준다.
+var QUERY_MAX_ATTEMPTS = 5;
 async function runQueryWithRetry(built, label) {
-  for (var attempt = 1; attempt <= 2; attempt++) {
+  for (var attempt = 1; attempt <= QUERY_MAX_ATTEMPTS; attempt++) {
     var request = pool.request();
     for (var i = 0; i < built.inputs.length; i++) {
       var inp = built.inputs[i];
@@ -885,8 +894,10 @@ async function runQueryWithRetry(built, label) {
     try {
       return await request.query(built.sql);
     } catch (e) {
-      if (attempt >= 2 || !isTransientDbError(e)) throw e;
-      console.log("[" + label + "] 일시적 DB 오류 → 재시도: " + e.message);
+      if (attempt >= QUERY_MAX_ATTEMPTS || !isTransientDbError(e)) throw e;
+      var backoff = 300 * attempt; // 300, 600, 900, 1200ms
+      console.log("[" + label + "] 일시적 DB 오류 → 재시도(" + attempt + "/" + (QUERY_MAX_ATTEMPTS - 1) + ", " + backoff + "ms 후): " + e.message);
+      await new Promise(function (r) { setTimeout(r, backoff); });
     }
   }
 }
@@ -1689,6 +1700,36 @@ async function runAutoConvAllJob() {
   } finally {
     autoConvJob.finishedAt = nowKstStr();
     autoConvJob.running = false;
+  }
+}
+
+// 장바구니 필터가 걸렸는지 — 이때만 조회가 UserBasket 전수 스캔으로 느려진다.
+function cartFilterActive(filters) {
+  if (!cartSchema.available) return false;
+  return filters.cartInvitation === "Y" || filters.cartInvitation === "N" ||
+    filters.cartSample === "Y" || filters.cartSample === "N";
+}
+
+// TTL 지난 완료 잡 정리
+function cleanupQueryJobs() {
+  var now = Date.now();
+  Object.keys(queryJobs).forEach(function (id) {
+    var j = queryJobs[id];
+    if (!j.running && j.finishedAtMs && now - j.finishedAtMs > QUERY_JOB_TTL_MS) delete queryJobs[id];
+  });
+}
+
+// 조회를 백그라운드로 실행하고 queryJobs[jobId]에 결과/오류를 채운다(await 없이 호출).
+async function runQueryJob(jobId, filters) {
+  var job = queryJobs[jobId];
+  try {
+    job.result = await executeQuery(filters);
+  } catch (e) {
+    console.log("[조회잡] 실패:", e.message);
+    job.error = e.message || "조회 중 오류가 발생했습니다.";
+  } finally {
+    job.running = false;
+    job.finishedAtMs = Date.now();
   }
 }
 
@@ -2658,10 +2699,29 @@ function generateHTML() {
       <!-- 어제 성과 + 오늘 예정 -->
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
         <div class="panel" style="padding:12px 16px;border-left:4px solid #1a73e8">
-          <div style="font-size:13px;font-weight:700;color:#1e3a5f;margin-bottom:8px" id="cdYesterdayTitle">어제 성과</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+            <div style="font-size:13px;font-weight:700;color:#1e3a5f" id="cdYesterdayTitle">어제 성과</div>
+            <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+              <select id="cdYdQuick" onchange="applyYdQuick()" style="padding:2px 6px;border:1px solid #d0d7de;border-radius:4px;font-size:11px;color:#1e3a5f;cursor:pointer" title="빠른 기간 선택">
+                <option value="1">어제</option>
+                <option value="2">2일 전</option>
+                <option value="3">3일 전</option>
+                <option value="7">7일 전</option>
+                <option value="14">14일 전</option>
+                <option value="30">30일 전</option>
+                <option value="r7">최근 7일</option>
+                <option value="r14">최근 14일</option>
+                <option value="r30">최근 30일</option>
+              </select>
+              <input type="date" id="cdYdFrom" onchange="renderDashboard()" style="padding:2px 4px;border:1px solid #d0d7de;border-radius:4px;font-size:11px;color:#1e3a5f" title="시작일">
+              <span style="color:#999;font-size:11px">~</span>
+              <input type="date" id="cdYdTo" onchange="renderDashboard()" style="padding:2px 4px;border:1px solid #d0d7de;border-radius:4px;font-size:11px;color:#1e3a5f" title="종료일 (비우면 시작일과 같은 날)">
+            </div>
+          </div>
           <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px" id="cdYesterdayStats">
             <span>데이터 없음</span>
           </div>
+          <div style="margin-top:6px;font-size:12px;color:#888" id="cdYesterdayCompare"></div>
         </div>
         <div class="panel" style="padding:12px 16px;border-left:4px solid #e67e22">
           <div style="font-size:13px;font-weight:700;color:#92400e;margin-bottom:8px" id="cdTodayTitle">오늘 예정</div>
@@ -2689,9 +2749,17 @@ function generateHTML() {
           <span id="cdFilterCount" style="color:#666;margin-left:auto"></span>
         </div>
       </div>
-      <!-- 클릭률 추이 차트 -->
+      <!-- 추이 차트 (시간대별 클릭률 / 요일별 클릭률 / 요일별 전환율) -->
       <div class="panel" style="padding:14px;margin-bottom:14px">
-        <div class="panel-title">클릭률 시간대별 추이 (평균)</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+          <div class="panel-title" style="margin-bottom:0" id="cdTrendTitle">클릭률 시간대별 추이 (평균)</div>
+          <div style="display:flex;gap:4px">
+            <button type="button" id="cdTab_hourly" onclick="setTrendMode('hourly')" style="padding:3px 10px;border:1px solid #1a73e8;border-radius:4px;background:#1a73e8;color:#fff;font-size:11px;cursor:pointer">시간대별 클릭률</button>
+            <button type="button" id="cdTab_weekdayClick" onclick="setTrendMode('weekdayClick')" style="padding:3px 10px;border:1px solid #d0d7de;border-radius:4px;background:#fff;color:#333;font-size:11px;cursor:pointer">요일별 클릭률</button>
+            <button type="button" id="cdTab_weekdayConv" onclick="setTrendMode('weekdayConv')" style="padding:3px 10px;border:1px solid #d0d7de;border-radius:4px;background:#fff;color:#333;font-size:11px;cursor:pointer">요일별 전환율</button>
+            <button type="button" id="cdTab_weekdaySend" onclick="setTrendMode('weekdaySend')" style="padding:3px 10px;border:1px solid #d0d7de;border-radius:4px;background:#fff;color:#333;font-size:11px;cursor:pointer">요일별 발송수</button>
+          </div>
+        </div>
         <div style="display:flex;align-items:flex-end;height:100px;gap:4px;margin-top:8px" id="cdClickChart"></div>
         <div style="display:flex;gap:4px;margin-top:4px" id="cdClickLabels"></div>
       </div>
@@ -4559,16 +4627,32 @@ function _renderDashboardInner() {
   var yd = new Date(now); yd.setDate(yd.getDate()-1);
   var yesterdayStr = yd.getFullYear()+'-'+String(yd.getMonth()+1).padStart(2,'0')+'-'+String(yd.getDate()).padStart(2,'0');
 
-  // 어제 성과
-  var yc = allCamps.filter(function(c){return(c.send_date||'').slice(0,10)===yesterdayStr && c.type!=='취소';});
+  // 성과 기간 (빠른선택 또는 직접 날짜 지정) + 직전 동기간 대비
+  // 날짜 입력이 비어 있으면 어제 하루로 초기화
+  var fromEl = document.getElementById('cdYdFrom');
+  var toEl = document.getElementById('cdYdTo');
+  if(fromEl && !fromEl.value){ fromEl.value=_cdDayStr(1); if(toEl && !toEl.value) toEl.value=_cdDayStr(1); }
+  var fromStr = fromEl ? fromEl.value : _cdDayStr(1);
+  var toStr = (toEl && toEl.value) ? toEl.value : fromStr;
+  if(toStr < fromStr){ var _t=fromStr; fromStr=toStr; toStr=_t; } // 뒤집힘 보정
+  var lenDays = _cdDaysBetween(fromStr, toStr);
+  var perf = _cdRangePerf(fromStr, toStr, allCamps);
+  var rangeLabel = fromStr===toStr ? fromStr : (fromStr+' ~ '+toStr+' ('+lenDays+'일)');
   var yEl = document.getElementById('cdYesterdayStats');
-  document.getElementById('cdYesterdayTitle').textContent='어제 성과 ('+yesterdayStr+')';
-  if(yc.length>0){
-    var ySent=0,yCost=0,yClk=0,yConv=0;
-    yc.forEach(function(c){ySent+=c.send_count||0;yCost+=c.cost||0;if(c.clicks&&c.clicks['24h'])yClk+=parseInt(c.clicks['24h'].count)||0;if(c.conversions&&c.conversions['1d'])yConv+=parseInt(c.conversions['1d'].count)||0;});
-    var yRate=ySent>0?(yClk/ySent*100).toFixed(1)+'%':'0%';
-    yEl.innerHTML='<span><b>'+yc.length+'</b>건 캠페인</span><span>발송 <b>'+ySent.toLocaleString()+'</b></span><span>비용 <b>'+yCost.toLocaleString()+'</b>원</span><span style="color:#1a73e8">클릭 <b>'+yClk+'</b> ('+yRate+')</span><span style="color:#137333">전환 <b>'+yConv+'</b></span>';
+  document.getElementById('cdYesterdayTitle').textContent='성과 ('+rangeLabel+')';
+  if(perf.n>0){
+    var yRate=perf.sent>0?perf.rate.toFixed(1)+'%':'0%';
+    yEl.innerHTML='<span><b>'+perf.n+'</b>건 캠페인</span><span>발송 <b>'+perf.sent.toLocaleString()+'</b></span><span>비용 <b>'+perf.cost.toLocaleString()+'</b>원</span><span style="color:#1a73e8">클릭 <b>'+perf.clk.toLocaleString()+'</b> ('+yRate+')</span><span style="color:#137333">전환 <b>'+perf.conv.toLocaleString()+'</b></span>';
   }else{yEl.innerHTML='<span style="color:#999">발송 내역 없음</span>';}
+  // 직전 동기간 대비 (예: 7/10~7/16 → 7/3~7/9)
+  var cmpEl = document.getElementById('cdYesterdayCompare');
+  if(cmpEl){
+    var prevTo = _cdShift(fromStr, -1);
+    var prevFrom = _cdShift(fromStr, -lenDays);
+    var base = _cdRangePerf(prevFrom, prevTo, allCamps);
+    var prevLabel = prevFrom===prevTo ? prevFrom : (prevFrom+' ~ '+prevTo);
+    cmpEl.innerHTML='<b style="color:#666">직전 기간('+prevLabel+') 대비</b>&nbsp; 발송 '+_cdDelta(perf.sent,base.sent,false)+' &nbsp; 클릭률 '+_cdDelta(perf.rate,base.rate,true)+' &nbsp; 전환 '+_cdDelta(perf.conv,base.conv,false);
+  }
 
   // 오늘 예정
   var tc = allCamps.filter(function(c){return(c.send_date||'').slice(0,10)===todayStr && (c.type==='예정'||c.type==='완료');});
@@ -4604,19 +4688,9 @@ function _renderDashboardInner() {
   document.getElementById('cdAvgConvRate').textContent=cv1dN?(cv1dSum/cv1dN*100).toFixed(1)+'%':'-';
   document.getElementById('cdAvgConvRate7d').textContent=cv2dN?(cv2dSum/cv2dN*100).toFixed(1)+'%':'-';
 
-  // 클릭률 시간대별 차트
-  var slots=['1h','6h','12h','24h','48h','72h','7d'];
-  var slotLabels=['1시간','6시간','12시간','24시간','48시간','72시간','7일'];
-  var maxRate=0;
-  var avgs=slots.map(function(s){var sum=0,n=0;filtered.forEach(function(c){if(c.clicks&&c.clicks[s]&&c.send_count>0){var rv=parseFloat(c.clicks[s].rate);if(!isNaN(rv)){sum+=rv;n++;}}});var v=n?sum/n*100:0;if(v>maxRate)maxRate=v;return v;});
-  var chartH='',labelH='';
-  avgs.forEach(function(avg,i){
-    var h=maxRate>0?Math.max(4,avg/maxRate*90):4;
-    chartH+='<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end"><div style="font-size:10px;font-weight:600;color:#1a73e8;margin-bottom:2px">'+avg.toFixed(1)+'%</div><div style="width:80%;height:'+h+'px;background:linear-gradient(180deg,#4285f4,#1a73e8);border-radius:3px 3px 0 0"></div></div>';
-    labelH+='<div style="flex:1;text-align:center;font-size:10px;color:#666">'+slotLabels[i]+'</div>';
-  });
-  document.getElementById('cdClickChart').innerHTML=chartH;
-  document.getElementById('cdClickLabels').innerHTML=labelH;
+  // 추이 차트 (시간대별 클릭률 / 요일별 클릭률 / 요일별 전환율) — 선택된 모드로 렌더
+  _cdTrendCampaigns=filtered;
+  renderTrendChart();
 
   // 목적별 요약
   var pm={};
@@ -4673,6 +4747,123 @@ function _renderDashboardInner() {
   }
   renderCampaignTable();
 }
+
+// ===== 성과 기간 비교 유틸 =====
+// offset일 전 날짜 문자열(YYYY-MM-DD)
+function _cdDayStr(offset){var d=new Date();d.setDate(d.getDate()-offset);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+// 날짜 문자열을 days만큼 이동
+function _cdShift(dateStr, days){var d=new Date(dateStr+'T00:00:00');d.setDate(d.getDate()+days);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+// 두 날짜(포함) 사이 일수
+function _cdDaysBetween(fromStr, toStr){var a=new Date(fromStr+'T00:00:00'),b=new Date(toStr+'T00:00:00');return Math.round((b-a)/86400000)+1;}
+// 빠른선택 → 날짜 입력 채우기(단일일 또는 rN=최근 N일, 오늘 제외)
+function applyYdQuick(){
+  var v=document.getElementById('cdYdQuick').value;
+  var fromEl=document.getElementById('cdYdFrom'),toEl=document.getElementById('cdYdTo');
+  if(v.charAt(0)==='r'){var days=parseInt(v.slice(1));fromEl.value=_cdDayStr(days);toEl.value=_cdDayStr(1);} // 최근 N일: (오늘-N)~어제
+  else{var off=parseInt(v)||1;fromEl.value=_cdDayStr(off);toEl.value=_cdDayStr(off);} // 단일일
+  renderDashboard();
+}
+// 기간[from,to] 발송 집계(취소 제외). rate=24h 클릭률(%)
+function _cdRangePerf(fromStr, toStr, allCamps){
+  var yc=allCamps.filter(function(c){var d=(c.send_date||'').slice(0,10);return d>=fromStr && d<=toStr && c.type!=='취소';});
+  var r={n:yc.length,sent:0,cost:0,clk:0,conv:0,rate:0};
+  yc.forEach(function(c){r.sent+=c.send_count||0;r.cost+=c.cost||0;if(c.clicks&&c.clicks['24h'])r.clk+=parseInt(c.clicks['24h'].count)||0;if(c.conversions&&c.conversions['1d'])r.conv+=parseInt(c.conversions['1d'].count)||0;});
+  r.rate=r.sent>0?r.clk/r.sent*100:0;
+  return r;
+}
+// 증감 표기. isPct=true면 %p(퍼센트포인트) 차, 아니면 상대 %
+function _cdDelta(cur, prev, isPct){
+  if(prev===0&&cur===0)return '<span style="color:#bbb">–</span>';
+  if(prev===0)return '<span style="color:#137333;font-weight:600">신규</span>';
+  var diff=cur-prev;
+  var color=diff>0?'#137333':(diff<0?'#c5221f':'#888');
+  var arrow=diff>0?'▲':(diff<0?'▼':'–');
+  var mag=isPct?Math.abs(diff).toFixed(1)+'%p':Math.abs(diff/prev*100).toFixed(0)+'%';
+  return '<span style="color:'+color+';font-weight:600">'+arrow+mag+'</span>';
+}
+
+// ===== 추이 차트: 시간대별 클릭률 / 요일별 클릭률 / 요일별 전환율 =====
+var cdTrendMode='hourly';
+var _cdTrendCampaigns=[];
+var _cdTrendSubCnt=null;
+function setTrendMode(m){
+  cdTrendMode=m;
+  ['hourly','weekdayClick','weekdayConv','weekdaySend'].forEach(function(k){
+    var b=document.getElementById('cdTab_'+k);
+    if(!b)return;
+    if(k===m){b.style.background='#1a73e8';b.style.color='#fff';b.style.borderColor='#1a73e8';}
+    else{b.style.background='#fff';b.style.color='#333';b.style.borderColor='#d0d7de';}
+  });
+  renderTrendChart();
+}
+// 캠페인 누적 클릭률(%) — clicks.total 우선, 없으면 24h (rate는 0~1 분수 저장)
+function _cdClickRate(c){
+  if(c.clicks&&c.clicks['total']){var r=parseFloat(c.clicks['total'].rate);if(!isNaN(r))return r*100;}
+  if(c.clicks&&c.clicks['24h']){var r2=parseFloat(c.clicks['24h'].rate);if(!isNaN(r2))return r2*100;}
+  return null;
+}
+// 캠페인 누적 전환율(%) — 버킷은 누적 단조증가라 최대값이 최종 전환율
+function _cdConvRate(c){
+  if(!c.conversions)return null;
+  var keys=['1d','2d','3d','4d','5d','7d','14d','15d+'];var best=null;
+  keys.forEach(function(k){var o=c.conversions[k];if(o){var r=parseFloat(o.rate);if(!isNaN(r)&&(best===null||r>best))best=r;}});
+  return best===null?null:best*100;
+}
+function renderTrendChart(){
+  var filtered=_cdTrendCampaigns||[];
+  var titleEl=document.getElementById('cdTrendTitle');
+  var labels,vals,fromCol,toCol,txtCol;
+  var isCount=false;        // true면 막대 위 숫자를 정수(발송수)로 표기
+  _cdTrendSubCnt=null;      // 요일 모드에서 막대 아래 '캠페인 N건' 표시용
+  if(cdTrendMode==='hourly'){
+    if(titleEl)titleEl.textContent='클릭률 시간대별 추이 (평균)';
+    var slots=['1h','6h','12h','24h','48h','72h','7d'];
+    labels=['1시간','6시간','12시간','24시간','48시간','72시간','7일'];
+    vals=slots.map(function(s){var sum=0,n=0;filtered.forEach(function(c){if(c.clicks&&c.clicks[s]&&c.send_count>0){var rv=parseFloat(c.clicks[s].rate);if(!isNaN(rv)){sum+=rv;n++;}}});return n?sum/n*100:0;});
+    fromCol='#4285f4';toCol='#1a73e8';txtCol='#1a73e8';
+  }else{
+    var isConv=cdTrendMode==='weekdayConv';
+    var isSend=cdTrendMode==='weekdaySend';
+    if(titleEl)titleEl.textContent=isSend?'요일별 발송 수 추이':(isConv?'요일별 전환율 추이 (평균)':'요일별 클릭률 추이 (평균)');
+    labels=['월','화','수','목','금','토','일'];
+    var sums=[0,0,0,0,0,0,0],rateCnt=[0,0,0,0,0,0,0],allCnt=[0,0,0,0,0,0,0],sends=[0,0,0,0,0,0,0];
+    filtered.forEach(function(c){
+      if(c.type==='취소')return;
+      if(!(c.send_count>0))return;
+      var d=(c.send_date||'').slice(0,10);
+      if(!d||d.length!==10)return;
+      var dt=new Date(d+'T00:00:00');
+      if(isNaN(dt.getTime()))return;
+      var wi=(dt.getDay()+6)%7; // 월=0 ... 일=6
+      allCnt[wi]++; sends[wi]+=c.send_count||0;
+      if(!isSend){
+        var v=isConv?_cdConvRate(c):_cdClickRate(c);
+        if(v!==null){ sums[wi]+=v; rateCnt[wi]++; }
+      }
+    });
+    if(isSend){
+      vals=sends.slice(); _cdTrendSubCnt=allCnt; isCount=true;
+      fromCol='#f6b26b';toCol='#e37400';txtCol='#b45309';
+    }else{
+      vals=sums.map(function(s,i){return rateCnt[i]?s/rateCnt[i]:0;}); _cdTrendSubCnt=rateCnt;
+      if(isConv){fromCol='#34d399';toCol='#137333';txtCol='#137333';}
+      else{fromCol='#4285f4';toCol='#1a73e8';txtCol='#1a73e8';}
+    }
+  }
+  var maxV=0;vals.forEach(function(v){if(v>maxV)maxV=v;});
+  var chartH='',labelH='';
+  vals.forEach(function(v,i){
+    var h=maxV>0?Math.max(4,v/maxV*90):4;
+    var top=isCount?Math.round(v).toLocaleString():v.toFixed(1)+'%';
+    chartH+='<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end"><div style="font-size:10px;font-weight:600;color:'+txtCol+';margin-bottom:2px">'+top+'</div><div style="width:80%;height:'+h+'px;background:linear-gradient(180deg,'+fromCol+','+toCol+');border-radius:3px 3px 0 0"></div></div>';
+    var sub='';
+    if(_cdTrendSubCnt)sub='<br><span style="color:#bbb;font-size:9px">캠페인 '+(_cdTrendSubCnt[i]||0)+'건</span>';
+    labelH+='<div style="flex:1;text-align:center;font-size:10px;color:#666">'+labels[i]+sub+'</div>';
+  });
+  document.getElementById('cdClickChart').innerHTML=chartH;
+  document.getElementById('cdClickLabels').innerHTML=labelH;
+}
+
 var _sortedFiltered=[];
 var cdCampPage=1;
 function _fmtDateStr(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
@@ -6535,6 +6726,15 @@ function deleteFilterPreset(){
 
 var lastResult = null;
 
+// 응답이 JSON이 아니면(프록시 504 HTML 등) 친절한 메시지로 바꾼다 — 'Unexpected token <' 방지.
+async function readQueryJson(resp) {
+  var ct = resp.headers.get('content-type') || '';
+  if (ct.indexOf('json') === -1) {
+    throw new Error('서버가 아직 처리 중입니다 (HTTP ' + resp.status + '). 잠시 후 다시 시도하거나 담은 기간을 좁혀주세요.');
+  }
+  return await resp.json();
+}
+
 async function doQuery() {
   var area = document.getElementById('resultArea');
   var btnQ = document.getElementById('btnQuery');
@@ -6544,14 +6744,40 @@ async function doQuery() {
   area.innerHTML = '<div class="loading"><span class="spinner"></span>조회 중...</div>';
   try {
     var resp = await fetch('api/query', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(getFilters()) });
-    if (!resp.ok) throw new Error((await resp.json()).error || resp.statusText);
-    lastResult = await resp.json();
+    var data = await readQueryJson(resp);
+    if (!resp.ok) throw new Error(data.error || resp.statusText);
+    // 장바구니 필터 조회는 백그라운드로 접수됨 → jobId를 폴링해 결과를 받는다(프록시 타임아웃 회피).
+    if (data.async && data.jobId) {
+      lastResult = await pollQuery(data.jobId, area);
+    } else {
+      lastResult = data;
+    }
     renderExtResult(lastResult);
     btnD.disabled = false;
     btnA.disabled = false;
   } catch (err) {
     area.innerHTML = '<div class="warning" style="background:#fee;color:#c00;">오류: ' + escHtml(err.message) + '</div>';
   } finally { btnQ.disabled = false; }
+}
+
+// 백그라운드 조회 잡을 1.5초 간격으로 폴링. 완료되면 result를 반환, 오류면 throw.
+async function pollQuery(jobId, area) {
+  var waited = 0;
+  var MAX_MS = 5 * 60 * 1000; // 5분 넘게 안 끝나면 중단
+  while (true) {
+    await new Promise(function (r) { setTimeout(r, 1500); });
+    waited += 1500;
+    var secs = Math.round(waited / 1000);
+    area.innerHTML = '<div class="loading"><span class="spinner"></span>장바구니 조회 중... (' + secs + '초)</div>';
+    var r = await fetch('api/query-status?jobId=' + encodeURIComponent(jobId), { headers: {'Accept':'application/json'} });
+    var s = await readQueryJson(r);
+    if (s.done) {
+      if (s.error) throw new Error(s.error);
+      return s.result;
+    }
+    if (s.notFound) throw new Error(s.error || '조회 작업을 찾을 수 없습니다. 다시 조회해주세요.');
+    if (waited >= MAX_MS) throw new Error('조회가 너무 오래 걸립니다. 담은 기간을 좁혀 다시 시도해주세요.');
+  }
 }
 
 async function doDownload() {
@@ -8024,9 +8250,47 @@ var server = http.createServer(async function (req, res) {
     // 고객 추출 조회
     if (pathname === "/api/query" && req.method === "POST") {
       var filters = await parseBody(req);
+      // 장바구니 필터가 걸리면 UserBasket 전수 스캔이라 프록시 타임아웃(504 HTML)을 넘길 수 있다.
+      // 그 경우만 즉시 접수(jobId 반환) 후 백그라운드 실행하고, 프론트가 /api/query-status를 폴링한다.
+      await ensureCartSchema(); // cartFilterActive 판정 전에 스키마 확보(콜드 시작 보정)
+      if (cartFilterActive(filters)) {
+        cleanupQueryJobs();
+        var jobId = "q" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+        queryJobs[jobId] = { running: true, startedAtMs: Date.now(), finishedAtMs: null, result: null, error: null };
+        runQueryJob(jobId, filters); // 의도적으로 await 하지 않음 (백그라운드 실행)
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, async: true, jobId: jobId }));
+        return;
+      }
       var result = await executeQuery(filters);
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify(result));
+      return;
+    }
+
+    // 고객추출 조회(장바구니 필터) 백그라운드 작업 상태 폴링
+    if (pathname === "/api/query-status" && req.method === "GET") {
+      var qJobId = parsedUrl.searchParams.get("jobId") || "";
+      var qJob = queryJobs[qJobId];
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      if (!qJob) {
+        // 잡이 없음(TTL 만료 또는 서버 재시작). 프론트가 재조회하도록 안내.
+        res.end(JSON.stringify({ ok: false, notFound: true, error: "조회 작업을 찾을 수 없습니다. 다시 조회해주세요." }));
+        return;
+      }
+      if (qJob.running) {
+        res.end(JSON.stringify({ ok: true, done: false }));
+        return;
+      }
+      if (qJob.error) {
+        var qErr = qJob.error;
+        delete queryJobs[qJobId];
+        res.end(JSON.stringify({ ok: false, done: true, error: qErr }));
+        return;
+      }
+      var qResult = qJob.result;
+      delete queryJobs[qJobId]; // 결과 전달 후 정리
+      res.end(JSON.stringify({ ok: true, done: true, result: qResult }));
       return;
     }
 
