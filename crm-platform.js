@@ -111,6 +111,8 @@ var dbConfig = {
 var pool = null;
 // 전환수 자동 조회(일괄) 백그라운드 작업 상태 — 프록시 타임아웃 회피용
 var autoConvJob = { running: false, startedAt: null, finishedAt: null, total: 0, done: 0, updated: 0, attempted: 0, errors: 0, error: null };
+// 성과 요약(전체 vs LMS 귀속 vs 비중) 백그라운드 작업 상태 — 무거운 분모 쿼리라 프록시 타임아웃 회피용
+var perfSummaryJob = { running: false, startedAt: null, finishedAt: null, error: null, result: null, warn: null };
 // 고객추출 조회 백그라운드 작업 — 장바구니 필터가 걸린 조회는 UserBasket 전수 스캔이라 프록시
 // 타임아웃(~30-60초)을 넘겨 504(HTML)를 부른다. 그런 조회만 즉시 접수 후 백그라운드 실행 + 폴링.
 var queryJobs = {};
@@ -1703,6 +1705,240 @@ async function runAutoConvAllJob() {
   }
 }
 
+// ═══════════════════════════════════════════════════════════
+// 성과 요약(전체 vs LMS 귀속 vs 비중) — "일자별 성과" 상단 패널 데이터
+// 분모(전체) = 바른손카드(SB) 전체 구매자(마케팅동의 필터 없음). 유형별 첫 구매일(range내 MIN) 1회 카운트.
+// 분자(LMS 귀속) = 그 구매자 중, 구매일 기준 목적별 윈도우 내에 매칭 목적 LMS를 수신한 회원.
+// 비중 = 분자÷분모(구매자 수 기준). 매출은 settle_price 주문단위 DISTINCT 합.
+// SB 스코프: 주문.member_id를 S2_UserInfo u ON u.uid=member_id AND u.site_div='SS' AND u.REFERER_SALES_GUBUN='SB'로 조인
+//   (site_div='SS'가 uid당 1행이라 중복제거 역할; 기존 고객추출 관례와 동일 — 745·758행 참고).
+// 이 무거운 조회는 자동실행하지 않고 [성과 조회] 버튼 클릭 시에만 백그라운드+폴링으로 실행한다.
+var PERF_WINDOWS = { invitation: 7, sample: 7, returngift: 21, addon: 21 }; // 목적별 귀속 윈도우(일) — 조정가능
+var PERF_MAX_DAYS = 92; // from~to 최대 범위 캡(초과 시 잘라내고 경고)
+var PERF_TYPES = ["invitation", "sample", "returngift", "addon"];
+
+function psYMD(s) { var p = (s || "").slice(0, 10).split("-").map(Number); return new Date(p[0], (p[1] || 1) - 1, p[2] || 1); }
+function psAddDays(s, n) {
+  var d = psYMD(s); d = new Date(d.getTime() + n * 86400000);
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+
+// 분모: 유형별 "일자별 구매자 수". 구매자는 range 내 MIN(order_date)일에 1회 카운트. SB 조인(마케팅동의 필터 없음).
+async function psBuyersByDay(convType, fromDt, toDt) {
+  var request = pool.request();
+  request.input("psbf", sql.VarChar(30), fromDt.replace("T", " "));
+  request.input("psbt", sql.VarChar(30), toDt.replace("T", " "));
+  var f = "@psbf", t = "@psbt";
+  var sbCo = " INNER JOIN S2_UserInfo u WITH (NOLOCK) ON u.uid=co.member_id AND u.site_div='SS' AND u.REFERER_SALES_GUBUN='SB'";
+  var sbEo = " INNER JOIN S2_UserInfo u WITH (NOLOCK) ON u.uid=eo.member_id AND u.site_div='SS' AND u.REFERER_SALES_GUBUN='SB'";
+  var inner;
+  if (convType === "invitation") {
+    inner = "SELECT co.member_id AS member, CONVERT(date, MIN(co.order_date)) AS day " +
+      "FROM custom_order co WITH (NOLOCK) " +
+      "INNER JOIN custom_order_item coi WITH (NOLOCK) ON co.order_seq=coi.order_seq " +
+      "INNER JOIN S2_Card c WITH (NOLOCK) ON coi.card_seq=c.Card_Seq" + sbCo + " " +
+      "WHERE c.Card_Div='A01' AND co.status_seq>=1 AND co.order_date>=" + f + " AND co.order_date<" + t + " " +
+      "GROUP BY co.member_id";
+  } else if (convType === "sample") {
+    inner = "SELECT so.MEMBER_ID AS member, CONVERT(date, MIN(so.REQUEST_DATE)) AS day " +
+      "FROM CUSTOM_SAMPLE_ORDER so WITH (NOLOCK) " +
+      "INNER JOIN S2_UserInfo u WITH (NOLOCK) ON u.uid=so.MEMBER_ID AND u.site_div='SS' AND u.REFERER_SALES_GUBUN='SB' " +
+      "WHERE so.REQUEST_DATE>=" + f + " AND so.REQUEST_DATE<" + t + " " +
+      "GROUP BY so.MEMBER_ID";
+  } else if (convType === "returngift") {
+    inner = "SELECT member, CONVERT(date, MIN(od)) AS day FROM (" +
+      "SELECT co.member_id AS member, co.order_date AS od " +
+      "FROM custom_order co WITH (NOLOCK) " +
+      "INNER JOIN custom_order_item coi WITH (NOLOCK) ON co.order_seq=coi.order_seq " +
+      "INNER JOIN S2_Card c WITH (NOLOCK) ON coi.card_seq=c.Card_Seq " +
+      "LEFT JOIN S2_CardKind skr WITH (NOLOCK) ON c.Card_Seq=skr.Card_Seq" + sbCo + " " +
+      "WHERE co.status_seq>=1 AND (c.Card_Div='D01' OR skr.CardKind_Seq IN (4,5,16)) " +
+      "AND co.order_date>=" + f + " AND co.order_date<" + t + " " +
+      "UNION ALL " +
+      "SELECT eo.member_id AS member, eo.order_date AS od " +
+      "FROM CUSTOM_ETC_ORDER eo WITH (NOLOCK) " +
+      "INNER JOIN CUSTOM_ETC_ORDER_ITEM eoi WITH (NOLOCK) ON eo.order_seq=eoi.order_seq " +
+      "INNER JOIN S2_Card c2 WITH (NOLOCK) ON eoi.card_seq=c2.Card_Seq" + sbEo + " " +
+      "WHERE eo.status_seq>=1 AND c2.Card_Div='D01' " +
+      "AND eo.order_date>=" + f + " AND eo.order_date<" + t +
+      ") x GROUP BY member";
+  } else { // addon (부가상품만 — 답례품 미포함, 분자/분모 정의 일치)
+    inner = "SELECT member, CONVERT(date, MIN(od)) AS day FROM (" +
+      "SELECT eo.member_id AS member, eo.order_date AS od " +
+      "FROM CUSTOM_ETC_ORDER eo WITH (NOLOCK) " +
+      "INNER JOIN CUSTOM_ETC_ORDER_ITEM eoi WITH (NOLOCK) ON eo.order_seq=eoi.order_seq " +
+      "INNER JOIN S2_Card c WITH (NOLOCK) ON eoi.card_seq=c.Card_Seq" + sbEo + " " +
+      "WHERE eo.status_seq>=1 AND c.Card_Div IN ('C29','C04','D02') " +
+      "AND eo.order_date>=" + f + " AND eo.order_date<" + t + " " +
+      "UNION ALL " +
+      "SELECT co.member_id AS member, co.order_date AS od " +
+      "FROM custom_order co WITH (NOLOCK) " +
+      "INNER JOIN custom_order_item coi WITH (NOLOCK) ON co.order_seq=coi.order_seq " +
+      "INNER JOIN S2_Card c2 WITH (NOLOCK) ON coi.card_seq=c2.Card_Seq" + sbCo + " " +
+      "WHERE co.status_seq>=1 AND c2.Card_Div IN ('C29','C04','D02') " +
+      "AND co.order_date>=" + f + " AND co.order_date<" + t + " " +
+      "AND NOT EXISTS (SELECT 1 FROM custom_order_item coi2 WITH (NOLOCK) INNER JOIN S2_Card c3 WITH (NOLOCK) ON coi2.card_seq=c3.Card_Seq WHERE coi2.order_seq=co.order_seq AND c3.Card_Div='A01')" +
+      ") x GROUP BY member";
+  }
+  var q = "SELECT CONVERT(varchar(10), t.day, 120) AS day, COUNT(*) AS cnt FROM (" + inner + ") t GROUP BY t.day";
+  var result = await request.query(q);
+  var out = {};
+  result.recordset.forEach(function (row) { out[row.day] = row.cnt; });
+  return out;
+}
+
+// 매출/일: 유형 조건 주문의 order_date 일자별 SUM(settle_price), 주문 단위 DISTINCT(src,oseq)로 중복제거.
+// (trackConversionRevenue 1543~1558 패턴 복사) memberIds==null이면 분모(SB조인), 배열이면 분자(member_id IN, 배치).
+// 분자(LMS) 매출은 '귀속 member-set' 근사 — 윈도우는 카운트에만 엄밀 적용, 매출은 귀속회원 집합으로 근사한다.
+function psRevenueSql(convType, useMemberIn, inClause, fp, tp) {
+  var f = "@" + fp, t = "@" + tp;
+  var coJoin = useMemberIn ? "" : " INNER JOIN S2_UserInfo u WITH (NOLOCK) ON u.uid=co.member_id AND u.site_div='SS' AND u.REFERER_SALES_GUBUN='SB'";
+  var eoJoin = useMemberIn ? "" : " INNER JOIN S2_UserInfo u WITH (NOLOCK) ON u.uid=eo.member_id AND u.site_div='SS' AND u.REFERER_SALES_GUBUN='SB'";
+  var coWhere = "co.status_seq>=1 AND co.order_date>=" + f + " AND co.order_date<" + t + (useMemberIn ? " AND co.member_id IN (" + inClause + ")" : "");
+  var eoWhere = "eo.status_seq>=1 AND eo.order_date>=" + f + " AND eo.order_date<" + t + (useMemberIn ? " AND eo.member_id IN (" + inClause + ")" : "");
+  var invitationCO = "SELECT 'c' src, co.order_seq oseq, co.order_date od, co.settle_price amt FROM custom_order co WITH (NOLOCK)" + coJoin + " WHERE " + coWhere +
+    " AND EXISTS (SELECT 1 FROM custom_order_item coi WITH (NOLOCK) INNER JOIN S2_Card c WITH (NOLOCK) ON coi.card_seq=c.Card_Seq WHERE coi.order_seq=co.order_seq AND c.Card_Div='A01')";
+  var rgCO = "SELECT 'c' src, co.order_seq oseq, co.order_date od, co.settle_price amt FROM custom_order co WITH (NOLOCK)" + coJoin + " WHERE " + coWhere +
+    " AND EXISTS (SELECT 1 FROM custom_order_item coi WITH (NOLOCK) INNER JOIN S2_Card c WITH (NOLOCK) ON coi.card_seq=c.Card_Seq LEFT JOIN S2_CardKind skr WITH (NOLOCK) ON c.Card_Seq=skr.Card_Seq WHERE coi.order_seq=co.order_seq AND (c.Card_Div='D01' OR skr.CardKind_Seq IN (4,5,16)))";
+  var rgEO = "SELECT 'e' src, eo.order_seq oseq, eo.order_date od, eo.settle_price amt FROM CUSTOM_ETC_ORDER eo WITH (NOLOCK)" + eoJoin + " WHERE " + eoWhere +
+    " AND EXISTS (SELECT 1 FROM CUSTOM_ETC_ORDER_ITEM eoi WITH (NOLOCK) INNER JOIN S2_Card c2 WITH (NOLOCK) ON eoi.card_seq=c2.Card_Seq WHERE eoi.order_seq=eo.order_seq AND c2.Card_Div='D01')";
+  var addonEO = "SELECT 'e' src, eo.order_seq oseq, eo.order_date od, eo.settle_price amt FROM CUSTOM_ETC_ORDER eo WITH (NOLOCK)" + eoJoin + " WHERE " + eoWhere +
+    " AND EXISTS (SELECT 1 FROM CUSTOM_ETC_ORDER_ITEM eoi WITH (NOLOCK) INNER JOIN S2_Card c WITH (NOLOCK) ON eoi.card_seq=c.Card_Seq WHERE eoi.order_seq=eo.order_seq AND c.Card_Div IN ('C29','C04','D02'))";
+  var addonCO = "SELECT 'c' src, co.order_seq oseq, co.order_date od, co.settle_price amt FROM custom_order co WITH (NOLOCK)" + coJoin + " WHERE " + coWhere +
+    " AND EXISTS (SELECT 1 FROM custom_order_item coi WITH (NOLOCK) INNER JOIN S2_Card c2 WITH (NOLOCK) ON coi.card_seq=c2.Card_Seq WHERE coi.order_seq=co.order_seq AND c2.Card_Div IN ('C29','C04','D02'))" +
+    " AND NOT EXISTS (SELECT 1 FROM custom_order_item coi2 WITH (NOLOCK) INNER JOIN S2_Card c3 WITH (NOLOCK) ON coi2.card_seq=c3.Card_Seq WHERE coi2.order_seq=co.order_seq AND c3.Card_Div='A01')";
+  var parts;
+  if (convType === "returngift") parts = [rgCO, rgEO];
+  else if (convType === "addon") parts = [addonEO, addonCO]; // 부가상품만(답례품 미포함) — 분모 buyers 정의와 일치
+  else parts = [invitationCO]; // invitation
+  return "SELECT CONVERT(varchar(10), d.od, 120) AS day, COALESCE(SUM(d.amt),0) AS rev FROM (SELECT DISTINCT src, oseq, od, amt FROM (" + parts.join(" UNION ALL ") + ") u) d GROUP BY CONVERT(varchar(10), d.od, 120)";
+}
+
+async function psRevenueByDay(convType, fromDt, toDt, memberIds) {
+  if (convType === "sample") return {}; // 샘플 매출=0
+  var out = {};
+  var fromS = fromDt.replace("T", " "), toS = toDt.replace("T", " ");
+  if (memberIds == null) { // 분모: SB 조인 단일 쿼리
+    var request = pool.request();
+    request.input("psrf", sql.VarChar(30), fromS);
+    request.input("psrt", sql.VarChar(30), toS);
+    var q = psRevenueSql(convType, false, null, "psrf", "psrt");
+    var result = await request.query(q);
+    result.recordset.forEach(function (row) { out[row.day] = (out[row.day] || 0) + (row.rev || 0); });
+    return out;
+  }
+  if (memberIds.length === 0) return out; // 분자: 귀속 회원 없음
+  var BATCH = 500;
+  for (var b = 0; b < memberIds.length; b += BATCH) {
+    var batch = memberIds.slice(b, b + BATCH);
+    var req2 = pool.request();
+    var pn = [];
+    for (var i = 0; i < batch.length; i++) { pn.push("@psm" + b + "_" + i); req2.input("psm" + b + "_" + i, sql.VarChar(50), batch[i]); }
+    req2.input("psrf" + b, sql.VarChar(30), fromS);
+    req2.input("psrt" + b, sql.VarChar(30), toS);
+    var q2 = psRevenueSql(convType, true, pn.join(","), "psrf" + b, "psrt" + b);
+    var r2 = await req2.query(q2);
+    r2.recordset.forEach(function (row) { out[row.day] = (out[row.day] || 0) + (row.rev || 0); });
+  }
+  return out;
+}
+
+function psTrackerFor(convType, memberIds, fromDt, toDt) {
+  if (convType === "invitation") return trackInvitationOrders(memberIds, fromDt, toDt);
+  if (convType === "sample") return trackSampleOrders(memberIds, fromDt, toDt);
+  if (convType === "returngift") return trackReturnGiftOrders(memberIds, fromDt, toDt);
+  return trackAdditionalProductOrders(memberIds, fromDt, toDt);
+}
+
+// 성과 요약 산출. 반환 result: { from, to, warn, byType:{ <type>:{ '<day>':{ total:{buyers,revenue}, lms:{buyers,revenue} } } } }
+// 클라가 일→주 롤업하므로 일자별만 담는다. 유형별을 동시 실행하지 않고 순차 처리(쿼리 과중 주의).
+async function computePerfSummary(from, to) {
+  var warn = null;
+  var f = (from || "").slice(0, 10), t = (to || "").slice(0, 10);
+  var diff = Math.round((psYMD(t) - psYMD(f)) / 86400000);
+  if (isNaN(diff) || diff < 0) throw new Error("조회 기간이 올바르지 않습니다 (from=" + f + ", to=" + t + ")");
+  if (diff > PERF_MAX_DAYS) { t = psAddDays(f, PERF_MAX_DAYS); warn = "조회 범위가 " + PERF_MAX_DAYS + "일을 초과하여 " + f + " ~ " + t + "로 제한했습니다."; }
+  var fromDt = f + " 00:00:00";
+  var toDt = psAddDays(t, 1) + " 00:00:00"; // 'to' 당일 포함(상한 배타적이라 +1일)
+
+  // ── 분자용: 캠페인 → 수신자 send-date 맵(convType별). extractionHistory가 비면 자연히 분자=0 ──
+  var cdData = fs.existsSync(CAMPAIGN_DATA_PATH) ? JSON.parse(fs.readFileSync(CAMPAIGN_DATA_PATH, "utf8")) : { campaigns: [] };
+  var camps = cdData.campaigns || [];
+  var sendMap = { invitation: {}, sample: {}, returngift: {}, addon: {} };
+  camps.forEach(function (c) {
+    if (!c || c.type === "취소" || !c.extraction_id || !c.send_date || !c.purpose) return;
+    var sd = c.send_date.slice(0, 10);
+    var ct = convTypeForPurpose(c.purpose);
+    var targets = ct === "sample_invitation" ? ["sample", "invitation"] : [ct]; // sample_invitation은 양쪽 기여
+    var extRec = null;
+    for (var exi = 0; exi < extractionHistory.length; exi++) { if (extractionHistory[exi].id === c.extraction_id) { extRec = extractionHistory[exi]; break; } }
+    if (!extRec || !extRec.recipients || !extRec.recipients.length) return;
+    var recips = acApplySplit(extRec.recipients, c.extraction_split);
+    targets.forEach(function (tt) {
+      if (PERF_TYPES.indexOf(tt) < 0) return; // review/기타 등 지표 아님
+      var mp = sendMap[tt];
+      recips.forEach(function (r) { if (r && r.uid) { (mp[r.uid] = mp[r.uid] || []).push(sd); } });
+    });
+  });
+
+  var byType = { invitation: {}, sample: {}, returngift: {}, addon: {} };
+  function cell(tt, day) { var m = byType[tt]; if (!m[day]) m[day] = { total: { buyers: 0, revenue: 0 }, lms: { buyers: 0, revenue: 0 } }; return m[day]; }
+
+  for (var ti = 0; ti < PERF_TYPES.length; ti++) {
+    var tt = PERF_TYPES[ti];
+    // 분모: 구매자/일 + 매출/일 (순차)
+    var totBuyers = await psBuyersByDay(tt, fromDt, toDt);
+    Object.keys(totBuyers).forEach(function (day) { cell(tt, day).total.buyers = totBuyers[day]; });
+    var totRev = await psRevenueByDay(tt, fromDt, toDt, null);
+    Object.keys(totRev).forEach(function (day) { cell(tt, day).total.revenue = totRev[day]; });
+
+    // 분자: 수신 기반 귀속 구매자/일 (기존 트래커 재사용 + 목적별 윈도우 판정)
+    var mp = sendMap[tt];
+    var memberIds = Object.keys(mp);
+    if (memberIds.length > 0) {
+      var rows = await psTrackerFor(tt, memberIds, fromDt, toDt); // {MEMBER_ID, first_date_str}
+      var win = PERF_WINDOWS[tt];
+      var attrib = {}; // uid -> 귀속일(day)
+      rows.forEach(function (row) {
+        var uid = row.MEMBER_ID; var day = (row.first_date_str || "").slice(0, 10);
+        if (!day) return;
+        var sends = mp[uid]; if (!sends) return;
+        var lo = psAddDays(day, -win);
+        var hit = false;
+        for (var si = 0; si < sends.length; si++) { if (sends[si] >= lo && sends[si] <= day) { hit = true; break; } }
+        if (hit) { attrib[uid] = day; cell(tt, day).lms.buyers += 1; }
+      });
+      // 분자 매출: 귀속 member-set 근사(윈도우는 카운트에만 엄밀 적용)
+      var attribMembers = Object.keys(attrib);
+      if (attribMembers.length > 0) {
+        var lmsRev = await psRevenueByDay(tt, fromDt, toDt, attribMembers);
+        Object.keys(lmsRev).forEach(function (day) { cell(tt, day).lms.revenue = lmsRev[day]; });
+      }
+    }
+  }
+  return { from: f, to: t, warn: warn, byType: byType };
+}
+
+// 성과 요약 백그라운드 워커. perfSummaryJob에 결과/오류를 채운다(await 없이 호출). 에러는 runAutoConvAllJob 방식으로 표면화.
+async function runPerfSummaryJob(from, to) {
+  try {
+    var r = await computePerfSummary(from, to);
+    perfSummaryJob.result = r;
+    perfSummaryJob.warn = r.warn || null;
+  } catch (e) {
+    var d = e.message || "(메시지 없음)";
+    if (e.code) d += " [code:" + e.code + "]";
+    if (e.number) d += " [SQL:" + e.number + "]";
+    if (e.originalError && e.originalError.message && e.originalError.message !== e.message) d += " / 원본: " + e.originalError.message;
+    if (!pool || !pool.connected) d += " [pool:disconnected]";
+    perfSummaryJob.error = "성과 요약 조회 오류: " + d;
+    console.log("[성과요약] 실패:", e.message);
+  } finally {
+    perfSummaryJob.finishedAt = nowKstStr();
+    perfSummaryJob.running = false;
+  }
+}
+
 // 장바구니 필터가 걸렸는지 — 이때만 조회가 UserBasket 전수 스캔으로 느려진다.
 function cartFilterActive(filters) {
   if (!cartSchema.available) return false;
@@ -3069,6 +3305,49 @@ function generateHTML() {
         #dpPop .dp-msg{font-size:12px;color:#374151;white-space:pre-wrap;line-height:1.45}
       </style>
       <div class="dp-desc">가로: 일자(일~토 주간, <b>N주차</b>=WEEKNUM) · 주간 헤더 클릭 = 접기/펼치기 · "주합계" = 주간 합계 · 세로: 목적 → 세그먼트 → 지표 7종 · 작은 글씨 = WoW(일자=전주 동일요일 대비, 주합계=전주 합계 대비, 비교할 전주 데이터 없으면 생략) · <b>💬 발송 수 셀 클릭 = 그 날 발송 카피 보기</b> · <b>상단 노란 "전체 합계"</b>는 목적 '기타'를 제외한 전 목적 통합 합계</div>
+      <style>
+        #cdSub-daily .ps-panel{border:1px solid #cbd5e1;background:#f8fafc;border-radius:8px;padding:12px 14px;margin-bottom:14px}
+        #cdSub-daily .ps-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+        #cdSub-daily .ps-head .ps-title{font-size:14px;font-weight:700;color:#0f172a;margin-right:6px}
+        #cdSub-daily .ps-head input[type=date]{font-size:12px;padding:4px 6px;border:1px solid #cbd5e1;border-radius:6px}
+        #cdSub-daily .ps-head button{font-size:12px;padding:5px 12px;border:1px solid #cbd5e1;background:#fff;border-radius:6px;cursor:pointer}
+        #cdSub-daily .ps-head button:hover{background:#eff6ff}
+        #cdSub-daily .ps-run{background:#7c3aed;color:#fff;border-color:#7c3aed;font-weight:600}
+        #cdSub-daily .ps-run:hover{background:#6d28d9}
+        #cdSub-daily .ps-tog{border:1px solid #cbd5e1;border-radius:6px;overflow:hidden;display:inline-flex}
+        #cdSub-daily .ps-tog button{border:none;border-radius:0;border-right:1px solid #cbd5e1}
+        #cdSub-daily .ps-tog button.active{background:#1e3a5f;color:#fff}
+        #cdSub-daily .ps-status{font-size:12px;color:#6b7280}
+        #cdSub-daily .ps-note{font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.5}
+        #cdSub-daily .ps-wrap{overflow:auto;max-height:60vh;border:1px solid #d1d5db;background:#fff;margin-top:8px}
+        #cdSub-daily table.ps{border-collapse:separate;border-spacing:0;font-size:12px;white-space:nowrap}
+        #cdSub-daily table.ps th,#cdSub-daily table.ps td{border-right:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;padding:4px 8px;text-align:right}
+        #cdSub-daily table.ps thead th{position:sticky;top:0;z-index:5;background:#0f766e;color:#fff;text-align:center;font-weight:600}
+        #cdSub-daily table.ps .psc1{position:sticky;left:0;background:#fff;text-align:left;z-index:3;min-width:120px;font-weight:700}
+        #cdSub-daily table.ps .psc2{position:sticky;left:120px;background:#fff;text-align:left;z-index:3;min-width:78px;color:#6b7280}
+        #cdSub-daily table.ps thead th.psc1,#cdSub-daily table.ps thead th.psc2{z-index:7;background:#0f766e;color:#fff}
+        #cdSub-daily table.ps tr.ps-lms td:not(.psc1):not(.psc2){background:#f0fdfa}
+        #cdSub-daily table.ps tr.ps-pct td:not(.psc1):not(.psc2){background:#eef2ff;color:#4338ca;font-weight:600}
+        #cdSub-daily table.ps tr.ps-grp td{border-top:2px solid #94a3b8}
+        #cdSub-daily table.ps td.ps-empty{color:#d1d5db;text-align:center}
+      </style>
+      <div class="ps-panel">
+        <div class="ps-head">
+          <span class="ps-title">성과 요약: 전체 vs LMS 귀속 vs 비중</span>
+          <label style="font-size:12px;color:#475569">기간</label>
+          <input type="date" id="perfFrom">
+          <span style="color:#94a3b8">~</span>
+          <input type="date" id="perfTo">
+          <button class="ps-run" id="perfRunBtn" onclick="startPerfSummary()">성과 조회</button>
+          <span class="ps-tog">
+            <button class="active" id="perfModeDaily" onclick="perfSetMode('daily')">데일리</button>
+            <button id="perfModeWeekly" onclick="perfSetMode('weekly')">위클리</button>
+          </span>
+          <span class="ps-status" id="perfSumStatus"></span>
+        </div>
+        <div id="perfSumBox"></div>
+        <div class="ps-note">비중 = LMS 수신 기반 귀속(전체 대비). 귀속 ≠ 인과(순증분 아님). 클릭 개인귀속 · 순증분은 로드맵. 무거운 쿼리이므로 [성과 조회] 클릭 시에만 실행됩니다.</div>
+      </div>
       <div class="dp-bar"><button onclick="dpSetAll(true)">전체 펼치기</button><button onclick="dpSetAll(false)">전체 접기</button><span id="dpMeta" style="font-size:12px;color:#6b7280"></span></div>
       <div class="dp-wrap"><table class="dp" id="dpTbl"></table></div>
       <div id="dpPop"><div class="dp-ph"><span id="dpPopTitle"></span><span class="dp-x" onclick="dpHidePop()">✕</span></div><div class="dp-pb" id="dpPopBody"></div></div>
@@ -3902,7 +4181,7 @@ function cdSwitchSub(subId) {
   if (subId==='records') { if(!cdLoaded){loadCampaignDashboard().then(function(){populateCampaignSelect();renderUrlTodo();renderRecords();});}else{populateCampaignSelect();renderUrlTodo();renderRecords();} }
   if (subId==='compose') { loadSavedMessages(); populatePrevMessages(); populateExtractionHistory(); updateCmUrlSection(); }
   if (subId==='trend') { if(!cdLoaded){loadCampaignDashboard().then(function(){renderTrend();});}else{renderTrend();} }
-  if (subId==='daily') { if(!cdLoaded){loadCampaignDashboard().then(function(){renderDailyPerf();});}else{renderDailyPerf();} }
+  if (subId==='daily') { perfDefaultDates(); if(!cdLoaded){loadCampaignDashboard().then(function(){renderDailyPerf();});}else{renderDailyPerf();} }
 }
 
 // ═══ 일자별 성과 (목적×세그먼트 × 일자/주간, WoW, 카피 토글) ═══
@@ -4044,6 +4323,122 @@ function dpToggle(i){dpExpanded[i]=!dpExpanded[i];renderDailyPerf();}
 function dpSetAll(v){if(dpExpanded)for(var i=0;i<dpExpanded.length;i++)dpExpanded[i]=v;renderDailyPerf();}
 function dpShowPop(i,td){var d=dpPOP[i];if(!d)return;var pop=document.getElementById('dpPop');document.getElementById('dpPopTitle').textContent=d.title;var html='';if(!d.items.length)html='<div class="dp-msg" style="color:#9ca3af">발송 카피 정보 없음</div>';d.items.forEach(function(c){html+='<div class="dp-camp"><div class="dp-stat">발송 '+dpFInt(c.s)+' · 클릭 '+dpFInt(c.clk)+' · 전환 '+dpFInt(c.cv)+(c.rev?(' · 매출 '+dpFWon(c.rev)):'')+'</div><div class="dp-msg">'+dpEsc(c.m||'(카피 없음)')+'</div></div>';});document.getElementById('dpPopBody').innerHTML=html;pop.style.display='block';pop.dataset.cur=String(i);var r=td.getBoundingClientRect();var x=Math.min(r.left,window.innerWidth-430),y=r.bottom+6;if(y+260>window.innerHeight)y=Math.max(10,r.top-260);pop.style.left=Math.max(8,x)+'px';pop.style.top=y+'px';}
 function dpHidePop(){var pop=document.getElementById('dpPop');pop.style.display='none';pop.dataset.cur='';}
+
+// ═══ 성과 요약(전체 vs LMS 귀속 vs 비중) — 일자별 성과 상단 패널 ═══
+// 지표 5종(청첩장/샘플/답례품/부가상품 구매자 + 매출액) × 계열 3종(전체 분모 / LMS 귀속 분자 / 비중).
+// 무거운 쿼리라 [성과 조회] 클릭 시에만 POST + 폴링. extractionHistory가 비면 서버가 분자=0으로 내려주고 비중은 '-'.
+var perfResult=null, perfMode='daily', perfPolling=false;
+var PERF_WD=['일','월','화','수','목','금','토'];
+var PERF_METRICS=[
+ {label:'청첩장 구매',type:'invitation',kind:'buyers'},
+ {label:'샘플 주문',type:'sample',kind:'buyers'},
+ {label:'답례품 구매',type:'returngift',kind:'buyers'},
+ {label:'부가상품 주문',type:'addon',kind:'buyers'},
+ {label:'매출액',type:null,kind:'rev'}
+];
+function perfDS(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+function perfYMD(s){var p=s.split('-').map(Number);return new Date(p[0],p[1]-1,p[2]);}
+function perfMD(d){return (d.getMonth()+1)+'/'+d.getDate();}
+function perfFInt(n){return Math.round(n).toLocaleString();}
+function perfFWon(n){return '₩'+Math.round(n).toLocaleString();}
+function perfFPct(num,den){if(!den)return '-';return (num/den*100).toFixed(1)+'%';}
+function perfDefaultDates(){
+ var fe=document.getElementById('perfFrom'), te=document.getElementById('perfTo');
+ if(!fe||!te)return;
+ var to=new Date(), from=new Date(to.getTime()-13*86400000);
+ if(!fe.value)fe.value=perfDS(from);
+ if(!te.value)te.value=perfDS(to);
+}
+function perfSetMode(m){
+ perfMode=m;
+ var bd=document.getElementById('perfModeDaily'), bw=document.getElementById('perfModeWeekly');
+ if(bd)bd.classList.toggle('active',m==='daily');
+ if(bw)bw.classList.toggle('active',m==='weekly');
+ if(perfResult)renderPerfSummary(perfMode);
+}
+async function startPerfSummary(){
+ var btn=document.getElementById('perfRunBtn'), st=document.getElementById('perfSumStatus');
+ var fromV=(document.getElementById('perfFrom')||{}).value, toV=(document.getElementById('perfTo')||{}).value;
+ if(!fromV||!toV){st.textContent='기간을 선택하세요.';return;}
+ if(perfPolling)return;
+ perfPolling=true;btn.disabled=true;btn.textContent='조회 중...';st.textContent='조회 요청 중...';
+ function done(){perfPolling=false;btn.disabled=false;btn.textContent='성과 조회';}
+ async function readJson(res){var ct=res.headers.get('content-type')||'';if(ct.indexOf('json')===-1)throw new Error('서버 응답이 JSON이 아닙니다 (HTTP '+res.status+'). 잠시 후 다시 시도해주세요.');return await res.json();}
+ try{
+   var res=await fetch('api/perf-summary',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from:fromV,to:toV})});
+   var data=await readJson(res);
+   if(!data.ok)throw new Error(data.error||'응답 오류');
+   var errCount=0;
+   async function poll(){
+     try{
+       var r=await fetch('api/perf-summary-status',{headers:{'Accept':'application/json'}});
+       var s=await readJson(r);errCount=0;
+       var job=s.job||{};
+       if(job.running){st.textContent='조회 중...';setTimeout(poll,2000);return;}
+       if(job.error){st.textContent='실패: '+job.error;done();return;}
+       perfResult=job.result||null;
+       st.textContent='완료'+(job.warn?(' · '+job.warn):'')+(perfResult?(' · '+perfResult.from+' ~ '+perfResult.to):'');
+       renderPerfSummary(perfMode);
+       done();
+     }catch(e){errCount++;if(errCount<10){setTimeout(poll,2500);return;}st.textContent='상태 확인 실패: '+e.message;done();}
+   }
+   setTimeout(poll,2000);
+ }catch(e){st.textContent='실패: '+e.message;done();}
+}
+// perfResult.byType를 일자/주간 컬럼으로 정리. 각 컬럼 agg={types:{type:{tot,lms}}, revTot, revLms}
+function perfBuildColumns(mode){
+ var bt=(perfResult&&perfResult.byType)||{};
+ var set={};
+ ['invitation','sample','returngift','addon'].forEach(function(tt){var m=bt[tt]||{};Object.keys(m).forEach(function(d){set[d]=1;});});
+ var days=Object.keys(set).sort();
+ var dayAgg={};
+ days.forEach(function(d){
+   var agg={types:{},revTot:0,revLms:0};
+   ['invitation','sample','returngift','addon'].forEach(function(tt){
+     var c=(bt[tt]||{})[d];
+     agg.types[tt]={tot:c?c.total.buyers:0,lms:c?c.lms.buyers:0};
+     if(c){agg.revTot+=c.total.revenue||0;agg.revLms+=c.lms.revenue||0;}
+   });
+   dayAgg[d]=agg;
+ });
+ if(mode==='daily'){
+   return days.map(function(d){var dt=perfYMD(d);return {label:perfMD(dt)+' ('+PERF_WD[dt.getDay()]+')',agg:dayAgg[d]};});
+ }
+ var wk={}, order=[];
+ days.forEach(function(d){
+   var dt=perfYMD(d);var s=new Date(dt);s.setDate(dt.getDate()-dt.getDay());var wkey=perfDS(s);
+   if(!wk[wkey]){wk[wkey]={types:{invitation:{tot:0,lms:0},sample:{tot:0,lms:0},returngift:{tot:0,lms:0},addon:{tot:0,lms:0}},revTot:0,revLms:0};order.push(wkey);}
+   var a=wk[wkey], da=dayAgg[d];
+   ['invitation','sample','returngift','addon'].forEach(function(tt){a.types[tt].tot+=da.types[tt].tot;a.types[tt].lms+=da.types[tt].lms;});
+   a.revTot+=da.revTot;a.revLms+=da.revLms;
+ });
+ order.sort();
+ return order.map(function(wkey){var s=perfYMD(wkey);var e=new Date(s);e.setDate(s.getDate()+6);return {label:perfMD(s)+'~'+perfMD(e),agg:wk[wkey]};});
+}
+function renderPerfSummary(mode){
+ var box=document.getElementById('perfSumBox');
+ if(!box)return;
+ if(!perfResult){box.innerHTML='';return;}
+ var cols=perfBuildColumns(mode);
+ if(!cols.length){box.innerHTML='<div style="font-size:12px;color:#6b7280;padding:8px">해당 기간에 데이터가 없습니다.</div>';return;}
+ var h='<div class="ps-wrap"><table class="ps"><thead><tr><th class="psc1">지표</th><th class="psc2">계열</th>';
+ cols.forEach(function(c){h+='<th>'+c.label+'</th>';});
+ h+='</tr></thead><tbody>';
+ PERF_METRICS.forEach(function(m){
+   function tot(c){return m.kind==='rev'?c.agg.revTot:c.agg.types[m.type].tot;}
+   function lms(c){return m.kind==='rev'?c.agg.revLms:c.agg.types[m.type].lms;}
+   var fmt=m.kind==='rev'?perfFWon:perfFInt;
+   h+='<tr class="ps-tot ps-grp"><td class="psc1" rowspan="3">'+m.label+'</td><td class="psc2">전체</td>';
+   cols.forEach(function(c){var v=tot(c);h+=v?('<td>'+fmt(v)+'</td>'):'<td class="ps-empty">·</td>';});
+   h+='</tr><tr class="ps-lms"><td class="psc2">LMS 귀속</td>';
+   cols.forEach(function(c){var v=lms(c);h+=v?('<td>'+fmt(v)+'</td>'):'<td class="ps-empty">·</td>';});
+   h+='</tr><tr class="ps-pct"><td class="psc2">비중</td>';
+   cols.forEach(function(c){var d=tot(c), n=lms(c);h+='<td>'+(d?(n?perfFPct(n,d):'-'):'·')+'</td>';});
+   h+='</tr>';
+ });
+ h+='</tbody></table></div>';
+ box.innerHTML=h;
+}
 
 // ═══ 소구 포인트 × 주차 추이 ═══
 var trMetric = 'cvr2';
@@ -8539,6 +8934,31 @@ var server = http.createServer(async function (req, res) {
     if (pathname === "/api/campaign-auto-conv-status" && req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true, job: autoConvJob }));
+      return;
+    }
+
+    // 성과 요약(전체 vs LMS 귀속 vs 비중) — 무거운 분모 쿼리라 즉시 응답 후 백그라운드 실행, 프론트가 폴링
+    if (pathname === "/api/perf-summary" && req.method === "POST") {
+      if (perfSummaryJob.running) {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, started: false, running: true }));
+        return;
+      }
+      var psBody = await parseBody(req);
+      var psFrom = (psBody.from || "").slice(0, 10);
+      var psTo = (psBody.to || "").slice(0, 10);
+      if (!psFrom || !psTo) { res.writeHead(400); res.end(JSON.stringify({ error: "기간(from/to)이 필요합니다" })); return; }
+      perfSummaryJob = { running: true, startedAt: nowKstStr(), finishedAt: null, error: null, result: null, warn: null };
+      runPerfSummaryJob(psFrom, psTo); // 의도적으로 await 하지 않음 (백그라운드 실행)
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, started: true }));
+      return;
+    }
+
+    // 성과 요약 진행상황/결과 폴링
+    if (pathname === "/api/perf-summary-status" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, job: perfSummaryJob }));
       return;
     }
 
