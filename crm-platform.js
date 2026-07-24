@@ -1259,9 +1259,12 @@ function calcWindowClicks(linkClicks, sendDateStr) {
   linkClicks.forEach(function (entry) {
     var entryTime = new Date(entry.date).getTime();
     var clicks = entry.clicks || 0;
+    // total은 send_date와 무관한 절대 총합(= Bitly 총 클릭수와 일치). send_date가 클릭보다 늦게
+    // 잡혀 있거나 타임존이 어긋나도 total이 0으로 사라지지 않게 한다. (버그: Bitly엔 클릭이 있는데
+    // 대시보드는 0으로 표시되던 문제 — send_date 상대 필터가 total까지 걸러내던 것.)
+    result.total += clicks;
     if (entryTime >= sendTime) {
       var diffHours = (entryTime - sendTime) / (1000 * 60 * 60);
-      result.total += clicks;
       for (var wi = 0; wi < CLICK_WINDOWS.length; wi++) {
         if (diffHours < CLICK_WINDOWS[wi].hours) result[CLICK_WINDOWS[wi].key] += clicks;
       }
