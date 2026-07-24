@@ -8287,6 +8287,15 @@ var server = http.createServer(async function (req, res) {
             cReq.on("error", reject); cReq.end();
           });
         }
+        // 권위 총합(summary): 시간별(unit=hour)이 최근 클릭을 아직 안 주는 신규 링크 등에서도 total을 확보
+        function fetchBitlySummary(bitlink) {
+          return new Promise(function (resolve) {
+            var sReq = https2.request({ hostname: "api-ssl.bitly.com", path: "/v4/bitlinks/" + encodeURIComponent(bitlink) + "/clicks/summary?unit=day&units=-1", method: "GET", headers: { Authorization: "Bearer " + bitlyToken2 } }, function (sRes) {
+              var sch = ""; sRes.on("data", function (c) { sch += c; }); sRes.on("end", function () { try { var sj = JSON.parse(sch); resolve(typeof sj.total_clicks === "number" ? sj.total_clicks : null); } catch (e) { resolve(null); } });
+            });
+            sReq.on("error", function () { resolve(null); }); sReq.end();
+          });
+        }
         function delay(ms) { return new Promise(function(r){ setTimeout(r, ms); }); }
         for (var bi = 0; bi < urls.length; bi++) {
           var bUrl = urls[bi].replace("https://", "").replace("http://", "").trim();
@@ -8321,8 +8330,11 @@ var server = http.createServer(async function (req, res) {
             } else {
               clickDetail = { "1h": 0, "6h": 0, "12h": 0, "24h": 0, "48h": 0, "72h": 0, "7d": 0, "total": 0 };
             }
+            // total 보정: 시간별로 계산한 total이 실제보다 작으면(0 포함) summary 총합으로 올림 → Bitly와 일치
+            var summaryTotal = await fetchBitlySummary(bUrl);
+            if (summaryTotal !== null && summaryTotal > (clickDetail.total || 0)) clickDetail.total = summaryTotal;
             results[urls[bi]] = clickDetail;
-            console.log("[Bitly] " + urls[bi] + " (sent:" + (sendDate||'N/A') + ") => " + JSON.stringify(clickDetail));
+            console.log("[Bitly] " + urls[bi] + " (sent:" + (sendDate||'N/A') + ") => " + JSON.stringify(clickDetail) + " [summary:" + summaryTotal + "]");
           } catch (e) { console.log("[Bitly Error] " + urls[bi] + ": " + e.message); results[urls[bi]] = { total: 0 }; seriesMap[urls[bi]] = []; }
           if (bi < urls.length - 1) await delay(200);
         }
