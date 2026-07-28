@@ -1739,7 +1739,8 @@ async function fetchBitlyDetailJob(https2, token, url, sendDate) {
   if (st !== null && st > (out.detail.total || 0)) out.detail.total = st;
   return out;
 }
-async function runBitlyAllJob() {
+// limitN>0 이면 발송일 최신순 상위 limitN개 URL만 조회("최근 N개 클릭수" 버튼), 0이면 전체.
+async function runBitlyAllJob(limitN) {
   try {
     var https2 = require("https");
     var token = env.BITLY_TOKEN;
@@ -1755,6 +1756,13 @@ async function runBitlyAllJob() {
       m.forEach(function (u) { urlSet[u] = 1; if (camp.send_date && !urlDate[u]) urlDate[u] = camp.send_date; });
     });
     var urls = Object.keys(urlSet);
+    // 최신순 정렬 (send_date 내림차순, 빈 날짜는 맨 뒤로) — 프론트 "최근 N개"와 동일 기준
+    urls.sort(function (a, b) {
+      var da = urlDate[a] || "", db = urlDate[b] || "";
+      if (!da && db) return 1; if (da && !db) return -1;
+      return String(db).localeCompare(String(da));
+    });
+    if (limitN > 0) urls = urls.slice(0, limitN);
     bitlyAllJob.total = urls.length;
     var clickMap = {}, seriesMap = {};
     for (var i = 0; i < urls.length; i++) {
@@ -1781,7 +1789,10 @@ async function runBitlyAllJob() {
       var matches = camp.message.match(bitlyRegexJ); if (!matches) return;
       var reg = matches.filter(function (u) { return clickMap[u] !== undefined; }); if (!reg.length) return;
       var sendCount = camp.send_count || 0;
+      // 이번에 조회 안 된 URL(최근 N개 제한 실행)은 기존 클릭값 보존 → 부분 실행이 옛 집계를 지우지 않게
+      var prevUrlClicks = camp.url_clicks || {};
       camp.url_clicks = {};
+      matches.forEach(function (u) { if (prevUrlClicks[u]) camp.url_clicks[u] = prevUrlClicks[u]; });
       reg.forEach(function (url) {
         var detail = Array.isArray(seriesMap[url]) ? calcWindowClicks(seriesMap[url], camp.send_date) : { total: 0 };
         var cmTotal = clickMap[url] && clickMap[url].total; // summary 보정된 절대 총합
@@ -1797,7 +1808,7 @@ async function runBitlyAllJob() {
     });
     saveCampaignDataFile(cd2);
     bitlyAllJob.updated = updated; bitlyAllJob.campaigns_updated = campUpdated;
-    console.log("[Bitly전체] " + updated + "개 레코드, 캠페인 " + campUpdated + "건 업데이트 (URL " + urls.length + ", 오류 " + bitlyAllJob.errors + ")");
+    console.log("[Bitly" + (limitN > 0 ? "최근" + limitN : "전체") + "] " + updated + "개 레코드, 캠페인 " + campUpdated + "건 업데이트 (URL " + urls.length + ", 오류 " + bitlyAllJob.errors + ")");
   } catch (e) {
     bitlyAllJob.error = e.message; console.log("[Bitly전체] 실패:", e.message);
   } finally {
@@ -3522,7 +3533,7 @@ function generateHTML() {
           <span id="recDateSep">~</span>
           <input type="date" id="cdRecordDateTo" style="padding:3px 6px;border:1px solid #ddd;border-radius:4px;font-size:12px" onchange="renderRecords(true)">
           <span id="cdRecordCount" style="color:#666">0건</span>
-          <button onclick="updateClicks(20)" id="btnUpdateClicks" style="padding:5px 14px;background:#34a853;color:#fff;border:none;border-radius:4px;font-weight:600;cursor:pointer;font-size:12px;white-space:nowrap">최근 20개 클릭수</button>
+          <button onclick="updateClicks(60)" id="btnUpdateClicks" style="padding:5px 14px;background:#34a853;color:#fff;border:none;border-radius:4px;font-weight:600;cursor:pointer;font-size:12px;white-space:nowrap">최근 60개 클릭수</button>
           <button onclick="updateClicks(0)" id="btnUpdateClicksAll" style="padding:5px 14px;background:#6b7280;color:#fff;border:none;border-radius:4px;font-weight:600;cursor:pointer;font-size:12px;white-space:nowrap">전체</button>
         </div>
         <div style="display:flex;gap:6px;align-items:center;justify-content:flex-end;margin-top:6px;font-size:12px">
@@ -6035,54 +6046,21 @@ async function saveUrlRecord(){
   }catch(e){alert('저장 실패: '+e.message);}
 }
 
+// Bitly 클릭 업데이트 — 최근 N개(limit>0) / 전체(limit=0) 모두 백그라운드 잡 + 폴링.
+// (동기 조회는 URL 1건당 Bitly 2콜이라 수십 개만 돼도 프록시 504 → HTML 응답으로 터진다)
 async function updateClicks(limit){
-  if(limit===0){return updateClicksAllBg();} // "전체"는 백그라운드+폴링으로 (504 방지, 모든 링크 대상)
-  var records=getRecords().filter(function(r){return r.bitly_url});
-  // 최신순 정렬 (send_date 내림차순, 빈 날짜는 맨 뒤로)
-  records.sort(function(a,b){var da=a.send_date||'';var db=b.send_date||'';if(!da&&db)return 1;if(da&&!db)return -1;return db.localeCompare(da);});
-  if(limit>0) records=records.slice(0,limit);
-  console.log('[updateClicks] top records:', records.map(function(r){return r.seq+':'+r.send_date+':'+r.bitly_url;}));
-  var urlDateMap={};
-  records.forEach(function(r){if(r.bitly_url&&r.send_date)urlDateMap[r.bitly_url]=r.send_date;});
-  var urls=[...new Set(records.map(function(r){return r.bitly_url}))];
-  console.log('[updateClicks] urls to fetch:', urls);
-  if(urls.length===0){alert('Bitly URL이 없습니다');return;}
-  var isAll=limit===0;
+  var lim=limit>0?limit:0;
+  var isAll=lim===0;
   var btn=document.getElementById(isAll?'btnUpdateClicksAll':'btnUpdateClicks');
   var btnOther=document.getElementById(isAll?'btnUpdateClicks':'btnUpdateClicksAll');
-  btn.disabled=true;btnOther.disabled=true;
-  btn.textContent='업데이트 중... ('+urls.length+'개)';
-  try{
-    var res=await fetch('api/bitly-clicks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({urls:urls,url_dates:urlDateMap})});
-    var data=await res.json();
-    if(data.clicks){
-      var res2=await fetch('api/update-record-clicks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clicks:data.clicks,series:data.series})});
-      var data2=await res2.json();
-      btn.textContent='완료! ('+data2.updated+'건'+(data2.campaigns_updated?', 캠페인 '+data2.campaigns_updated+'건':'')+')';btn.style.background='#166534';
-      cdLoaded=false;await loadCampaignDashboard();renderRecords();
-      setTimeout(function(){
-        btn.textContent=isAll?'전체':'최근 20개 클릭수 업데이트';
-        btn.style.background=isAll?'#6b7280':'#34a853';
-        btn.disabled=false;btnOther.disabled=false;
-      },3000);
-    }else{throw new Error(data.error||'응답 오류');}
-  }catch(e){
-    alert('클릭수 업데이트 실패: '+e.message);
-    btn.textContent=isAll?'전체':'최근 20개 클릭수 업데이트';
-    btn.style.background=isAll?'#6b7280':'#34a853';
-    btn.disabled=false;btnOther.disabled=false;
-  }
-}
-
-// "전체" Bitly 클릭 업데이트 — 백그라운드 잡 시작 후 폴링(504 방지). 모든 레코드/캠페인 링크 대상.
-async function updateClicksAllBg(){
-  var btn=document.getElementById('btnUpdateClicksAll'),btnOther=document.getElementById('btnUpdateClicks');
-  if(!btn){alert('전체 업데이트 버튼을 찾을 수 없습니다');return;}
-  btn.disabled=true;if(btnOther)btnOther.disabled=true;btn.textContent='전체 업데이트 시작...';
-  function reEnable(){btn.textContent='전체';btn.style.background='#6b7280';btn.disabled=false;if(btnOther)btnOther.disabled=false;}
+  if(!btn){alert('업데이트 버튼을 찾을 수 없습니다');return;}
+  var label=isAll?'전체':'최근 '+lim+'개 클릭수';
+  var color=isAll?'#6b7280':'#34a853';
+  btn.disabled=true;if(btnOther)btnOther.disabled=true;btn.textContent=(isAll?'전체 ':'')+'업데이트 시작...';
+  function reEnable(){btn.textContent=label;btn.style.background=color;btn.disabled=false;if(btnOther)btnOther.disabled=false;}
   async function readJson(res){var ct=res.headers.get('content-type')||'';if(ct.indexOf('json')===-1)throw new Error('서버 응답 오류 (HTTP '+res.status+')');return res.json();}
   try{
-    var r=await fetch('api/bitly-clicks-all',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    var r=await fetch('api/bitly-clicks-all',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:lim})});
     var d=await readJson(r);
     if(!d.ok)throw new Error(d.error||'시작 실패');
     var errN=0;
@@ -6090,15 +6068,15 @@ async function updateClicksAllBg(){
       try{
         var s=await readJson(await fetch('api/bitly-clicks-all-status',{headers:{'Accept':'application/json'}}));errN=0;
         var j=s.job||{};
-        if(j.running){btn.textContent='전체 업데이트 중... ('+(j.done||0)+'/'+(j.total||0)+')';setTimeout(poll,2000);return;}
-        if(j.error){alert('전체 업데이트 실패: '+j.error);reEnable();return;}
+        if(j.running){btn.textContent='업데이트 중... ('+(j.done||0)+'/'+(j.total||0)+')';setTimeout(poll,2000);return;}
+        if(j.error){alert('클릭수 업데이트 실패: '+j.error);reEnable();return;}
         btn.textContent='완료! ('+(j.updated||0)+'건, 캠페인 '+(j.campaigns_updated||0)+'건)';btn.style.background='#166534';
         cdLoaded=false;await loadCampaignDashboard();renderRecords();
         setTimeout(reEnable,3000);
       }catch(e){errN++;if(errN<10){setTimeout(poll,2500);return;}alert('상태 확인 실패: '+e.message);reEnable();}
     }
     setTimeout(poll,2000);
-  }catch(e){alert('전체 업데이트 실패: '+e.message);reEnable();}
+  }catch(e){alert('클릭수 업데이트 실패: '+e.message);reEnable();}
 }
 
 // ── 데이터 백업: 현재 전체 캠페인 데이터(JSON)를 파일로 다운로드 ──
@@ -8577,7 +8555,8 @@ var server = http.createServer(async function (req, res) {
       return;
     }
 
-    // Bitly 클릭 "전체" 업데이트 — 즉시 응답 + 백그라운드 실행(504 방지). 모든 레코드/캠페인 링크 대상.
+    // Bitly 클릭 업데이트 — 즉시 응답 + 백그라운드 실행(504 방지).
+    // body.limit>0 이면 발송일 최신순 상위 N개 URL만("최근 N개 클릭수"), 없거나 0이면 모든 레코드/캠페인 링크.
     if (pathname === "/api/bitly-clicks-all" && req.method === "POST") {
       if (!env.BITLY_TOKEN) { res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" }); res.end(JSON.stringify({ error: "BITLY_TOKEN 미설정" })); return; }
       if (bitlyAllJob.running) {
@@ -8585,10 +8564,12 @@ var server = http.createServer(async function (req, res) {
         res.end(JSON.stringify({ ok: true, started: false, running: true }));
         return;
       }
-      bitlyAllJob = { running: true, startedAt: nowKstStr(), finishedAt: null, total: 0, done: 0, updated: 0, campaigns_updated: 0, errors: 0, error: null };
-      runBitlyAllJob(); // 백그라운드 (await 안 함)
+      var baBody = await parseBody(req);
+      var baLimit = parseInt((baBody && baBody.limit) || 0, 10); if (!(baLimit > 0)) baLimit = 0;
+      bitlyAllJob = { running: true, startedAt: nowKstStr(), finishedAt: null, total: 0, done: 0, updated: 0, campaigns_updated: 0, errors: 0, error: null, limit: baLimit };
+      runBitlyAllJob(baLimit); // 백그라운드 (await 안 함)
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: true, started: true }));
+      res.end(JSON.stringify({ ok: true, started: true, limit: baLimit }));
       return;
     }
 
