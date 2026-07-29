@@ -4466,9 +4466,11 @@ function dpSegOf(t){
   if(has('샘플')){
     var ds=dpDayNums(t);
     if(ds.length){
-      if(ds.length>1){   // 'N일~M일'처럼 붙어 있으면 구간 세그먼트로
+      if(ds.length>1){
+        // 'N일~M일'처럼 여러 일차를 한 번에 보낸 건(3/4 일회성)은 지금 발송 체계(2/7/12일차)에 없다.
+        // 사후에 7일차/12일차로 쪼갤 수 없으므로 특정 일차 시계열을 오염시키지 않게 기타로 뺀다.
         var mid=ds[1].at>ds[0].end?t.slice(ds[0].end,ds[1].at).split(' ').join(''):'';
-        if((mid==='~'||mid==='-'||mid===String.fromCharCode(8764))&&ds[1].n>ds[0].n) return '샘플 '+ds[0].n+'~'+ds[1].n+'일차';
+        if((mid==='~'||mid==='-'||mid===String.fromCharCode(8764))&&ds[1].n>ds[0].n) return '기타';
       }
       return '샘플 '+ds[0].n+'일차';
     }
