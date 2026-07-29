@@ -2969,6 +2969,7 @@ function generateHTML() {
   <div class="top-nav-inner">
     <h1>바른손 CRM 플랫폼</h1>
     <button class="tab-btn" data-tab="campaign-dashboard" onclick="switchTab('campaign-dashboard')">캠페인 대시보드</button>
+    <button class="tab-btn" data-tab="analysis" onclick="switchTab('analysis')">성과 분석</button>
     <button class="tab-btn active" data-tab="extraction" onclick="switchTab('extraction')">고객 추출</button>
     <button class="tab-btn" data-tab="crm" onclick="switchTab('crm')" style="display:none">전환 추적</button>
     <button class="tab-btn" data-tab="sample-inducement" onclick="switchTab('sample-inducement')" style="display:none">샘플 유도</button>
@@ -3693,7 +3694,132 @@ function generateHTML() {
   </div>
 
   <!-- ═══════════════════════════════════════════ -->
-  <!-- 탭 1: 고객 추출                              -->
+  <!-- 탭 1: 성과 분석 (기간·세그먼트별 추이)            -->
+  <!-- ═══════════════════════════════════════════ -->
+  <div id="tab-analysis" class="tab-content">
+    <style>
+      .an-ctl { display:flex; flex-direction:column; gap:10px; }
+      .an-row { display:flex; align-items:center; flex-wrap:wrap; gap:6px; }
+      .an-row > label { font-size:12px; font-weight:700; color:#374151; min-width:56px; }
+      .an-row input[type=date], .an-row select { font-size:13px; padding:5px 7px; border:1px solid #d1d5db; border-radius:5px; }
+      .an-pill { font-size:12px; padding:5px 11px; border:1px solid #d1d5db; background:#fff; color:#4b5563; border-radius:14px; cursor:pointer; }
+      .an-pill:hover { background:#f3f4f6; }
+      .an-pill.active { background:#1a73e8; border-color:#1a73e8; color:#fff; font-weight:600; }
+      .an-q { font-size:12px; padding:5px 10px; border:1px solid #d1d5db; background:#f9fafb; color:#4b5563; border-radius:5px; cursor:pointer; }
+      .an-q:hover { background:#eef2ff; }
+      .an-sep { width:1px; height:20px; background:#e5e7eb; margin:0 6px; }
+      .an-chips { display:flex; flex-wrap:wrap; gap:6px; }
+      .an-note { font-size:12px; color:#6b7280; line-height:1.7; margin:6px 0 0; }
+      .an-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:10px; }
+      .an-card { border:1px solid #e5e7eb; border-radius:8px; padding:10px 12px; background:#fff; }
+      .an-card .k { font-size:11px; color:#6b7280; }
+      .an-card .v { font-size:19px; font-weight:700; color:#111827; margin-top:3px; }
+      .an-card .sub { font-size:11px; color:#9ca3af; margin-top:2px; }
+      .an-chart-wrap { position:relative; }
+      .an-chart-wrap svg { width:100%; height:auto; display:block; }
+      .an-band:hover { fill:rgba(26,115,232,0.06); }
+      .an-tip { position:absolute; display:none; z-index:30; background:rgba(17,24,39,0.94); color:#fff; font-size:12px; padding:8px 10px; border-radius:6px; pointer-events:none; white-space:nowrap; line-height:1.6; }
+      .an-legend { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+      .an-lg { display:flex; align-items:center; gap:5px; font-size:12px; padding:3px 9px; border:1px solid #e5e7eb; border-radius:13px; cursor:pointer; color:#374151; }
+      .an-lg.off { opacity:.4; text-decoration:line-through; }
+      .an-lg i { width:10px; height:10px; border-radius:50%; display:inline-block; }
+      .an-empty { padding:44px 0; text-align:center; color:#9ca3af; font-size:13px; }
+      .an-tbl { width:100%; border-collapse:collapse; font-size:12px; }
+      .an-tbl th { background:#1e3a5f; color:#fff; padding:7px 8px; text-align:center; position:sticky; top:0; z-index:2; font-weight:600; }
+      .an-tbl td { padding:6px 8px; text-align:center; border-bottom:1px solid #eef0f3; }
+      .an-tbl tr:hover td { background:#f8faff; }
+      .an-tbl th.lbl { text-align:left; }
+      .an-tbl td.lbl { text-align:left; font-weight:600; color:#374151; white-space:nowrap; }
+      .an-tbl .sum { background:#f9fafb; font-weight:600; }
+      .an-tbl .den { color:#9ca3af; font-size:10px; display:block; }
+      .an-tbl .nil { color:#d1d5db; }
+    </style>
+
+    <div class="panel">
+      <div class="panel-title">📈 기간별 성과 추이</div>
+      <p class="an-note">
+        캠페인 대시보드에 쌓인 <b>발송 · 클릭 · 전환 · 매출</b>을 <b>목적 × 세그먼트</b>로 나눠 <b>일자/주차별 그래프</b>로 봅니다.
+        예) 목적 <b>원주문 전환</b> → 계열 <b>세그먼트별</b> 로 두면 <b>샘플 2일차 · 샘플 7일차 · 당일 샘플</b>의 전환율·클릭률 추이를 한 화면에서 비교할 수 있습니다.
+      </p>
+      <div class="an-ctl" style="margin-top:12px">
+        <div class="an-row">
+          <label>기간</label>
+          <input type="date" id="anFrom" onchange="anRender()">
+          <span style="color:#9ca3af">~</span>
+          <input type="date" id="anTo" onchange="anRender()">
+          <button class="an-q" onclick="anQuick(28)">최근 4주</button>
+          <button class="an-q" onclick="anQuick(56)">최근 8주</button>
+          <button class="an-q" onclick="anQuick(84)">최근 12주</button>
+          <button class="an-q" onclick="anQuick(0)">전체</button>
+          <span class="an-sep"></span>
+          <label style="min-width:auto">단위</label>
+          <button class="an-pill active" id="anUnitDay" onclick="anSetUnit('day')">일별</button>
+          <button class="an-pill" id="anUnitWeek" onclick="anSetUnit('week')">주별</button>
+        </div>
+        <div class="an-row">
+          <label>목적</label>
+          <select id="anPurpose" onchange="anPurposeChanged()"><option value="all">전체 목적</option></select>
+          <span class="an-sep"></span>
+          <label style="min-width:auto">계열</label>
+          <select id="anGroup" onchange="anGroupChanged()">
+            <option value="segment">세그먼트별</option>
+            <option value="purpose">목적별</option>
+            <option value="none">전체 합계</option>
+          </select>
+          <span class="an-sep"></span>
+          <label style="min-width:auto">채널</label>
+          <select id="anChannel" onchange="anRender()"><option value="all">전체 채널</option></select>
+        </div>
+        <div class="an-row" id="anSegRow">
+          <label>세그먼트</label>
+          <div id="anSegChips" class="an-chips"></div>
+          <button class="an-q" onclick="anSegAll(1)">전체 선택</button>
+          <button class="an-q" onclick="anSegAll(0)">전체 해제</button>
+        </div>
+        <div class="an-row">
+          <label>지표</label>
+          <div id="anMetricChips" class="an-chips"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">요약 <span id="anMeta" style="font-size:12px;font-weight:400;color:#9ca3af"></span></div>
+      <div id="anCards" class="an-cards"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title"><span id="anChartTitle">추이</span></div>
+      <div class="an-chart-wrap" id="anChartWrap">
+        <div id="anChart"></div>
+        <div class="an-tip" id="anTip"></div>
+      </div>
+      <div class="an-legend" id="anLegend"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">기간별 상세 <span id="anTblTitle" style="font-size:12px;font-weight:400;color:#9ca3af"></span></div>
+      <div class="table-wrap" id="anTbl" style="max-height:520px;overflow:auto"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">계열 요약 <span style="font-size:12px;font-weight:400;color:#9ca3af">선택 기간 합계</span></div>
+      <div class="table-wrap" id="anSumTbl"></div>
+    </div>
+
+    <div class="panel" style="border:1px solid #fde68a;background:#fffbeb">
+      <div class="panel-title" style="color:#92400e">지표 정의 · 주의</div>
+      <p class="an-note" style="color:#78350f">
+        · <b>전환</b> = 캠페인에 저장된 <b>발송 후 귀속 전환</b>(현재 자동 조회는 24h/48h 누적, 값이 여러 개면 최댓값). 발송 직후 캠페인은 아직 집계 전일 수 있어 최근 1~2일은 과소 표기될 수 있습니다.<br>
+        · <b>클릭</b> = 캠페인 URL의 Bitly <b>총 클릭</b>. [발송 기록 / URL 관리]에서 클릭수를 업데이트한 시점까지만 반영됩니다.<br>
+        · <b>전환율 · 클릭률</b>은 구간 내 <b>합계 ÷ 합계</b>(발송수 가중)로 계산합니다. 캠페인별 비율의 단순 평균이 아닙니다.<br>
+        · <b>취소</b> 상태 캠페인과 발송일이 없는 캠페인은 제외합니다. 세그먼트는 캠페인 <b>기간 조건(target)</b> 문구로 자동 분류합니다.
+      </p>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- 탭 2: 고객 추출                              -->
   <!-- ═══════════════════════════════════════════ -->
   <div id="tab-extraction" class="tab-content active">
 
@@ -4276,7 +4402,7 @@ function generateHTML() {
 </div>
 
 <script>
-var VALID_TABS = ['campaign-dashboard', 'extraction', 'crm', 'sample-inducement', 'refuse', 'settings'];
+var VALID_TABS = ['campaign-dashboard', 'analysis', 'extraction', 'crm', 'sample-inducement', 'refuse', 'settings'];
 
 // ═══ 캠페인 대시보드 ═══
 var cdData = null;
@@ -4430,6 +4556,401 @@ function dpToggle(i){dpExpanded[i]=!dpExpanded[i];renderDailyPerf();}
 function dpSetAll(v){if(dpExpanded)for(var i=0;i<dpExpanded.length;i++)dpExpanded[i]=v;renderDailyPerf();}
 function dpShowPop(i,td){var d=dpPOP[i];if(!d)return;var pop=document.getElementById('dpPop');document.getElementById('dpPopTitle').textContent=d.title;var html='';if(!d.items.length)html='<div class="dp-msg" style="color:#9ca3af">발송 카피 정보 없음</div>';d.items.forEach(function(c){html+='<div class="dp-camp"><div class="dp-stat">발송 '+dpFInt(c.s)+' · 클릭 '+dpFInt(c.clk)+' · 전환 '+dpFInt(c.cv)+(c.rev?(' · 매출 '+dpFWon(c.rev)):'')+'</div><div class="dp-msg">'+dpEsc(c.m||'(카피 없음)')+'</div></div>';});document.getElementById('dpPopBody').innerHTML=html;pop.style.display='block';pop.dataset.cur=String(i);var r=td.getBoundingClientRect();var x=Math.min(r.left,window.innerWidth-430),y=r.bottom+6;if(y+260>window.innerHeight)y=Math.max(10,r.top-260);pop.style.left=Math.max(8,x)+'px';pop.style.top=y+'px';}
 function dpHidePop(){var pop=document.getElementById('dpPop');pop.style.display='none';pop.dataset.cur='';}
+
+// ═══════════════════════════════════════════════════════════════════
+// ═══ 성과 분석 탭 (기간·세그먼트별 추이 그래프) ═══
+// DB 조회 없이 캠페인 JSON(cdData)에 이미 저장된 발송/클릭/전환/매출만 재집계한다 → 즉시 렌더.
+// 세그먼트 분류·전환/클릭 추출은 [일자별 성과]와 같은 함수(dpSegOf/dpConv/dpClk/dpRev)를 써서 수치가 어긋나지 않게 한다.
+// 주의: 이 파일의 HTML/JS는 백틱 템플릿 리터럴 안이라 문자열 이스케이프(\')가 소실된다.
+//       → 동적으로 만드는 onclick 핸들러에는 문자열이 아니라 '인덱스(숫자)'만 넘긴다.
+// ═══════════════════════════════════════════════════════════════════
+var anUnit = 'day', anMetric = 'convRate', anGroupBy = 'segment';
+var anSegOn = null;        // {세그먼트: 1} — 체크된 세그먼트 (null이면 최초 진입 → 전체 선택)
+var anSegCache = [];       // 현재 칩 목록 (인덱스 핸들러용)
+var anHidden = {};         // 범례 클릭으로 숨긴 계열
+var anInit = false, anLast = null;
+var AN_COLORS = ['#1a73e8','#e8710a','#0f9d58','#d93025','#9334e6','#12b5cb','#f9ab00','#ec407a','#00897b','#7cb342','#6d4c41','#5f6368'];
+var AN_METRICS = [
+  { k:'convRate',  label:'전환율' },
+  { k:'clickRate', label:'클릭률' },
+  { k:'cv',        label:'전환 수' },
+  { k:'clk',       label:'클릭 수' },
+  { k:'s',         label:'발송 수' },
+  { k:'rev',       label:'매출액' },
+  { k:'roas',      label:'ROAS' },
+  { k:'cpa',       label:'전환당 비용' }
+];
+function anMetricLabel(k){ for(var i=0;i<AN_METRICS.length;i++) if(AN_METRICS[i].k===k) return AN_METRICS[i].label; return k; }
+
+// ── 진입 / 초기화 ──
+function anEnter(){
+  if(!cdLoaded){ loadCampaignDashboard().then(anBoot); return; }
+  anBoot();
+}
+function anBoot(){
+  if(!anInit){
+    anInit = true;
+    anFillSelect('anPurpose','전체 목적','purpose',DP_PUR);
+    anFillSelect('anChannel','전체 채널','channel',['LMS','SMS','MMS','알림톡','친구톡']);
+    anFillMetricChips();
+    anQuick(56, true);   // 기본: 최근 8주
+    var wrap = document.getElementById('anChart');
+    wrap.addEventListener('mousemove', anTipMove);
+    wrap.addEventListener('mouseleave', anTipHide);
+  }
+  anRender();
+}
+// 취소/발송일 없음 제외한 분석 대상 캠페인
+function anCampsAll(){
+  return ((cdData && cdData.campaigns) || []).filter(function(c){
+    if(c.type === '취소') return false;
+    var d = (c.send_date || '').slice(0,10);
+    return d.length === 10 && d >= '2020-01-01';   // 연도가 깨진 레코드(0003-..) 방어
+  });
+}
+function anFillSelect(id, allLabel, field, prefer){
+  var sel = document.getElementById(id), set = {};
+  anCampsAll().forEach(function(c){ if(c[field]) set[c[field]] = 1; });
+  var list = prefer.filter(function(v){ return set[v]; })
+             .concat(Object.keys(set).filter(function(v){ return prefer.indexOf(v) < 0; }));
+  var h = '<option value="all">' + allLabel + '</option>';
+  list.forEach(function(v){ h += '<option value="' + escHtml(v) + '">' + escHtml(v) + '</option>'; });
+  sel.innerHTML = h;
+  if(id === 'anPurpose' && set['원주문 전환']) sel.value = '원주문 전환';   // 가장 많이 보는 목적을 기본값으로
+}
+function anFillMetricChips(){
+  var h = '';
+  AN_METRICS.forEach(function(m,i){
+    h += '<button class="an-pill' + (m.k === anMetric ? ' active' : '') + '" onclick="anSetMetricIdx(' + i + ')">' + m.label + '</button>';
+  });
+  document.getElementById('anMetricChips').innerHTML = h;
+}
+function anSetMetricIdx(i){ anMetric = AN_METRICS[i].k; anFillMetricChips(); anRender(); }
+function anSetUnit(u){
+  anUnit = u;
+  document.getElementById('anUnitDay').classList.toggle('active', u === 'day');
+  document.getElementById('anUnitWeek').classList.toggle('active', u === 'week');
+  anRender();
+}
+function anQuick(days, skipRender){
+  var fromEl = document.getElementById('anFrom'), toEl = document.getElementById('anTo');
+  if(!days){
+    var mn = null, mx = null;
+    anCampsAll().forEach(function(c){ var d = c.send_date.slice(0,10); if(!mn||d<mn)mn=d; if(!mx||d>mx)mx=d; });
+    fromEl.value = mn || ''; toEl.value = mx || '';
+  } else {
+    var t = new Date(), f = new Date(t.getTime() - (days-1)*86400000);
+    fromEl.value = dpDS(f); toEl.value = dpDS(t);
+  }
+  if(!skipRender) anRender();
+}
+function anPurposeChanged(){ anSegOn = null; anHidden = {}; anRender(); }   // 목적이 바뀌면 세그먼트 목록도 달라짐
+function anGroupChanged(){ anHidden = {}; anRender(); }
+function anSegToggleIdx(i){ var s = anSegCache[i]; if(!s) return; if(anSegOn[s]) delete anSegOn[s]; else anSegOn[s] = 1; anRender(); }
+function anSegAll(on){ anSegOn = {}; if(on) anSegCache.forEach(function(s){ anSegOn[s] = 1; }); anRender(); }
+function anLegendToggle(i){
+  var s = anLast && anLast.series[i]; if(!s) return;
+  if(anHidden[s.name]) delete anHidden[s.name]; else anHidden[s.name] = 1;
+  anRender();
+}
+
+// ── 집계 단위 ──
+function anCell(){ return { s:0, clk:0, cv:0, rev:0, cost:0, n:0 }; }
+function anAdd(o,c){ o.s += c.send_count||0; o.clk += dpClk(c); o.cv += dpConv(c); o.rev += dpRev(c); o.cost += c.cost||0; o.n++; }
+// 비율은 '합계 ÷ 합계'(발송수 가중) — 캠페인별 비율의 단순평균이 아니다
+function anVal(m,o){
+  if(!o) return null;
+  if(m === 'convRate')  return o.s ? o.cv/o.s : null;
+  if(m === 'clickRate') return o.s ? o.clk/o.s : null;
+  if(m === 'roas')      return o.cost ? o.rev/o.cost : null;
+  if(m === 'cpa')       return o.cv ? o.cost/o.cv : null;
+  return o[m];
+}
+function anFmt(m,v){
+  if(v === null || v === undefined) return '-';
+  if(m === 'convRate' || m === 'clickRate') return (v*100).toFixed(1) + '%';
+  if(m === 'roas') return Math.round(v*100).toLocaleString() + '%';
+  if(m === 'rev' || m === 'cpa') return '₩' + Math.round(v).toLocaleString();
+  return Math.round(v).toLocaleString();
+}
+function anAxisFmt(m,v){
+  if(m === 'convRate' || m === 'clickRate') return (v*100).toFixed(v*100 < 10 ? 1 : 0) + '%';
+  if(m === 'roas') return Math.round(v*100).toLocaleString() + '%';
+  if(m === 'rev' || m === 'cpa') return v >= 10000 ? Math.round(v/10000).toLocaleString() + '만' : Math.round(v).toLocaleString();
+  return Math.round(v).toLocaleString();
+}
+function anNiceMax(v){
+  if(!(v > 0)) return 1;
+  var p = Math.pow(10, Math.floor(Math.log(v)/Math.LN10));
+  var r = v/p, m = r <= 1 ? 1 : (r <= 2 ? 2 : (r <= 2.5 ? 2.5 : (r <= 5 ? 5 : 10)));
+  return m*p;
+}
+// 구간(일/주) 목록. 데이터가 없는 날도 x축에 두어 '발송이 없었던 날'이 끊긴 선으로 보이게 한다.
+function anPeriods(from,to){
+  var out = [];
+  if(!from || !to || from > to) return out;
+  var cur = dpYMD(from);
+  if(anUnit === 'week') cur.setDate(cur.getDate() - cur.getDay());
+  var guard = 0;
+  while(dpDS(cur) <= to && guard++ < 900){
+    if(anUnit === 'day'){
+      out.push({ k:dpDS(cur), label:dpMD(cur) + '(' + DP_WD[cur.getDay()] + ')', short:dpMD(cur) });
+      cur.setDate(cur.getDate() + 1);
+    } else {
+      var e = new Date(cur.getTime()); e.setDate(e.getDate() + 6);
+      out.push({ k:dpDS(cur), label:dpWN(cur) + '주차 (' + dpMD(cur) + '~' + dpMD(e) + ')', short:dpMD(cur) });
+      cur.setDate(cur.getDate() + 7);
+    }
+  }
+  return out;
+}
+function anKeyOf(d){
+  if(anUnit === 'day') return d;
+  var x = dpYMD(d); x.setDate(x.getDate() - x.getDay()); return dpDS(x);
+}
+
+// ── 세그먼트 칩 ──
+function anRenderSegChips(purpose){
+  var set = {};
+  anCampsAll().forEach(function(c){
+    if(purpose !== 'all' && c.purpose !== purpose) return;
+    set[dpSegOf(c.target)] = 1;
+  });
+  anSegCache = DP_SEG.filter(function(s){ return set[s]; })
+               .concat(Object.keys(set).filter(function(s){ return DP_SEG.indexOf(s) < 0; }));
+  if(anSegOn === null){ anSegOn = {}; anSegCache.forEach(function(s){ anSegOn[s] = 1; }); }
+  var h = '';
+  anSegCache.forEach(function(s,i){
+    h += '<button class="an-pill' + (anSegOn[s] ? ' active' : '') + '" onclick="anSegToggleIdx(' + i + ')">' + escHtml(s) + '</button>';
+  });
+  document.getElementById('anSegChips').innerHTML = h || '<span style="font-size:12px;color:#9ca3af">해당 목적의 캠페인이 없습니다</span>';
+}
+
+// ── 메인 렌더 ──
+function anRender(){
+  if(!cdLoaded) return;
+  anGroupBy = document.getElementById('anGroup').value;
+  var purpose = document.getElementById('anPurpose').value;
+  var channel = document.getElementById('anChannel').value;
+  anRenderSegChips(purpose);
+  var from = document.getElementById('anFrom').value || '';
+  var to   = document.getElementById('anTo').value || '';
+
+  var camps = anCampsAll().filter(function(c){
+    var d = c.send_date.slice(0,10);
+    if(from && d < from) return false;
+    if(to && d > to) return false;
+    if(purpose !== 'all' && c.purpose !== purpose) return false;
+    if(channel !== 'all' && c.channel !== channel) return false;
+    return !!anSegOn[dpSegOf(c.target)];
+  });
+
+  var mn = null, mx = null;
+  camps.forEach(function(c){ var d = c.send_date.slice(0,10); if(!mn||d<mn)mn=d; if(!mx||d>mx)mx=d; });
+  document.getElementById('anMeta').textContent =
+    '캠페인 ' + camps.length + '건 · ' + (mn || '-') + ' ~ ' + (mx || '-') + ' · 취소 제외';
+
+  if(!camps.length){
+    document.getElementById('anCards').innerHTML = '<div class="an-empty" style="grid-column:1/-1">선택한 조건에 해당하는 캠페인이 없습니다</div>';
+    document.getElementById('anChart').innerHTML = '<div class="an-empty">데이터 없음</div>';
+    document.getElementById('anLegend').innerHTML = '';
+    document.getElementById('anTbl').innerHTML = '';
+    document.getElementById('anSumTbl').innerHTML = '';
+    anLast = null;
+    return;
+  }
+
+  var periods = anPeriods(from || mn, to || mx);
+  var pIdx = {}; periods.forEach(function(p,i){ pIdx[p.k] = i; });
+
+  var map = {}, names = [];
+  camps.forEach(function(c){
+    var name = anGroupBy === 'segment' ? dpSegOf(c.target)
+             : (anGroupBy === 'purpose' ? (c.purpose || '기타') : '전체');
+    if(!map[name]){
+      map[name] = { name:name, cells:[], tot:anCell() };
+      for(var i=0;i<periods.length;i++) map[name].cells.push(null);
+      names.push(name);
+    }
+    var idx = pIdx[anKeyOf(c.send_date.slice(0,10))];
+    if(idx === undefined) return;
+    if(!map[name].cells[idx]) map[name].cells[idx] = anCell();
+    anAdd(map[name].cells[idx], c);
+    anAdd(map[name].tot, c);
+  });
+  var series = names.map(function(n){ return map[n]; })
+                    .sort(function(a,b){ return b.tot.s - a.tot.s; });   // 발송량 많은 계열부터
+  series.forEach(function(s,i){
+    s.color = AN_COLORS[i % AN_COLORS.length];
+    s.vals = s.cells.map(function(c){ return anVal(anMetric, c); });
+  });
+
+  // 전체(계열 합) 시계열 + 총합
+  var totals = [], grand = anCell();
+  periods.forEach(function(p,i){
+    var o = null;
+    series.forEach(function(s){
+      var c = s.cells[i]; if(!c) return;
+      o = o || anCell();
+      o.s += c.s; o.clk += c.clk; o.cv += c.cv; o.rev += c.rev; o.cost += c.cost; o.n += c.n;
+    });
+    totals.push(o);
+  });
+  series.forEach(function(s){
+    grand.s += s.tot.s; grand.clk += s.tot.clk; grand.cv += s.tot.cv;
+    grand.rev += s.tot.rev; grand.cost += s.tot.cost; grand.n += s.tot.n;
+  });
+
+  anLast = { periods:periods, series:series, totals:totals, metric:anMetric };
+  document.getElementById('anChartTitle').textContent =
+    anMetricLabel(anMetric) + ' — ' + (anUnit === 'day' ? '일자별' : '주차별') +
+    ' 추이 (' + (anGroupBy === 'segment' ? '세그먼트별' : (anGroupBy === 'purpose' ? '목적별' : '전체')) + ')';
+  document.getElementById('anTblTitle').textContent = anMetricLabel(anMetric) + ' · ' + (anUnit === 'day' ? '일자' : '주차');
+
+  anRenderCards(grand);
+  document.getElementById('anChart').innerHTML = anBuildChart(periods, series, anMetric);
+  anRenderLegend(series);
+  anRenderTable(periods, series, totals, anMetric);
+  anRenderSumTable(series, grand);
+}
+
+function anRenderCards(g){
+  function card(k,v,sub){ return '<div class="an-card"><div class="k">' + k + '</div><div class="v">' + v + '</div><div class="sub">' + (sub||'&nbsp;') + '</div></div>'; }
+  var h = '';
+  h += card('발송 수', g.s.toLocaleString(), '캠페인 ' + g.n + '건');
+  h += card('클릭 수', g.clk.toLocaleString(), '클릭률 ' + anFmt('clickRate', anVal('clickRate',g)));
+  h += card('전환 수', g.cv.toLocaleString(), '전환율 ' + anFmt('convRate', anVal('convRate',g)));
+  h += card('매출액', anFmt('rev', g.rev), '비용 ' + anFmt('rev', g.cost));
+  h += card('ROAS', anFmt('roas', anVal('roas',g)), g.cost ? '매출/비용' : '비용 정보 없음');
+  h += card('전환당 비용', anFmt('cpa', anVal('cpa',g)), g.cv ? '비용/전환' : '전환 0');
+  document.getElementById('anCards').innerHTML = h;
+}
+
+// 인라인 SVG 라인차트 (외부 라이브러리 없음 — 도커/오프라인에서도 그대로 동작)
+function anBuildChart(periods, series, metric){
+  var vis = series.filter(function(s){ return !anHidden[s.name]; });
+  var maxV = 0, any = false;
+  vis.forEach(function(s){ s.vals.forEach(function(v){ if(v !== null && v !== undefined){ any = true; if(v > maxV) maxV = v; } }); });
+  if(!any || !periods.length) return '<div class="an-empty">표시할 데이터가 없습니다 (범례에서 계열을 다시 켜보세요)</div>';
+
+  var W = 1080, H = 340, PL = 70, PR = 18, PT = 18, PB = 52;
+  var iw = W - PL - PR, ih = H - PT - PB, n = periods.length;
+  var top = anNiceMax(maxV);
+  function X(i){ return n <= 1 ? PL + iw/2 : PL + iw*i/(n-1); }
+  function Y(v){ return PT + ih - (v/top)*ih; }
+
+  var g = '';
+  for(var t=0;t<=4;t++){
+    var gv = top*t/4, y = Y(gv);
+    g += '<line x1="' + PL + '" y1="' + y.toFixed(1) + '" x2="' + (PL+iw) + '" y2="' + y.toFixed(1) + '" stroke="' + (t === 0 ? '#9ca3af' : '#eef0f3') + '" stroke-width="1"></line>';
+    g += '<text x="' + (PL-9) + '" y="' + (y+4).toFixed(1) + '" text-anchor="end" font-size="11" fill="#9ca3af">' + anAxisFmt(metric, gv) + '</text>';
+  }
+  var step = Math.max(1, Math.ceil(n / (anUnit === 'day' ? 15 : 18)));
+  for(var i=0;i<n;i++){
+    if(i % step !== 0 && i !== n-1) continue;
+    g += '<text x="' + X(i).toFixed(1) + '" y="' + (PT+ih+19) + '" text-anchor="middle" font-size="10" fill="#9ca3af">' + periods[i].short + '</text>';
+  }
+  vis.forEach(function(s){
+    var d = '', pen = false;
+    s.vals.forEach(function(v,i){
+      if(v === null || v === undefined){ pen = false; return; }
+      d += (pen ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(v).toFixed(1) + ' ';
+      pen = true;
+    });
+    if(d) g += '<path d="' + d + '" fill="none" stroke="' + s.color + '" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"></path>';
+    s.vals.forEach(function(v,i){
+      if(v === null || v === undefined) return;
+      g += '<circle cx="' + X(i).toFixed(1) + '" cy="' + Y(v).toFixed(1) + '" r="3.2" fill="#ffffff" stroke="' + s.color + '" stroke-width="2"></circle>';
+    });
+  });
+  // 마우스 감지용 투명 밴드 (구간 전체 값을 한 번에 보여주는 툴팁)
+  var bw = n <= 1 ? iw : iw/(n-1);
+  for(var b=0;b<n;b++){
+    var x0 = Math.max(PL, X(b) - bw/2);
+    var w0 = Math.min(bw, PL + iw - x0);
+    g += '<rect class="an-band" data-i="' + b + '" x="' + x0.toFixed(1) + '" y="' + PT + '" width="' + Math.max(1,w0).toFixed(1) + '" height="' + ih + '" fill="transparent" pointer-events="all"></rect>';
+  }
+  return '<svg viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg">' + g + '</svg>';
+}
+
+function anTipMove(e){
+  var tip = document.getElementById('anTip');
+  var t = e.target, i = (t && t.getAttribute) ? t.getAttribute('data-i') : null;
+  if(i === null || i === undefined || !anLast){ tip.style.display = 'none'; return; }
+  var idx = parseInt(i,10), d = anLast;
+  var h = '<b>' + d.periods[idx].label + '</b>';
+  var shown = 0;
+  d.series.forEach(function(s){
+    if(anHidden[s.name]) return;
+    var c = s.cells[idx], v = anVal(d.metric, c);
+    if(!c) return;
+    shown++;
+    h += '<br><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + s.color + ';margin-right:5px"></span>' +
+         escHtml(s.name) + ' <b>' + anFmt(d.metric, v) + '</b> <span style="color:#9ca3af">(발송 ' + c.s.toLocaleString() + ' · 클릭 ' + c.clk.toLocaleString() + ' · 전환 ' + c.cv.toLocaleString() + ')</span>';
+  });
+  if(!shown) h += '<br><span style="color:#9ca3af">발송 없음</span>';
+  tip.innerHTML = h;
+  tip.style.display = 'block';
+  var wrap = document.getElementById('anChartWrap').getBoundingClientRect();
+  var x = e.clientX - wrap.left + 16, y = e.clientY - wrap.top + 16;
+  if(x + tip.offsetWidth > wrap.width) x = Math.max(4, e.clientX - wrap.left - tip.offsetWidth - 16);
+  if(y + tip.offsetHeight > wrap.height) y = Math.max(4, y - tip.offsetHeight - 32);
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+}
+function anTipHide(){ var t = document.getElementById('anTip'); if(t) t.style.display = 'none'; }
+
+function anRenderLegend(series){
+  if(series.length <= 1){ document.getElementById('anLegend').innerHTML = ''; return; }
+  var h = '<span style="font-size:11px;color:#9ca3af;align-self:center;margin-right:2px">클릭해서 켜고 끄기 ▸</span>';
+  series.forEach(function(s,i){
+    h += '<span class="an-lg' + (anHidden[s.name] ? ' off' : '') + '" onclick="anLegendToggle(' + i + ')">' +
+         '<i style="background:' + s.color + '"></i>' + escHtml(s.name) +
+         ' <span style="color:#9ca3af">발송 ' + s.tot.s.toLocaleString() + '</span></span>';
+  });
+  document.getElementById('anLegend').innerHTML = h;
+}
+
+function anTd(metric, c, cls){
+  var v = anVal(metric, c);
+  if(v === null || v === undefined) return '<td class="' + cls + '"><span class="nil">·</span></td>';
+  var sub = '';
+  if(metric === 'convRate')  sub = '<span class="den">' + c.cv.toLocaleString() + ' / ' + c.s.toLocaleString() + '</span>';
+  if(metric === 'clickRate') sub = '<span class="den">' + c.clk.toLocaleString() + ' / ' + c.s.toLocaleString() + '</span>';
+  return '<td class="' + cls + '">' + anFmt(metric, v) + sub + '</td>';
+}
+function anRenderTable(periods, series, totals, metric){
+  var showSum = !(series.length === 1);   // 계열이 하나면 '전체' 열은 같은 값이라 생략
+  var h = '<table class="an-tbl"><thead><tr><th class="lbl">' + (anUnit === 'day' ? '일자' : '주차') + '</th>';
+  series.forEach(function(s){ h += '<th>' + escHtml(s.name) + '</th>'; });
+  if(showSum) h += '<th class="sum">전체</th>';
+  h += '</tr></thead><tbody>';
+  var rows = 0;
+  periods.forEach(function(p,i){
+    if(!totals[i]) return;   // 발송이 하나도 없던 구간은 표에서 생략(그래프에는 빈칸으로 남음)
+    rows++;
+    h += '<tr><td class="lbl">' + p.label + '</td>';
+    series.forEach(function(s){ h += anTd(metric, s.cells[i], ''); });
+    if(showSum) h += anTd(metric, totals[i], 'sum');
+    h += '</tr>';
+  });
+  h += '</tbody></table>';
+  document.getElementById('anTbl').innerHTML = rows ? h : '<div class="an-empty">표시할 구간이 없습니다</div>';
+}
+function anRenderSumTable(series, grand){
+  var h = '<table class="an-tbl"><thead><tr><th class="lbl">계열</th><th>캠페인</th><th>발송</th><th>클릭</th><th>클릭률</th><th>전환</th><th>전환율</th><th>매출</th><th>비용</th><th>ROAS</th><th>전환당 비용</th></tr></thead><tbody>';
+  function row(name,o,cls){
+    return '<tr class="' + cls + '"><td class="lbl">' + escHtml(name) + '</td>' +
+      '<td>' + o.n + '</td><td>' + o.s.toLocaleString() + '</td><td>' + o.clk.toLocaleString() + '</td>' +
+      '<td>' + anFmt('clickRate', anVal('clickRate',o)) + '</td>' +
+      '<td>' + o.cv.toLocaleString() + '</td><td>' + anFmt('convRate', anVal('convRate',o)) + '</td>' +
+      '<td>' + anFmt('rev', o.rev) + '</td><td>' + anFmt('rev', o.cost) + '</td>' +
+      '<td>' + anFmt('roas', anVal('roas',o)) + '</td><td>' + anFmt('cpa', anVal('cpa',o)) + '</td></tr>';
+  }
+  series.forEach(function(s){ h += row(s.name, s.tot, ''); });
+  if(!(series.length === 1 && series[0].name === '전체')) h += row('전체', grand, 'sum');   // 계열=전체 합계면 같은 행이 두 번 나오는 걸 방지
+  h += '</tbody></table>';
+  document.getElementById('anSumTbl').innerHTML = h;
+}
 
 // ═══ 성과 요약(전체 vs LMS 귀속 vs 비중) — 일자별 성과 상단 패널 ═══
 // 지표 5종(청첩장/샘플/답례품/부가상품 구매자 + 매출액) × 계열 3종(전체 분모 / LMS 귀속 분자 / 비중).
@@ -6986,6 +7507,7 @@ async function changeCampaignStatus(globalIdx,newStatus){
 // ═══ 탭 전환 ═══
 function switchTab(tabId) {
   if (tabId === 'campaign-dashboard' && !cdLoaded) loadCampaignDashboard();
+  if (tabId === 'analysis') anEnter();
   if (tabId === 'refuse') loadRefuseStatus();
   document.querySelectorAll('.tab-btn').forEach(function(b) {
     b.classList.toggle('active', b.getAttribute('data-tab') === tabId);
