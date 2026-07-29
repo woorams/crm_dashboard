@@ -4455,6 +4455,13 @@ function dpSegOf(t){
   while(t.indexOf('  ')>=0) t=t.split('  ').join(' ');
   var has=function(k){return t.indexOf(k)>=0;};
   var T=t.toUpperCase();
+  // 장바구니 이탈 — 표기가 '장바구니3일째' → '장바구니D+3' → '장바구니_3일차'로 계속 바뀌어서
+  // D+N이든 N일째/N일차든 같은 세그먼트로 모은다 (상품군 청첩장/원주문/답례품 구분은 '목적'이 담당)
+  if(has('장바구니')){
+    var dc=dpDdayNum(T,'+');
+    if(dc===null){ var dl=dpDayNums(t); if(dl.length) dc=dl[0].n; }
+    return dc!==null?('장바구니 D+'+dc):'장바구니 이탈';
+  }
   if(has('당일')&&has('샘플')) return '당일 샘플 발송';
   if(has('샘플')){
     var ds=dpDayNums(t);
@@ -4466,14 +4473,15 @@ function dpSegOf(t){
       return '샘플 '+ds[0].n+'일차';
     }
   }
-  if(has('장바구니')){ var dc=dpDdayNum(T,'+'); return '장바구니 이탈'+(dc!==null?' D+'+dc:''); }
   var dm=dpDdayNum(T,'-'); if(dm!==null) return (has('예식')?'예식일 D-':'D-')+dm;
   var dpn=dpDdayNum(T,'+'); if(dpn!==null) return has('예식')?('예식 후 D+'+dpn):('D+'+dpn);
+  if(has('예식')&&(has('일전')||has('일 전'))){ var ed=dpDayNums(t); if(ed.length) return '예식일 D-'+ed[0].n; }   // '예식일 30일전'
   if(T.indexOf('D30')>=0) return '예식일 D-30';   // 대시 없는 옛 표기
   if(T.indexOf('D60')>=0) return '예식일 D-60';
   if(has('1년')&&has('예식')) return '예식 1년 도래';
   if(has('금주 예식')) return '금주 예식자';
   if(has('지난주 예식')||has('전주 예식')) return '전주 예식자';
+  if(has('리뷰')||has('후기')) return '리뷰 요청';
   if(has('가입')) return '가입자';
   if(has('주문자')) return '기존 주문자';
   return '기타';
@@ -4491,7 +4499,8 @@ function dpSegRank(s){
   if(s==='예식 1년 도래') return 600;
   if(s==='금주 예식자') return 700;
   if(s==='전주 예식자') return 710;
-  if(s.indexOf('장바구니 이탈')===0) return 750+(dpDdayNum(s.toUpperCase(),'+')||0);
+  if(s.indexOf('장바구니')===0) return 750+(dpDdayNum(s.toUpperCase(),'+')||0);
+  if(s==='리뷰 요청') return 790;
   if(s==='기존 주문자') return 800;
   if(s==='기타') return 9999;
   return 900;
