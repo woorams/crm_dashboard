@@ -3812,6 +3812,7 @@ function generateHTML() {
       <p class="an-note" style="color:#78350f">
         · <b>전환</b> = 캠페인에 저장된 <b>발송 후 귀속 전환</b>(현재 자동 조회는 24h/48h 누적, 값이 여러 개면 최댓값). 발송 직후 캠페인은 아직 집계 전일 수 있어 최근 1~2일은 과소 표기될 수 있습니다.<br>
         · <b>클릭</b> = 캠페인 URL의 Bitly <b>총 클릭</b>. [발송 기록 / URL 관리]에서 클릭수를 업데이트한 시점까지만 반영됩니다.<br>
+        · 같은 단축 URL을 여러 캠페인이 함께 쓰면 그 URL의 총 클릭이 각 캠페인에 <b>중복 반영</b>되어, 발송량이 적은 구간은 <b>클릭률이 100%를 넘을 수</b> 있습니다(그래프 축이 크게 늘어나면 이 경우입니다).<br>
         · <b>전환율 · 클릭률</b>은 구간 내 <b>합계 ÷ 합계</b>(발송수 가중)로 계산합니다. 캠페인별 비율의 단순 평균이 아닙니다.<br>
         · <b>취소</b> 상태 캠페인과 발송일이 없는 캠페인은 제외합니다. 세그먼트는 캠페인 <b>기간 조건(target)</b> 문구로 자동 분류합니다.
       </p>
@@ -4419,16 +4420,58 @@ function cdSwitchSub(subId) {
 
 // ═══ 일자별 성과 (목적×세그먼트 × 일자/주간, WoW, 카피 토글) ═══
 var dpExpanded=null, dpPOP=[], dpInit=false;
+// 기간조건(target) 문구에서 '<숫자>일'의 숫자를 순서대로 뽑는다.
+// 정규식을 안 쓰는 이유: 이 코드는 백틱 템플릿 리터럴 안이라 정규식 리터럴의 백슬래시 이스케이프가 소실된다.
+function dpDayNums(t){
+  var out=[],i=0;
+  while(i<t.length){
+    var c=t.charCodeAt(i);
+    if(c>=48&&c<=57){
+      var j=i,v=0;
+      while(j<t.length&&t.charCodeAt(j)>=48&&t.charCodeAt(j)<=57){v=v*10+(t.charCodeAt(j)-48);j++;}
+      if(t.charAt(j)==='일') out.push({n:v,at:i,end:j+1});   // 날짜(26.06.12)는 '일'이 안 붙어 걸러진다
+      i=j;
+    } else i++;
+  }
+  return out;
+}
+// 'D-30' / 'D+30' 뒤의 숫자
+function dpDdayNum(T,sign){
+  var key='D'+sign,i=T.indexOf(key);
+  while(i>=0){
+    var j=i+key.length,v=null;
+    while(j<T.length&&T.charCodeAt(j)>=48&&T.charCodeAt(j)<=57){v=(v||0)*10+(T.charCodeAt(j)-48);j++;}
+    if(v!==null) return v;
+    i=T.indexOf(key,i+1);
+  }
+  return null;
+}
+// 캠페인 기간조건 → 세그먼트 라벨.
+// 샘플 N일차는 N을 문구에서 직접 읽는다 → 2·5·7·12일차 등 새 일차가 생겨도 자동으로 별도 세그먼트가 된다
+// ('샘플 2일'/'샘플 7일'만 하드코딩하던 시절엔 그 외 일차와 '샘플 주문 7일 경과' 같은 표기가 전부 기타로 빠졌다)
 function dpSegOf(t){
   t=(t||'');
   t=t.split(String.fromCharCode(10)).join(' ').split(String.fromCharCode(9)).join(' ').split(String.fromCharCode(13)).join(' ');
   while(t.indexOf('  ')>=0) t=t.split('  ').join(' ');
   var has=function(k){return t.indexOf(k)>=0;};
+  var T=t.toUpperCase();
   if(has('당일')&&has('샘플')) return '당일 샘플 발송';
-  if(has('샘플 2일')||has('샘플2일')) return '샘플 2일차';
-  if(has('샘플 7일')||has('샘플7일')) return '샘플 7일차';
-  if(has('D-30')||has('D30')) return '예식일 D-30';
-  if(has('D-60')||has('D60')) return '예식일 D-60';
+  if(has('샘플')){
+    var ds=dpDayNums(t);
+    if(ds.length){
+      if(ds.length>1){   // 'N일~M일'처럼 붙어 있으면 구간 세그먼트로
+        var mid=ds[1].at>ds[0].end?t.slice(ds[0].end,ds[1].at).split(' ').join(''):'';
+        if((mid==='~'||mid==='-'||mid===String.fromCharCode(8764))&&ds[1].n>ds[0].n) return '샘플 '+ds[0].n+'~'+ds[1].n+'일차';
+      }
+      return '샘플 '+ds[0].n+'일차';
+    }
+  }
+  if(has('장바구니')){ var dc=dpDdayNum(T,'+'); return '장바구니 이탈'+(dc!==null?' D+'+dc:''); }
+  var dm=dpDdayNum(T,'-'); if(dm!==null) return (has('예식')?'예식일 D-':'D-')+dm;
+  var dpn=dpDdayNum(T,'+'); if(dpn!==null) return has('예식')?('예식 후 D+'+dpn):('D+'+dpn);
+  if(T.indexOf('D30')>=0) return '예식일 D-30';   // 대시 없는 옛 표기
+  if(T.indexOf('D60')>=0) return '예식일 D-60';
+  if(has('1년')&&has('예식')) return '예식 1년 도래';
   if(has('금주 예식')) return '금주 예식자';
   if(has('지난주 예식')||has('전주 예식')) return '전주 예식자';
   if(has('가입')) return '가입자';
@@ -4436,7 +4479,29 @@ function dpSegOf(t){
   return '기타';
 }
 var DP_PUR=['당일 샘플 전환','원주문 전환','부가 상품 전환','답례품 전환','기타'];
-var DP_SEG=['가입자','당일 샘플 발송','샘플 2일차','샘플 7일차','예식일 D-30','예식일 D-60','금주 예식자','전주 예식자','기존 주문자','기타'];
+// 세그먼트 정렬 순위 — 라벨이 동적(샘플 N일차/예식일 D-N)이라 고정 배열 대신 순위 함수를 쓴다
+function dpSegRank(s){
+  if(s==='가입자') return 100;
+  if(s==='당일 샘플 발송') return 200;
+  if(s.indexOf('샘플 ')===0){ var d=dpDayNums(s); return 300+(d.length?d[0].n:99); }
+  if(s.indexOf('예식일 D-')===0) return 400+(parseInt(s.slice(7),10)||0);
+  if(s.indexOf('D-')===0) return 400+(parseInt(s.slice(2),10)||0);
+  if(s.indexOf('예식 후 D+')===0) return 500+(parseInt(s.slice(8),10)||0);
+  if(s.indexOf('D+')===0) return 500+(parseInt(s.slice(2),10)||0);
+  if(s==='예식 1년 도래') return 600;
+  if(s==='금주 예식자') return 700;
+  if(s==='전주 예식자') return 710;
+  if(s.indexOf('장바구니 이탈')===0) return 750+(dpDdayNum(s.toUpperCase(),'+')||0);
+  if(s==='기존 주문자') return 800;
+  if(s==='기타') return 9999;
+  return 900;
+}
+function dpSegSort(list){
+  return list.slice().sort(function(a,b){
+    var ra=dpSegRank(a),rb=dpSegRank(b);
+    return ra!==rb?ra-rb:(a<b?-1:(a>b?1:0));
+  });
+}
 function dpConv(c){var m=0,o=c.conversions||{};for(var k in o){var v=o[k]&&o[k].count;if(v>m)m=v;}return m;}
 function dpRev(c){var r=c.revenue;if(r==null)return 0;if(typeof r==='number')return r;var m=0;for(var k in r){if(typeof r[k]==='number'&&r[k]>m)m=r[k];}return m;}
 function dpClk(c){return (c.clicks&&c.clicks.total&&c.clicks.total.count)||0;}
@@ -4520,7 +4585,7 @@ function renderDailyPerf(){
    body+='</tr>';
  });
  purs.forEach(function(p){
-   var segs=DP_SEG.filter(function(s){return segByPur[p]&&segByPur[p][s];}).concat(Object.keys(segByPur[p]||{}).filter(function(s){return DP_SEG.indexOf(s)<0;}));
+   var segs=dpSegSort(Object.keys(segByPur[p]||{}));
    segs.forEach(function(s,si){
      DP_METRICS.forEach(function(m,mi){
        body+='<tr'+(m.tint?(' class="dp-tint-'+m.tint+'"'):'')+'>';
@@ -4673,11 +4738,20 @@ function anFmt(m,v){
   if(m === 'rev' || m === 'cpa') return '₩' + Math.round(v).toLocaleString();
   return Math.round(v).toLocaleString();
 }
-function anAxisFmt(m,v){
-  if(m === 'convRate' || m === 'clickRate') return (v*100).toFixed(v*100 < 10 ? 1 : 0) + '%';
+// 축 눈금 포맷 — 자릿수를 '값'이 아니라 '축 최댓값(top)' 기준으로 정해야
+// 2만/2만/1만 처럼 반올림 때문에 같은 눈금이 두 번 찍히지 않는다
+function anAxisFmt(m,v,top){
+  if(m === 'convRate' || m === 'clickRate'){
+    var p = (top||0)*100;
+    return (v*100).toFixed(p < 1 ? 2 : (p < 10 ? 1 : 0)) + '%';
+  }
   if(m === 'roas') return Math.round(v*100).toLocaleString() + '%';
-  if(m === 'rev' || m === 'cpa') return v >= 10000 ? Math.round(v/10000).toLocaleString() + '만' : Math.round(v).toLocaleString();
-  return Math.round(v).toLocaleString();
+  if(m === 'rev' || m === 'cpa'){
+    if(!v) return '0';
+    if((top||0) >= 10000) return (Math.round(v/1000)/10).toLocaleString() + '만';
+    return Math.round(v).toLocaleString();
+  }
+  return (top||0) < 4 ? String(Math.round(v*10)/10) : Math.round(v).toLocaleString();
 }
 function anNiceMax(v){
   if(!(v > 0)) return 1;
@@ -4716,8 +4790,7 @@ function anRenderSegChips(purpose){
     if(purpose !== 'all' && c.purpose !== purpose) return;
     set[dpSegOf(c.target)] = 1;
   });
-  anSegCache = DP_SEG.filter(function(s){ return set[s]; })
-               .concat(Object.keys(set).filter(function(s){ return DP_SEG.indexOf(s) < 0; }));
+  anSegCache = dpSegSort(Object.keys(set));
   if(anSegOn === null){ anSegOn = {}; anSegCache.forEach(function(s){ anSegOn[s] = 1; }); }
   var h = '';
   anSegCache.forEach(function(s,i){
@@ -4843,7 +4916,7 @@ function anBuildChart(periods, series, metric){
   for(var t=0;t<=4;t++){
     var gv = top*t/4, y = Y(gv);
     g += '<line x1="' + PL + '" y1="' + y.toFixed(1) + '" x2="' + (PL+iw) + '" y2="' + y.toFixed(1) + '" stroke="' + (t === 0 ? '#9ca3af' : '#eef0f3') + '" stroke-width="1"></line>';
-    g += '<text x="' + (PL-9) + '" y="' + (y+4).toFixed(1) + '" text-anchor="end" font-size="11" fill="#9ca3af">' + anAxisFmt(metric, gv) + '</text>';
+    g += '<text x="' + (PL-9) + '" y="' + (y+4).toFixed(1) + '" text-anchor="end" font-size="11" fill="#9ca3af">' + anAxisFmt(metric, gv, top) + '</text>';
   }
   var step = Math.max(1, Math.ceil(n / (anUnit === 'day' ? 15 : 18)));
   for(var i=0;i<n;i++){
