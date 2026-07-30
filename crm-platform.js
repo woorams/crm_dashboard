@@ -4517,7 +4517,24 @@ function generateHTML() {
             <span style="font-size:12px;color:#666;width:78px">상품번호</span>
             <input type="text" id="bmCardSeqs" placeholder="예: 42230,42234,42248 (기획전이 없는 개별 상품 홍보 시)" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;width:420px">
           </div>
-          <span style="font-size:12px;color:#888">둘 다 비워두면 홍보 상품 집계는 건너뛰고 명단 전체 전환만 보여줍니다.</span>
+          <span style="font-size:12px;color:#888">둘 다 비워두면 명단의 <b>모든</b> 구매·샘플을 집계합니다(상품 조건 없음).</span>
+        </div>
+      </div>
+      <div class="filter-row">
+        <div class="filter-label">클릭 데이터</div>
+        <div class="filter-body" style="flex-direction:column;align-items:flex-start;gap:6px">
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <span style="font-size:12px;color:#666;width:78px">클릭 리포트</span>
+            <input type="file" id="bmClickFile" accept=".xlsx,.xls,.csv" style="font-size:12px">
+            <button class="btn" style="padding:4px 10px;font-size:12px" onclick="bmClickUpload()">불러오기</button>
+            <button class="btn" style="padding:4px 10px;font-size:12px" onclick="bmClickClear()">비우기</button>
+            <span id="bmClickInfo" style="font-size:12px;color:#888"></span>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <span style="font-size:12px;color:#666;width:78px">bit.ly URL</span>
+            <input type="text" id="bmBitly" placeholder="예: https://bit.ly/xxxx (단축링크를 쓴 경우, 콤마로 여러 개)" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;width:420px">
+          </div>
+          <span style="font-size:12px;color:#b45309">카카오 브랜드메시지는 외부 플랫폼에서 발송되어 클릭 로그가 사내 DB에 없습니다. <b>대행사 클릭 리포트(전화번호 포함)</b>를 올리면 클릭 수·클릭률과 <b>클릭한 사람 명단</b>까지 나옵니다. bit.ly만 있으면 총 클릭 수만 집계됩니다(누가 눌렀는지는 알 수 없음).</span>
         </div>
       </div>
       <div class="btn-row">
@@ -8599,7 +8616,13 @@ function toggleSql() { document.getElementById('sqlBox').classList.toggle('hidde
 
 // ═══ 카카오 브랜드메시지 성과 ═══
 // 홍보 대상(기획전 MdSeq / 상품번호)을 지정하면 판매 채널 4곳을 모두 조회해 명단과 대조한다.
+// 클릭은 사내 DB에 없어서 대행사 리포트 업로드(개인 단위) 또는 Bitly 집계로 받는다.
 var _bmCounts = {};
+var _bmClickPhones = [];   // 업로드한 클릭 리포트의 번호 목록
+var _bmLast = null;        // 마지막 조회 결과 (다운로드용)
+// 이 스크립트는 서버의 백틱 템플릿 리터럴 안에 들어가므로 백슬래시 이스케이프가 소실된다.
+// (\' 를 쓰면 렌더된 페이지에서 그냥 ' 가 되어 SyntaxError) → 따옴표는 문자코드로 만든다.
+var _SQ = String.fromCharCode(39);
 function bmInit() {
   var d = document.getElementById('bmDate');
   if (d && !d.value) {
@@ -8654,6 +8677,14 @@ function bmUpdateInfo() {
   var r = _splitInfoText(cnt, document.getElementById('bmSplit').value);
   info.textContent = '대상 ' + r.target.toLocaleString() + '명';
 }
+function _bmReadB64(file) {
+  return new Promise(function(resolve, reject) {
+    var fr = new FileReader();
+    fr.onload = function(){ var p = String(fr.result).split(','); resolve(p.length>1?p[1]:''); };
+    fr.onerror = function(){ reject(new Error('파일 읽기 실패')); };
+    fr.readAsDataURL(file);
+  });
+}
 async function bmUpload() {
   var fi = document.getElementById('bmFile');
   var el = document.getElementById('bmUploadInfo');
@@ -8661,15 +8692,9 @@ async function bmUpload() {
   var file = fi.files[0];
   el.style.color = '#666'; el.textContent = '업로드 중...';
   try {
-    var dataUrl = await new Promise(function(resolve, reject) {
-      var fr = new FileReader();
-      fr.onload = function(){ resolve(fr.result); };
-      fr.onerror = function(){ reject(new Error('파일 읽기 실패')); };
-      fr.readAsDataURL(file);
-    });
-    var parts = String(dataUrl).split(',');
+    var b64 = await _bmReadB64(file);
     var res = await fetch('api/extraction-history/upload', { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ filename: file.name, dataBase64: parts.length>1?parts[1]:'', campaignName: file.name }) });
+      body: JSON.stringify({ filename: file.name, dataBase64: b64, campaignName: file.name }) });
     var data = await res.json();
     if (!data.ok) throw new Error(data.error || '업로드 실패');
     var sel = document.getElementById('bmExtractionId');
@@ -8680,6 +8705,30 @@ async function bmUpload() {
     bmUpdateInfo();
     el.style.color = '#137333'; el.textContent = '✓ ' + data.count.toLocaleString() + '명 등록';
   } catch (e) { el.style.color = '#c5221f'; el.textContent = '✗ ' + e.message; }
+}
+// 카카오 대행사 클릭 리포트 업로드 → 번호 목록만 뽑아 메모리에 보관(조회 시 함께 전송)
+async function bmClickUpload() {
+  var fi = document.getElementById('bmClickFile');
+  var el = document.getElementById('bmClickInfo');
+  if (!fi || !fi.files || !fi.files[0]) { alert('클릭 리포트 파일을 선택하세요.'); return; }
+  var file = fi.files[0];
+  el.style.color = '#666'; el.textContent = '분석 중...';
+  try {
+    var b64 = await _bmReadB64(file);
+    var res = await fetch('api/brandmsg-click-upload', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ filename: file.name, dataBase64: b64 }) });
+    var data = await res.json();
+    if (!data.ok) throw new Error(data.error || '분석 실패');
+    _bmClickPhones = data.phones;
+    el.style.color = '#137333';
+    el.textContent = '✓ 클릭 번호 ' + data.count.toLocaleString() + '개 인식 — [성과 조회]를 누르세요';
+  } catch (e) { _bmClickPhones = []; el.style.color = '#c5221f'; el.textContent = '✗ ' + e.message; }
+}
+function bmClickClear() {
+  _bmClickPhones = [];
+  document.getElementById('bmClickFile').value = '';
+  var el = document.getElementById('bmClickInfo');
+  el.style.color = '#888'; el.textContent = '클릭 데이터를 비웠습니다';
 }
 function _bmNums(id) {
   return document.getElementById(id).value.split(',').map(function(s){ return parseInt(s.trim(), 10); })
@@ -8696,9 +8745,12 @@ async function bmLoad() {
     var res = await fetch('api/brandmsg-perf', { method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ date: date, extractionId: document.getElementById('bmExtractionId').value || null,
                              split: document.getElementById('bmSplit').value,
-                             mdSeqs: _bmNums('bmMdSeqs'), cardSeqs: _bmNums('bmCardSeqs') }) });
+                             mdSeqs: _bmNums('bmMdSeqs'), cardSeqs: _bmNums('bmCardSeqs'),
+                             clickPhones: _bmClickPhones,
+                             bitlyUrls: document.getElementById('bmBitly').value || '' }) });
     var d = await res.json();
     if (d.error) throw new Error(d.error);
+    _bmLast = d;
     bmRender(d);
   } catch (e) {
     area.innerHTML = '<div class="warning">조회 실패: ' + escHtml(e.message) + '</div>';
@@ -8710,100 +8762,134 @@ function bmKpi(label, value, color, sub) {
     '<div style="font-size:20px;font-weight:700;color:' + (color||'#111827') + '">' + value + '</div>' +
     (sub ? '<div style="font-size:11px;color:#9ca3af;margin-top:2px">' + sub + '</div>' : '') + '</div>';
 }
+// 리스트 → 엑셀 다운로드 (서버가 xlsx로 만들어 준다)
+async function bmExport(kind) {
+  if (!_bmLast) { alert('먼저 성과를 조회해주세요.'); return; }
+  var d = _bmLast, rows = [], name = '';
+  if (kind === 'click') {
+    name = '클릭자';
+    rows = (d.clickRows || []).map(function(r, i) {
+      return { No: i+1, 이름: r.name || '', 회원ID: r.uid || '', 연락처: r.phone || '',
+               구매: r.purchased ? 'Y' : 'N', 샘플신청: r.sampled ? 'Y' : 'N' };
+    });
+  } else if (kind === 'purchase') {
+    name = '구매자';
+    rows = (d.purchaseRows || []).map(function(r, i) {
+      return { No: i+1, 채널: r.channel, 시각: r.time, 이름: r.name || '', 회원ID: r.uid || '',
+               연락처: r.phone || '', 상품: r.product || '', 금액: r.price || 0 };
+    });
+  } else {
+    name = '샘플신청자';
+    rows = (d.sampleRows || []).map(function(r, i) {
+      return { No: i+1, 시각: r.time, 이름: r.name || '', 회원ID: r.uid || '',
+               연락처: r.phone || '', 상품: r.product || '' };
+    });
+  }
+  if (rows.length === 0) { alert('내보낼 데이터가 없습니다.'); return; }
+  try {
+    var res = await fetch('api/brandmsg-export', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ rows: rows, sheetName: name, filename: (d.date || '') + '_브랜드메시지_' + name }) });
+    if (!res.ok) throw new Error((await res.json()).error || res.statusText);
+    var blob = await res.blob();
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = (d.date || '') + '_브랜드메시지_' + name + '.xlsx';
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  } catch (e) { alert('다운로드 실패: ' + e.message); }
+}
 function bmRender(d) {
   var won = function(n){ return (n||0).toLocaleString() + '원'; };
+  var pct = function(n, base){ return base > 0 ? (n / base * 100).toFixed(2) + '%' : '-'; };
   var html = '';
   if (d.warn) html += '<div class="warning">' + escHtml(d.warn) + '</div>';
 
-  html += '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:12px">';
-  html += bmKpi('발송 대상', d.sendCount ? d.sendCount.toLocaleString() + '명' : '명단 미선택', '#7c3aed', escHtml(d.listName || ''));
-  if (d.hasTarget) {
-    html += bmKpi('홍보상품 전환(명단)', d.promoMatched + '건', d.promoMatched > 0 ? '#059669' : '#9ca3af', d.promoMatchedPeople + '명');
-    html += bmKpi('홍보상품 매출(명단)', won(d.promoMatchedRev), '#059669');
-    html += bmKpi('전환률', d.sendCount ? (d.promoMatchedPeople / d.sendCount * 100).toFixed(2) + '%' : '-', '#2563eb');
-    html += bmKpi('사이트 전체 홍보상품', d.promoSite + '건', '#111827', won(d.promoSiteRev));
-  } else {
-    html += bmKpi('홍보 대상', '미지정', '#9ca3af', '기획전/상품번호 입력 시 집계');
-    html += bmKpi('명단 주문(발송일)', d.overall.day.orders + '건', '#059669', won(d.overall.day.revenue));
-    html += bmKpi('명단 샘플신청(발송일)', d.overall.day.samples + '건', '#2563eb');
-    html += bmKpi('대상 상품 수', '0');
-  }
+  // ── 핵심 지표 7개 ──
+  var scopeLabel = d.hasTarget ? '홍보상품 기준' : '명단 전체 기준(홍보 대상 미지정)';
+  var clickVal = d.clickCount === null ? '-' : d.clickCount.toLocaleString() + '명';
+  var clickSub = d.clickMode === 'list' ? '대행사 리포트 · 명단 매칭'
+    : (d.clickMode === 'bitly' ? 'Bitly 집계(클릭 수)' : '클릭 데이터 없음');
+  if (d.clickMode === 'bitly') clickVal = d.clickCount === null ? '-' : d.clickCount.toLocaleString() + '회';
+  html += '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:7px;margin-bottom:6px">';
+  html += bmKpi('발송 대상', d.sendCount ? d.sendCount.toLocaleString() + '명' : '미선택', '#7c3aed');
+  html += bmKpi('구매 수', d.buyCount + '건', d.buyCount > 0 ? '#059669' : '#9ca3af', d.buyerCount + '명 · ' + won(d.buyRevenue));
+  html += bmKpi('샘플 수', d.sampleCount + '건', d.sampleCount > 0 ? '#2563eb' : '#9ca3af', d.samplerCount + '명');
+  html += bmKpi('클릭 수', clickVal, d.clickCount ? '#0891b2' : '#9ca3af', clickSub);
+  html += bmKpi('클릭률', d.clickCount !== null && d.sendCount ? pct(d.clickCount, d.sendCount) : '-', '#0891b2');
+  html += bmKpi('구매전환율', pct(d.buyerCount, d.sendCount), '#059669', '구매자/발송');
+  html += bmKpi('샘플전환율', pct(d.samplerCount, d.sendCount), '#2563eb', '신청자/발송');
   html += '</div>';
+  html += '<div style="font-size:11px;color:#9ca3af;margin-bottom:12px">' + escHtml(scopeLabel) +
+    ' · 집계기간 ' + escHtml(d.rangeLabel) + (d.listName ? ' · ' + escHtml(d.listName) : '') +
+    (d.clickNote ? ' · <span style="color:#b45309">' + escHtml(d.clickNote) + '</span>' : '') + '</div>';
 
-  // 명단 전체 전환 (홍보 상품과 무관) — 7/24 인생네컷처럼 "홍보상품은 안 팔렸지만 샘플이 늘어난" 케이스를 놓치지 않으려면 필요하다.
-  if (d.overall) {
+  // ── 리스트 3종 ──
+  function listPanel(title, rows, kind, headers, cellFn, emptyMsg) {
+    var h = '<div class="panel"><div class="panel-title" style="display:flex;justify-content:space-between;align-items:center">' +
+      '<span>' + title + ' <span style="font-size:11px;font-weight:400;color:#9ca3af">' + rows.length.toLocaleString() + '명/건</span></span>' +
+      (rows.length ? '<button class="btn" style="padding:4px 12px;font-size:12px;background:#059669;color:#fff" onclick="bmExport(' + _SQ + kind + _SQ + ')">엑셀 다운로드</button>' : '') +
+      '</div>';
+    if (!rows.length) { h += '<div class="empty-state"><p>' + emptyMsg + '</p></div></div>'; return h; }
+    h += '<div class="table-wrap"><table class="ext-table"><thead><tr><th>No</th>' +
+      headers.map(function(x){ return '<th>' + x + '</th>'; }).join('') + '</tr></thead><tbody>';
+    rows.forEach(function(r, i) { h += '<tr><td>' + (i+1) + '</td>' + cellFn(r) + '</tr>'; });
+    h += '</tbody></table></div></div>';
+    return h;
+  }
+
+  html += listPanel('클릭한 사람', d.clickRows || [], 'click',
+    ['이름','회원ID','연락처','구매','샘플신청'],
+    function(r) {
+      var yn = function(v, c){ return v ? '<span style="color:' + c + ';font-weight:700">Y</span>' : '<span style="color:#d1d5db">N</span>'; };
+      return '<td>' + escHtml(r.name||'-') + '</td><td>' + escHtml(r.uid||'-') + '</td><td>' + escHtml(r.phone||'-') + '</td>' +
+             '<td>' + yn(r.purchased,'#059669') + '</td><td>' + yn(r.sampled,'#2563eb') + '</td>';
+    },
+    d.clickMode === 'bitly'
+      ? 'Bitly는 총 클릭수만 제공합니다 — 누가 눌렀는지는 알 수 없습니다. 개인 명단이 필요하면 카카오 대행사 클릭 리포트를 올려주세요.'
+      : '클릭 리포트를 올리면 명단과 대조해 클릭한 사람을 보여줍니다.');
+
+  html += listPanel('구매한 사람', d.purchaseRows || [], 'purchase',
+    ['채널','시각','이름','회원ID','연락처','상품','금액'],
+    function(r) {
+      var chColor = { '이용권':'#db2777', '청첩장주문':'#2563eb', '부가상품':'#7c3aed' }[r.channel] || '#6b7280';
+      return '<td><span style="color:' + chColor + ';font-weight:700;font-size:11px">' + escHtml(r.channel) + '</span></td>' +
+             '<td>' + escHtml(r.time) + '</td><td>' + escHtml(r.name||'-') + '</td><td>' + escHtml(r.uid||'-') + '</td>' +
+             '<td>' + escHtml(r.phone||'-') + '</td><td style="text-align:left">' + escHtml(r.product||'-') + '</td>' +
+             '<td style="text-align:right">' + won(r.price) + '</td>';
+    }, '해당 기간 명단 내 구매가 없습니다');
+
+  html += listPanel('샘플 신청한 사람', d.sampleRows || [], 'sample',
+    ['시각','이름','회원ID','연락처','상품'],
+    function(r) {
+      return '<td>' + escHtml(r.time) + '</td><td>' + escHtml(r.name||'-') + '</td><td>' + escHtml(r.uid||'-') + '</td>' +
+             '<td>' + escHtml(r.phone||'-') + '</td><td style="text-align:left">' + escHtml(r.product||'-') + '</td>';
+    }, '해당 기간 명단 내 샘플신청이 없습니다');
+
+  // ── 참고: 명단 전체 전환 / 조회수 ──
+  var ref = '';
+  if (d.overall && d.sendCount) {
     var o = d.overall, cmp = function(a, b) {
       if (!b) return '';
-      var diff = b > 0 ? ((a - b) / b * 100) : null;
-      if (diff === null) return '';
+      var diff = (a - b) / b * 100;
       var c = diff > 5 ? '#059669' : (diff < -5 ? '#c5221f' : '#6b7280');
       return ' <span style="color:' + c + ';font-weight:700">(' + (diff >= 0 ? '+' : '') + diff.toFixed(0) + '%)</span>';
     };
-    html += '<div class="panel" style="padding:12px 14px;margin-bottom:12px">' +
-      '<div style="font-size:11px;font-weight:700;color:#475569;margin-bottom:6px">명단 전체 전환 (홍보 상품 무관 · 발송일 vs 전일)</div>' +
-      '<div style="font-size:13px;color:#374151;line-height:1.8">' +
-      '청첩장 주문 <b>' + o.day.orders + '건</b>' + cmp(o.day.orders, o.prev.orders) +
-      ' <span style="color:#9ca3af">(전일 ' + o.prev.orders + '건)</span> · 매출 <b>' + won(o.day.revenue) + '</b>' +
-      cmp(o.day.revenue, o.prev.revenue) + '<br>' +
-      '샘플신청 <b>' + o.day.samples + '건</b>' + cmp(o.day.samples, o.prev.samples) +
-      ' <span style="color:#9ca3af">(전일 ' + o.prev.samples + '건)</span>' +
-      (d.sendCount ? ' · 명단 대비 주문 ' + (o.day.orders / d.sendCount * 100).toFixed(2) + '% / 샘플 ' + (o.day.samples / d.sendCount * 100).toFixed(2) + '%' : '') +
-      '</div></div>';
+    ref += '<div style="font-size:12px;color:#374151;line-height:1.9">' +
+      '<b>명단 전체 전환</b>(홍보 상품 무관) — 청첩장 주문 ' + o.day.orders + '건' + cmp(o.day.orders, o.prev.orders) +
+      ' <span style="color:#9ca3af">(전일 ' + o.prev.orders + '건)</span> · 매출 ' + won(o.day.revenue) + cmp(o.day.revenue, o.prev.revenue) +
+      ' · 샘플신청 ' + o.day.samples + '건' + cmp(o.day.samples, o.prev.samples) +
+      ' <span style="color:#9ca3af">(전일 ' + o.prev.samples + '건)</span></div>';
   }
-
   if (d.hasTarget && d.viewTotals) {
     var vt = d.viewTotals;
     var lift = vt.prevComparable > 0 ? ((vt.dayComparable - vt.prevComparable) / vt.prevComparable * 100) : null;
     var liftTxt = lift === null ? '비교 불가' : (lift >= 0 ? '+' : '') + lift.toFixed(0) + '%';
     var liftColor = lift === null ? '#6b7280' : (lift > 5 ? '#059669' : (lift < -5 ? '#c5221f' : '#6b7280'));
-    html += '<div class="panel" style="padding:12px 14px;margin-bottom:12px">' +
-      '<span style="font-size:13px;color:#374151">홍보상품 상세조회 발송일 <b>' + vt.day.toLocaleString() + '</b>회 ' +
-      '(전일 ' + vt.prev.toLocaleString() + '회, 익일 ' + vt.next.toLocaleString() + '회) &nbsp;·&nbsp; ' +
-      '양일 공통 판매 상품만 비교하면 <b style="color:' + liftColor + '">' + liftTxt + '</b> ' +
-      '<span style="color:#9ca3af">(' + vt.prevComparable.toLocaleString() + ' → ' + vt.dayComparable.toLocaleString() + ')</span></span></div>';
+    ref += '<div style="font-size:12px;color:#374151;line-height:1.9">' +
+      '<b>홍보상품 상세조회</b>(사이트 전체) — 발송일 ' + vt.day.toLocaleString() + '회, 전일 ' + vt.prev.toLocaleString() +
+      '회, 익일 ' + vt.next.toLocaleString() + '회 · 양일 공통 상품 비교 <b style="color:' + liftColor + '">' + liftTxt + '</b>' +
+      ' <span style="color:#9ca3af">(' + vt.prevComparable.toLocaleString() + ' → ' + vt.dayComparable.toLocaleString() + ')</span></div>';
   }
-
-  if (d.hasTarget) {
-    html += '<div class="panel"><div class="panel-title">홍보상품 전환 내역 (' + escHtml(d.rangeLabel) + ')' +
-      ' <span style="font-size:11px;font-weight:400;color:#9ca3af">대상 상품 ' + d.targetCount + '개</span></div>';
-    if (!d.conversions || d.conversions.length === 0) {
-      html += '<div class="empty-state"><p>해당 기간 홍보 상품의 구매/신청이 없습니다</p></div>';
-    } else {
-      html += '<div class="table-wrap"><table class="ext-table"><thead><tr><th>채널</th><th>시각</th><th>이름</th><th>회원ID</th><th>연락처</th><th style="text-align:left">상품</th><th>금액</th><th>명단</th></tr></thead><tbody>';
-      d.conversions.forEach(function(c) {
-        var tag = c.matched
-          ? '<span style="background:#059669;color:#fff;padding:1px 6px;border-radius:4px;font-size:11px">발송대상</span>'
-          : '<span style="color:#9ca3af;font-size:11px">미발송</span>';
-        if (c.test) tag += ' <span style="color:#b45309;font-size:11px">테스트</span>';
-        var chColor = { '이용권':'#db2777', '청첩장주문':'#2563eb', '부가상품':'#7c3aed', '샘플신청':'#059669' }[c.channel] || '#6b7280';
-        html += '<tr' + (c.matched ? ' style="background:#ecfdf5"' : (c.test ? ' style="color:#9ca3af"' : '')) + '>' +
-          '<td><span style="color:' + chColor + ';font-weight:700;font-size:11px">' + escHtml(c.channel) + '</span></td>' +
-          '<td>' + escHtml(c.time) + '</td><td>' + escHtml(c.name||'-') + '</td><td>' + escHtml(c.uid||'-') + '</td>' +
-          '<td>' + escHtml(c.phone||'-') + '</td><td style="text-align:left">' + escHtml(c.product||'-') + '</td>' +
-          '<td style="text-align:right">' + won(c.price) + '</td><td>' + tag + '</td></tr>';
-      });
-      html += '</tbody></table></div>';
-    }
-    html += '</div>';
-
-    html += '<div class="panel"><div class="panel-title">홍보상품 상세조회수 <span style="font-size:11px;font-weight:400;color:#9ca3af">(사이트 전체 · 명단 한정 아님' + (d.viewsTruncated ? ' · 조회 상위 ' + d.views.length + '개만 표시' : '') + ')</span></div>';
-    if (!d.views || d.views.length === 0) {
-      html += '<div class="empty-state"><p>조회수 데이터가 없습니다</p></div>';
-    } else {
-      html += '<div class="table-wrap"><table class="ext-table"><thead><tr><th style="text-align:left">상품</th><th>가격</th><th>구분</th><th>전일</th><th>발송일</th><th>익일</th><th>증감</th></tr></thead><tbody>';
-      d.views.forEach(function(v) {
-        var diff = v.isNew ? null : v.day - v.prev;
-        var diffTxt = v.isNew ? '<span style="color:#7c3aed;font-size:11px">발송일 신규</span>'
-          : (diff > 0 ? '<span style="color:#059669">+' + diff + '</span>' : (diff < 0 ? '<span style="color:#c5221f">' + diff + '</span>' : '0'));
-        html += '<tr><td style="text-align:left">' + escHtml(v.name) + '</td>' +
-          '<td style="text-align:right">' + won(v.price) + '</td><td style="font-size:11px">' + escHtml(v.cats||'-') + '</td>' +
-          '<td>' + (v.isNew ? '-' : v.prev) + '</td><td style="font-weight:700">' + v.day + '</td><td>' + v.next + '</td>' +
-          '<td>' + diffTxt + '</td></tr>';
-      });
-      html += '</tbody></table></div>';
-    }
-    html += '</div>';
-  }
+  if (ref) html += '<div class="panel" style="padding:12px 14px"><div style="font-size:11px;font-weight:700;color:#475569;margin-bottom:4px">참고 지표</div>' + ref + '</div>';
 
   html += '<div style="font-size:11px;color:#9ca3af;padding:4px 2px">' + escHtml(d.note || '') + '</div>';
   document.getElementById('bmResult').innerHTML = html;
@@ -10882,13 +10968,90 @@ var server = http.createServer(async function (req, res) {
       return;
     }
 
+    // ── 클릭 리포트 업로드 (카카오 비즈메시지 대행사 리포트) ──
+    // 카카오 브랜드메시지는 외부 플랫폼에서 발송되므로 클릭 로그가 사내 DB에 없다.
+    // (사내 발송로그 ata_mmt_log에도 브랜드메시지 건은 안 남는다.)
+    // 대행사 리포트의 전화번호 목록을 올려주면 발송 명단과 대조해 개인 단위로 클릭을 붙인다.
+    // 컬럼명이 대행사마다 달라서, 어느 컬럼이든 휴대폰번호 형태인 값을 전부 긁는다.
+    if (pathname === "/api/brandmsg-click-upload" && req.method === "POST") {
+      try {
+        var cuB = await parseBody(req);
+        if (!cuB || !cuB.dataBase64) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ error: "업로드된 파일이 없습니다" }));
+          return;
+        }
+        var cuBuf = Buffer.from(cuB.dataBase64, "base64");
+        var cuWb = XLSX.read(cuBuf, { type: "buffer", raw: false });
+        var cuSet = {}, cuScanned = 0;
+        cuWb.SheetNames.forEach(function (sn) {
+          var aoa = XLSX.utils.sheet_to_json(cuWb.Sheets[sn], { header: 1, defval: "", raw: false });
+          aoa.forEach(function (row) {
+            (row || []).forEach(function (cell) {
+              if (cell === null || cell === undefined || cell === "") return;
+              cuScanned++;
+              var d = String(cell).replace(/[^0-9]/g, "");
+              // 010으로 시작하는 10~11자리만 휴대폰번호로 인정(주문번호/금액 오인 방지)
+              if ((d.length === 10 || d.length === 11) && d.indexOf("01") === 0) cuSet[d] = true;
+            });
+          });
+        });
+        var cuPhones = Object.keys(cuSet);
+        if (cuPhones.length === 0) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ error: "파일에서 휴대폰번호를 찾지 못했습니다(01로 시작하는 10~11자리). 형식을 확인해주세요." }));
+          return;
+        }
+        console.log("[브랜드메시지] 클릭 리포트 '" + (cuB.filename || "") + "': 번호 " + cuPhones.length + "개 (셀 " + cuScanned + "개 스캔)");
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, phones: cuPhones, count: cuPhones.length, sheets: cuWb.SheetNames }));
+      } catch (cuErr) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "파싱 실패: " + cuErr.message }));
+      }
+      return;
+    }
+
+    // ── 리스트 엑셀 다운로드 ──
+    if (pathname === "/api/brandmsg-export" && req.method === "POST") {
+      try {
+        var exB = await parseBody(req);
+        var exRows = Array.isArray(exB.rows) ? exB.rows : [];
+        if (exRows.length === 0) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ error: "내보낼 데이터가 없습니다" }));
+          return;
+        }
+        var exName = String(exB.sheetName || "리스트").slice(0, 28);
+        var exWs = XLSX.utils.json_to_sheet(exRows);
+        exWs["!cols"] = Object.keys(exRows[0]).map(function (k) {
+          return { wch: k === "상품" ? 42 : (k === "연락처" || k === "회원ID" ? 16 : 13) };
+        });
+        var exWb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(exWb, exWs, exName);
+        var exBuf = XLSX.write(exWb, { type: "buffer", bookType: "xlsx" });
+        var exFile = (exB.filename || exName) + ".xlsx";
+        res.writeHead(200, {
+          "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "Content-Disposition": "attachment; filename=" + encodeURIComponent(exFile),
+          "Content-Length": exBuf.length,
+        });
+        res.end(exBuf);
+      } catch (exErr) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: exErr.message }));
+      }
+      return;
+    }
+
     // ── 카카오 브랜드메시지 성과 ──
-    // 홍보 대상(기획전 MdSeq / 개별 상품번호)의 구매를 판매 채널 4곳에서 모두 찾아 발송 명단과 대조한다.
+    // 홍보 대상(기획전 MdSeq / 개별 상품번호)의 구매·샘플신청을 판매 채널 4곳에서 찾아 발송 명단과 대조한다.
     // 채널이 나뉘는 이유: 상품 종류마다 주문 테이블이 다르다.
     //   이용권(뷰티라운지, Card_Div=D05) → TB_Lounge_Voucher   ※ custom_order에는 안 남는다
     //   청첩장/카드(A01 등)             → custom_order + custom_order_item
     //   부가상품                        → CUSTOM_ETC_ORDER + CUSTOM_ETC_ORDER_ITEM
     //   샘플신청                        → CUSTOM_SAMPLE_ORDER + CUSTOM_SAMPLE_ORDER_ITEM
+    // 홍보 대상을 지정하지 않으면 상품 조건 없이 명단의 모든 구매·샘플을 집계한다.
     // 회원별 조회 로그(S5_TodayViewItems)는 2023-06 이후 죽어서 조회수는 S2CardStats(상품×일자 집계)뿐이다.
     if (pathname === "/api/brandmsg-perf" && req.method === "POST") {
       try {
@@ -10902,8 +11065,8 @@ var server = http.createServer(async function (req, res) {
         if (!pool) pool = await sql.connect(dbConfig);
         var bmWarn = null;
 
-        // 발송 명단 → 전화번호/회원ID 집합
-        var bmPhones = {}, bmUids = {}, bmSendCount = 0, bmListName = "";
+        // 발송 명단 → 전화번호/회원ID 집합 (+ 사람 정보)
+        var bmPhones = {}, bmUids = {}, bmSendCount = 0, bmListName = "", bmPeopleByPhone = {}, bmPeopleByUid = {};
         if (bmB.extractionId) {
           var bmRec = null;
           for (var bmi = 0; bmi < extractionHistory.length; bmi++) {
@@ -10917,17 +11080,25 @@ var server = http.createServer(async function (req, res) {
           var bmList = applySplitList(bmRec.recipients || [], bmB.split);
           bmSendCount = bmList.length;
           bmListName = bmRec.campaignName + " / " + splitLabel(bmB.split);
-          for (var bmj = 0; bmj < bmList.length; bmj++) {
-            var bmp = String(bmList[bmj].phone || "").replace(/[^0-9]/g, "");
-            if (bmp) bmPhones[bmp] = true;
-            var bmu = String(bmList[bmj].uid || "").trim().toLowerCase();
-            if (bmu) bmUids[bmu] = true;
-          }
+          bmList.forEach(function (p) {
+            var ph = String(p.phone || "").replace(/[^0-9]/g, "");
+            var uid = String(p.uid || "").trim().toLowerCase();
+            var person = { name: p.name || "", phone: p.phone || ph, uid: p.uid || "" };
+            if (ph) { bmPhones[ph] = true; bmPeopleByPhone[ph] = person; }
+            if (uid) { bmUids[uid] = true; bmPeopleByUid[uid] = person; }
+          });
         }
         function bmMatch(phone, uid) {
           var p = String(phone || "").replace(/[^0-9]/g, "");
           var u = String(uid || "").trim().toLowerCase();
           return (!!p && !!bmPhones[p]) || (!!u && !!bmUids[u]);
+        }
+        function bmPersonKey(phone, uid) {
+          var u = String(uid || "").trim().toLowerCase();
+          if (u && bmUids[u]) return "u:" + u;
+          var p = String(phone || "").replace(/[^0-9]/g, "");
+          if (p && bmPhones[p]) return "p:" + p;
+          return u ? "u:" + u : "p:" + p;
         }
 
         // 홍보 대상 상품 = 기획전(MdSeq) 소속 상품 ∪ 직접 지정한 상품번호
@@ -10948,6 +11119,7 @@ var server = http.createServer(async function (req, res) {
             if (c && !bmCats[r.CardSeq]) bmCats[r.CardSeq] = c;
           });
         }
+
         // 이용권(뷰티라운지)은 기획전에 '노출되는 카드'와 '실제 결제되는 하위 카드'가 다르다.
         // (예: 노출 42282 [고센 뷰티] 1:1 퍼스널 스타일링 ↔ 결제 42283 퍼스널 웨딩 컨설팅 상품(60분))
         // 노출 카드만 보면 실결제를 통째로 놓치므로, 대상에 D05(이용권)가 하나라도 있으면
@@ -10976,7 +11148,9 @@ var server = http.createServer(async function (req, res) {
           bmSeqs = bmSeqs.slice(0, BM_MAX_CARDS);
         }
         var bmHasTarget = bmSeqs.length > 0;
-        var bmIn = bmHasTarget ? bmSeqs.join(",") : "";
+        // 홍보 대상 미지정이면 상품 조건 없이 명단의 모든 구매/샘플을 센다.
+        var bmCardCond = bmHasTarget ? " AND i.card_seq IN (" + bmSeqs.join(",") + ")" : "";
+        var bmCardCondU = bmHasTarget ? " AND i.CARD_SEQ IN (" + bmSeqs.join(",") + ")" : "";
 
         var bmNext = addDay(bmDate);
         var bmTo = addDay(bmNext);
@@ -10994,7 +11168,7 @@ var server = http.createServer(async function (req, res) {
             "SELECT c.Card_Seq AS seq, c.Card_Name AS nm, c.Card_Price AS pp, c.Card_Div AS dv," +
             "       (SELECT MAX(d.Product_Name) FROM TB_Lounge_Deal d WITH(NOLOCK) WHERE d.Card_Seq = c.Card_Seq) AS dealNm," +
             "       (SELECT MAX(d.Paid_Price) FROM TB_Lounge_Deal d WITH(NOLOCK) WHERE d.Card_Seq = c.Card_Seq) AS dealPp" +
-            "  FROM S2_Card c WITH(NOLOCK) WHERE c.Card_Seq IN (" + bmIn + ")"
+            "  FROM S2_Card c WITH(NOLOCK) WHERE c.Card_Seq IN (" + bmSeqs.join(",") + ")"
           );
           bmNmRs.recordset.forEach(function (r) {
             bmNames[r.seq] = { nm: r.dealNm || r.nm || ("상품 " + r.seq), pp: r.dealPp || r.pp || 0, div: r.dv };
@@ -11002,101 +11176,158 @@ var server = http.createServer(async function (req, res) {
         }
         function bmNameOf(seq) { return (bmNames[seq] && bmNames[seq].nm) || ("상품 " + seq); }
 
-        // ── 홍보 상품 전환: 채널 4곳 ──
-        var bmConv = [];
-        if (bmHasTarget) {
-          // 1) 청첩장/카드 주문
-          // status_seq >= 1 = 유효 주문(0은 결제 전 이탈). 대시보드 다른 전환 집계와 같은 기준.
-          var q2 = pool.request();
-          q2.input("f", sql.VarChar(10), bmDate); q2.input("t", sql.VarChar(10), bmTo);
-          var r2 = await q2.query(
-            "SELECT CONVERT(varchar(16), o.order_date, 120) AS at, o.member_id AS uid, o.order_hphone AS ph," +
-            "       o.last_total_price AS price, i.card_seq AS cs, i.item_count AS qty, o.order_seq AS oseq" +
-            "  FROM custom_order o WITH(NOLOCK) JOIN custom_order_item i WITH(NOLOCK) ON i.order_seq = o.order_seq" +
-            " WHERE o.order_date >= @f AND o.order_date < @t AND o.status_seq >= 1 AND i.card_seq IN (" + bmIn + ")" +
-            " ORDER BY o.order_date"
-          );
-          r2.recordset.forEach(function (r) {
-            bmConv.push({ channel: "청첩장주문", time: r.at || "", name: "", phone: r.ph || "", uid: r.uid || "",
-                          product: bmNameOf(r.cs) + (r.qty ? " (" + r.qty + "장)" : ""), price: r.price || 0,
-                          status: "order " + r.oseq, test: false, matched: bmMatch(r.ph, r.uid) });
-          });
-
-          // 2) 부가상품 주문 (이용권도 결제 자체는 이 테이블을 거친다)
-          var bmEtcSeqs = {};
-          var q3 = pool.request();
-          q3.input("f", sql.VarChar(10), bmDate); q3.input("t", sql.VarChar(10), bmTo);
-          var r3 = await q3.query(
-            "SELECT CONVERT(varchar(16), o.order_date, 120) AS at, o.member_id AS uid, o.order_hphone AS ph," +
-            "       o.settle_price AS price, i.card_seq AS cs, i.order_count AS qty, o.order_seq AS oseq" +
-            "  FROM CUSTOM_ETC_ORDER o WITH(NOLOCK) JOIN CUSTOM_ETC_ORDER_ITEM i WITH(NOLOCK) ON i.order_seq = o.order_seq" +
-            " WHERE o.order_date >= @f AND o.order_date < @t AND o.status_seq >= 1 AND i.card_seq IN (" + bmIn + ")" +
-            " ORDER BY o.order_date"
-          );
-          r3.recordset.forEach(function (r) {
-            bmEtcSeqs[r.oseq] = true;
-            bmConv.push({ channel: "부가상품", time: r.at || "", name: "", phone: r.ph || "", uid: r.uid || "",
-                          product: bmNameOf(r.cs) + (r.qty ? " (" + r.qty + "개)" : ""), price: r.price || 0,
-                          status: "order " + r.oseq, test: false, matched: bmMatch(r.ph, r.uid) });
-          });
-
-          // 3) 이용권 발급
-          // 이용권은 부가상품 주문(CUSTOM_ETC_ORDER)이 결제되면 발급되는 후속 기록이다.
-          // 같은 order_seq가 위에서 이미 잡혔으면 매출이 두 번 계산되므로 건너뛴다.
-          // 부가상품 쪽에 없는 발급분만 별도 채널로 남긴다(다른 결제 경로 대비).
-          var q1 = pool.request();
-          q1.input("f", sql.VarChar(10), bmDate); q1.input("t", sql.VarChar(10), bmTo);
-          var r1 = await q1.query(
-            "SELECT CONVERT(varchar(16), v.Buy_DateTime, 120) AS at, v.Cust_Name AS nm, v.Cust_Phone AS ph," +
-            "       v.Paid_Price AS price, v.Status AS st, v.Order_Seq AS oseq, d.Product_Name AS pn," +
-            "       d.Card_Seq AS cs, u.UserId AS uid" +
-            "  FROM TB_Lounge_Voucher v WITH(NOLOCK)" +
-            "  LEFT JOIN TB_Lounge_Deal d WITH(NOLOCK) ON d.Deal_ID = v.Deal_ID" +
-            "  LEFT JOIN UserInfo u WITH(NOLOCK) ON u.MemberId = v.Member_UID" +
-            " WHERE v.Buy_DateTime >= @f AND v.Buy_DateTime < @t AND d.Card_Seq IN (" + bmIn + ")" +
-            " ORDER BY v.Buy_DateTime"
-          );
-          r1.recordset.forEach(function (r) {
-            if (r.oseq && bmEtcSeqs[r.oseq]) return; // 부가상품 주문으로 이미 집계됨
-            var nm = String(r.pn || "");
-            // 오픈 초기 내부 검증분(무료/[test]/시스템테스트)은 실적에서 분리한다.
-            var isTest = String(r.nm || "").indexOf("시스템테스트") === 0 || nm.toLowerCase().indexOf("[test]") >= 0 || !r.price;
-            bmConv.push({ channel: "이용권", time: r.at || "", name: r.nm || "", phone: r.ph || "", uid: r.uid || "",
-                          product: nm, price: r.price || 0, status: r.st || "", test: isTest,
-                          matched: !isTest && bmMatch(r.ph, r.uid) });
-          });
-
-          // 4) 샘플신청 (무료 — 매출 0으로 두고 건수만 센다)
-          var q4 = pool.request();
-          q4.input("f", sql.VarChar(10), bmDate); q4.input("t", sql.VarChar(10), bmTo);
-          var r4 = await q4.query(
-            "SELECT CONVERT(varchar(16), s.REQUEST_DATE, 120) AS at, s.MEMBER_ID AS uid, s.MEMBER_NAME AS nm," +
-            "       s.MEMBER_HPHONE AS ph, i.CARD_SEQ AS cs" +
-            "  FROM CUSTOM_SAMPLE_ORDER s WITH(NOLOCK)" +
-            "  JOIN CUSTOM_SAMPLE_ORDER_ITEM i WITH(NOLOCK) ON i.SAMPLE_ORDER_SEQ = s.sample_order_seq" +
-            " WHERE s.REQUEST_DATE >= @f AND s.REQUEST_DATE < @t AND i.CARD_SEQ IN (" + bmIn + ")" +
-            " ORDER BY s.REQUEST_DATE"
-          );
-          r4.recordset.forEach(function (r) {
-            bmConv.push({ channel: "샘플신청", time: r.at || "", name: r.nm || "", phone: r.ph || "", uid: r.uid || "",
-                          product: bmNameOf(r.cs), price: 0, status: "", test: false, matched: bmMatch(r.ph, r.uid) });
-          });
-          bmConv.sort(function (a, b) { return String(a.time).localeCompare(String(b.time)); });
+        // ── 구매 / 샘플: 채널 4곳 ──
+        // 한 주문에 대상 상품이 여러 개면 행이 중복되므로 주문 단위로 합친다(건수 과대집계 방지).
+        var bmBuyMap = {}, bmSmpMap = {};
+        function bmPush(map, key, row) {
+          if (map[key]) {
+            if (row.product && map[key].product.indexOf(row.product) < 0) map[key].product += ", " + row.product;
+            return;
+          }
+          map[key] = row;
         }
 
-        var bmPromoMatched = 0, bmPromoMatchedRev = 0, bmPromoSite = 0, bmPromoSiteRev = 0;
-        var bmPeople = {};
-        bmConv.forEach(function (c) {
-          if (c.test) return;
-          bmPromoSite++; bmPromoSiteRev += c.price || 0;
-          if (c.matched) {
-            bmPromoMatched++; bmPromoMatchedRev += c.price || 0;
-            var k = String(c.uid || c.phone || "").toLowerCase();
-            if (k) bmPeople[k] = true;
-          }
+        // 1) 청첩장/카드 주문 — status_seq>=1 = 유효 주문(0은 결제 전 이탈). 대시보드 공통 기준.
+        var q2 = pool.request();
+        q2.input("f", sql.VarChar(10), bmDate); q2.input("t", sql.VarChar(10), bmTo);
+        var r2 = await q2.query(
+          "SELECT CONVERT(varchar(16), o.order_date, 120) AS at, o.member_id AS uid, o.order_hphone AS ph," +
+          "       o.order_name AS nm, o.last_total_price AS price, i.card_seq AS cs, i.item_count AS qty, o.order_seq AS oseq" +
+          "  FROM custom_order o WITH(NOLOCK) JOIN custom_order_item i WITH(NOLOCK) ON i.order_seq = o.order_seq" +
+          " WHERE o.order_date >= @f AND o.order_date < @t AND o.status_seq >= 1" + bmCardCond +
+          " ORDER BY o.order_date"
+        );
+        r2.recordset.forEach(function (r) {
+          bmPush(bmBuyMap, "co" + r.oseq, {
+            channel: "청첩장주문", time: r.at || "", name: r.nm || "", phone: r.ph || "", uid: r.uid || "",
+            product: bmHasTarget ? bmNameOf(r.cs) + (r.qty ? " (" + r.qty + "장)" : "") : ("청첩장 " + (r.qty || "") + "장"),
+            price: r.price || 0, ref: "order " + r.oseq, test: false,
+            matched: bmMatch(r.ph, r.uid), pkey: bmPersonKey(r.ph, r.uid)
+          });
         });
 
-        // ── 명단 전체 전환 (홍보 상품과 무관) : 발송일 vs 전일 ──
+        // 2) 부가상품 주문 (이용권도 결제 자체는 이 테이블을 거친다)
+        var bmEtcSeqs = {};
+        var q3 = pool.request();
+        q3.input("f", sql.VarChar(10), bmDate); q3.input("t", sql.VarChar(10), bmTo);
+        var r3 = await q3.query(
+          "SELECT CONVERT(varchar(16), o.order_date, 120) AS at, o.member_id AS uid, o.order_hphone AS ph," +
+          "       o.order_name AS nm, o.settle_price AS price, i.card_seq AS cs, i.order_count AS qty, o.order_seq AS oseq" +
+          "  FROM CUSTOM_ETC_ORDER o WITH(NOLOCK) JOIN CUSTOM_ETC_ORDER_ITEM i WITH(NOLOCK) ON i.order_seq = o.order_seq" +
+          " WHERE o.order_date >= @f AND o.order_date < @t AND o.status_seq >= 1" + bmCardCond +
+          " ORDER BY o.order_date"
+        );
+        r3.recordset.forEach(function (r) {
+          bmEtcSeqs[r.oseq] = true;
+          bmPush(bmBuyMap, "eo" + r.oseq, {
+            channel: "부가상품", time: r.at || "", name: r.nm || "", phone: r.ph || "", uid: r.uid || "",
+            product: (bmHasTarget ? bmNameOf(r.cs) : "부가상품 " + r.cs) + (r.qty ? " (" + r.qty + "개)" : ""),
+            price: r.price || 0, ref: "order " + r.oseq, test: false,
+            matched: bmMatch(r.ph, r.uid), pkey: bmPersonKey(r.ph, r.uid)
+          });
+        });
+
+        // 3) 이용권 발급 — 부가상품 주문이 결제되면 발급되는 후속 기록이다.
+        //    같은 order_seq가 위에서 이미 잡혔으면 매출이 두 번 계산되므로 건너뛴다.
+        var q1 = pool.request();
+        q1.input("f", sql.VarChar(10), bmDate); q1.input("t", sql.VarChar(10), bmTo);
+        var r1 = await q1.query(
+          "SELECT CONVERT(varchar(16), v.Buy_DateTime, 120) AS at, v.Voucher_ID AS vid, v.Cust_Name AS nm," +
+          "       v.Cust_Phone AS ph, v.Paid_Price AS price, v.Status AS st, v.Order_Seq AS oseq," +
+          "       d.Product_Name AS pn, d.Card_Seq AS cs, u.UserId AS uid" +
+          "  FROM TB_Lounge_Voucher v WITH(NOLOCK)" +
+          "  LEFT JOIN TB_Lounge_Deal d WITH(NOLOCK) ON d.Deal_ID = v.Deal_ID" +
+          "  LEFT JOIN UserInfo u WITH(NOLOCK) ON u.MemberId = v.Member_UID" +
+          " WHERE v.Buy_DateTime >= @f AND v.Buy_DateTime < @t" +
+          (bmHasTarget ? " AND d.Card_Seq IN (" + bmSeqs.join(",") + ")" : "") +
+          " ORDER BY v.Buy_DateTime"
+        );
+        r1.recordset.forEach(function (r) {
+          if (r.oseq && bmEtcSeqs[r.oseq]) return; // 부가상품 주문으로 이미 집계됨
+          var nm = String(r.pn || "");
+          // 오픈 초기 내부 검증분(무료/[test]/시스템테스트)은 실적에서 분리한다.
+          var isTest = String(r.nm || "").indexOf("시스템테스트") === 0 || nm.toLowerCase().indexOf("[test]") >= 0 || !r.price;
+          bmPush(bmBuyMap, "lv" + r.vid, {
+            channel: "이용권", time: r.at || "", name: r.nm || "", phone: r.ph || "", uid: r.uid || "",
+            product: nm, price: r.price || 0, ref: r.st || "", test: isTest,
+            matched: !isTest && bmMatch(r.ph, r.uid), pkey: bmPersonKey(r.ph, r.uid)
+          });
+        });
+
+        // 4) 샘플신청 (무료 — 건수만)
+        var q4 = pool.request();
+        q4.input("f", sql.VarChar(10), bmDate); q4.input("t", sql.VarChar(10), bmTo);
+        var r4 = await q4.query(
+          "SELECT CONVERT(varchar(16), s.REQUEST_DATE, 120) AS at, s.sample_order_seq AS sseq, s.MEMBER_ID AS uid," +
+          "       s.MEMBER_NAME AS nm, s.MEMBER_HPHONE AS ph, i.CARD_SEQ AS cs" +
+          "  FROM CUSTOM_SAMPLE_ORDER s WITH(NOLOCK)" +
+          "  JOIN CUSTOM_SAMPLE_ORDER_ITEM i WITH(NOLOCK) ON i.SAMPLE_ORDER_SEQ = s.sample_order_seq" +
+          " WHERE s.REQUEST_DATE >= @f AND s.REQUEST_DATE < @t" + bmCardCondU +
+          " ORDER BY s.REQUEST_DATE"
+        );
+        r4.recordset.forEach(function (r) {
+          bmPush(bmSmpMap, "so" + r.sseq, {
+            channel: "샘플신청", time: r.at || "", name: r.nm || "", phone: r.ph || "", uid: r.uid || "",
+            product: bmHasTarget ? bmNameOf(r.cs) : "", price: 0, ref: "sample " + r.sseq, test: false,
+            matched: bmMatch(r.ph, r.uid), pkey: bmPersonKey(r.ph, r.uid)
+          });
+        });
+
+        function bmSortRows(map) {
+          return Object.keys(map).map(function (k) { return map[k]; })
+            .sort(function (a, b) { return String(a.time).localeCompare(String(b.time)); });
+        }
+        var bmBuyAll = bmSortRows(bmBuyMap), bmSmpAll = bmSortRows(bmSmpMap);
+        var bmBuyRows = bmBuyAll.filter(function (r) { return r.matched; });
+        var bmSmpRows = bmSmpAll.filter(function (r) { return r.matched; });
+        var bmBuyerSet = {}, bmSamplerSet = {}, bmBuyRev = 0;
+        bmBuyRows.forEach(function (r) { bmBuyerSet[r.pkey] = true; bmBuyRev += r.price || 0; });
+        bmSmpRows.forEach(function (r) { bmSamplerSet[r.pkey] = true; });
+        var bmSiteBuy = bmBuyAll.filter(function (r) { return !r.test; }).length;
+        var bmSiteBuyRev = bmBuyAll.filter(function (r) { return !r.test; })
+          .reduce(function (a, r) { return a + (r.price || 0); }, 0);
+
+        // ── 클릭 ──
+        // (1) 대행사 클릭 리포트 번호 목록 → 개인 단위 매칭 (클릭자 명단 제공 가능)
+        // (2) bit.ly 단축URL → Bitly 집계 (총 클릭수만, 누가 눌렀는지는 알 수 없음)
+        var bmClickMode = "none", bmClickCount = null, bmClickRows = [], bmClickNote = null, bmClickOffList = 0;
+        var bmClickPhones = Array.isArray(bmB.clickPhones) ? bmB.clickPhones : [];
+        if (bmClickPhones.length > 0) {
+          bmClickMode = "list";
+          var seenClick = {};
+          bmClickPhones.forEach(function (raw) {
+            var p = String(raw || "").replace(/[^0-9]/g, "");
+            if (!p || seenClick[p]) return;
+            seenClick[p] = true;
+            if (!bmPhones[p]) { bmClickOffList++; return; }   // 명단에 없는 번호(다른 발송분)는 분리
+            var per = bmPeopleByPhone[p] || { name: "", phone: p, uid: "" };
+            var pk = bmPersonKey(p, per.uid);
+            bmClickRows.push({ name: per.name, uid: per.uid, phone: per.phone,
+                               purchased: !!bmBuyerSet[pk], sampled: !!bmSamplerSet[pk] });
+          });
+          bmClickCount = bmClickRows.length;
+          if (bmClickOffList > 0) bmClickNote = "리포트 번호 중 " + bmClickOffList.toLocaleString() + "개는 이 명단(그룹)에 없어 제외했습니다.";
+        } else if (bmB.bitlyUrls && String(bmB.bitlyUrls).trim()) {
+          var bmBitToken = env.BITLY_TOKEN;
+          if (!bmBitToken) {
+            bmClickNote = "BITLY_TOKEN이 설정되지 않아 클릭수를 조회할 수 없습니다.";
+          } else {
+            var bmUrls = String(bmB.bitlyUrls).split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+            var https3 = require("https");
+            var bmTot = 0;
+            for (var bu = 0; bu < bmUrls.length; bu++) {
+              try {
+                var det = await fetchBitlyDetailJob(https3, bmBitToken, bmUrls[bu], bmDate + " 00:00:00");
+                bmTot += (det.detail && det.detail.total) || 0;
+              } catch (e) { /* 개별 URL 실패는 건너뛴다 */ }
+            }
+            bmClickMode = "bitly";
+            bmClickCount = bmTot;
+            bmClickNote = "Bitly 집계 클릭수입니다. 누가 눌렀는지는 알 수 없어 클릭자 명단은 제공되지 않습니다.";
+          }
+        }
+
+        // ── 명단 전체 전환 (홍보 상품 무관) : 발송일 vs 전일 ──
         // 홍보상품은 안 팔렸는데 샘플 리드만 늘어나는 패턴이 실제로 있었다(7/24 인생네컷).
         async function bmOverall(day) {
           var out = { orders: 0, revenue: 0, samples: 0 };
@@ -11106,7 +11337,7 @@ var server = http.createServer(async function (req, res) {
           oq.input("f", sql.VarChar(10), day); oq.input("t", sql.VarChar(10), nxt);
           var ors = await oq.query(
             "SELECT member_id AS uid, order_hphone AS ph, last_total_price AS price" +
-            "  FROM custom_order WITH(NOLOCK) WHERE order_date >= @f AND order_date < @t"
+            "  FROM custom_order WITH(NOLOCK) WHERE order_date >= @f AND order_date < @t AND status_seq >= 1"
           );
           ors.recordset.forEach(function (r) {
             if (bmMatch(r.ph, r.uid)) { out.orders++; out.revenue += r.price || 0; }
@@ -11133,7 +11364,7 @@ var server = http.createServer(async function (req, res) {
           var vrs = await vq.query(
             "SELECT CardSeq, CONVERT(varchar(10),[Date],23) AS d, SUM(Cnt) AS c" +
             "  FROM S2CardStats WITH(NOLOCK)" +
-            " WHERE CardSeq IN (" + bmIn + ") AND ASEQ = 2 AND [Date] >= @vf AND [Date] <= @vt" +
+            " WHERE CardSeq IN (" + bmSeqs.join(",") + ") AND ASEQ = 2 AND [Date] >= @vf AND [Date] <= @vt" +
             " GROUP BY CardSeq, CONVERT(varchar(10),[Date],23)"
           );
           var vAgg = {};
@@ -11161,15 +11392,16 @@ var server = http.createServer(async function (req, res) {
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({
           date: bmDate, rangeLabel: bmDate + " ~ " + bmNext + " (발송일 + D+1)",
-          sendCount: bmSendCount, listName: bmListName, warn: bmWarn,
+          sendCount: bmSendCount, listName: bmListName, warn: bmWarn, scopeNote: bmScopeNote,
           hasTarget: bmHasTarget, targetCount: bmSeqs.length,
-          promoMatched: bmPromoMatched, promoMatchedRev: bmPromoMatchedRev,
-          promoMatchedPeople: Object.keys(bmPeople).length,
-          promoSite: bmPromoSite, promoSiteRev: bmPromoSiteRev,
-          conversions: bmConv, views: bmViews, viewTotals: bmVT, viewsTruncated: bmViewsTrunc,
+          buyCount: bmBuyRows.length, buyerCount: Object.keys(bmBuyerSet).length, buyRevenue: bmBuyRev,
+          sampleCount: bmSmpRows.length, samplerCount: Object.keys(bmSamplerSet).length,
+          siteBuyCount: bmSiteBuy, siteBuyRevenue: bmSiteBuyRev,
+          clickMode: bmClickMode, clickCount: bmClickCount, clickNote: bmClickNote,
+          clickRows: bmClickRows, purchaseRows: bmBuyRows, sampleRows: bmSmpRows,
+          views: bmViews, viewTotals: bmVT, viewsTruncated: bmViewsTrunc,
           overall: { day: bmOverallDay, prev: bmOverallPrev },
-          scopeNote: bmScopeNote,
-          note: "전환 = 이용권(TB_Lounge_Voucher) / 청첩장주문(custom_order) / 부가상품(CUSTOM_ETC_ORDER) / 샘플신청(CUSTOM_SAMPLE_ORDER)"
+          note: "구매 = 이용권/청첩장주문/부가상품(status_seq>=1, 주문 단위) · 샘플 = CUSTOM_SAMPLE_ORDER"
             + " · 명단 매칭 = 연락처 또는 회원ID · 조회수 = S2CardStats ASEQ2(사이트 전체)"
             + (bmScopeNote ? " · " + bmScopeNote : "")
             + (bmListName ? " · 명단: " + bmListName : " · 명단 미선택")
