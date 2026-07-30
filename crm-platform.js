@@ -234,15 +234,16 @@ function saveRefuseList() {
 
 // ── 앱 설정 (캠페인 목적 등 필드값, 팀 공유) ─────────────
 // purposes: [{ name, conv }]
-// conv ∈ invitation(청첩장 결제) | sample(샘플 신청만) | sample_invitation(샘플+청첩장, 당일샘플) | returngift(답례품) | addon(부가상품) | review(리뷰 작성)
+// conv ∈ invitation(청첩장 결제) | sample(샘플 신청만) | sample_invitation(샘플+청첩장, 당일샘플) | returngift(답례품) | addon(부가상품) | voucher(이용권) | review(리뷰 작성)
 var SETTINGS_PATH = path.join(DATA_DIR, "app-settings.json");
-var VALID_CONV = ["invitation", "sample", "sample_invitation", "returngift", "addon", "review"];
+var VALID_CONV = ["invitation", "sample", "sample_invitation", "returngift", "addon", "voucher", "review"];
 var DEFAULT_PURPOSES = [
   { name: "당일 샘플 전환", conv: "sample_invitation" },
   { name: "샘플 전환", conv: "sample_invitation" },
   { name: "원주문 전환", conv: "invitation" },
   { name: "답례품 전환", conv: "returngift" },
   { name: "부가 상품 전환", conv: "addon" },
+  { name: "이용권 전환", conv: "voucher" },
   { name: "기타", conv: "sample_invitation" } // 기존 동작 보존: 기타=샘플+청첩장 집계
 ];
 var appSettings = { purposes: DEFAULT_PURPOSES.slice() };
@@ -269,6 +270,8 @@ function convTypeForPurpose(p) {
   }
   if (name.indexOf("리뷰") >= 0 || name.indexOf("후기") >= 0) return "review";
   if (name.indexOf("답례품") >= 0) return "returngift";
+  // 이용권(뷰티라운지 등 D05)은 '상품' 키워드에 먹히지 않도록 부가상품보다 먼저 판정한다.
+  if (name.indexOf("이용권") >= 0 || name.indexOf("라운지") >= 0 || name.indexOf("바우처") >= 0) return "voucher";
   if (name.indexOf("부가") >= 0 || name.indexOf("상품") >= 0) return "addon";
   if (name.indexOf("당일") >= 0 && name.indexOf("샘플") >= 0) return "sample_invitation";
   if (name.indexOf("샘플") >= 0) return "sample";
@@ -1477,6 +1480,41 @@ async function trackReturnGiftOrders(memberIds, startDate, endDate) {
   return results;
 }
 
+// 이용권(뷰티라운지 등) 구매 — S2_Card.Card_Div='D05'.
+// 청첩장/부가상품과 판매 경로가 다르다: 결제는 CUSTOM_ETC_ORDER를 타고 결제 완료 시 TB_Lounge_Voucher가 발급된다.
+// voucher 테이블을 함께 세면 같은 구매가 두 번 잡히므로 주문 테이블만 본다(2026-07-30 확인: custom_order에는 D05가 0건).
+// 미결제(status_seq=0)가 섞여 있어 status_seq>=1 필수 — 실제로 7/29 88,000원 건이 미결제였다.
+async function trackVoucherOrders(memberIds, startDate, endDate) {
+  if (memberIds.length === 0) return [];
+  var results = [];
+  var BATCH = 500;
+  for (var b = 0; b < memberIds.length; b += BATCH) {
+    var batch = memberIds.slice(b, b + BATCH);
+    var request = pool.request();
+    var paramNames = [];
+    for (var i = 0; i < batch.length; i++) {
+      paramNames.push("@vc" + b + "_" + i);
+      request.input("vc" + b + "_" + i, sql.VarChar(50), batch[i]);
+    }
+    request.input("startDate_vc" + b, sql.VarChar(30), startDate.replace("T", " "));
+    request.input("endDate_vc" + b, sql.VarChar(30), endDate.replace("T", " "));
+
+    var q = "SELECT eo.member_id AS MEMBER_ID, CONVERT(varchar(19), MIN(eo.order_date), 120) AS first_date_str, " +
+      "MIN(c.Card_Name) AS product_name " +
+      "FROM CUSTOM_ETC_ORDER eo WITH (NOLOCK) " +
+      "INNER JOIN CUSTOM_ETC_ORDER_ITEM eoi WITH (NOLOCK) ON eo.order_seq = eoi.order_seq " +
+      "INNER JOIN S2_Card c WITH (NOLOCK) ON eoi.card_seq = c.Card_Seq " +
+      "WHERE eo.member_id IN (" + paramNames.join(",") + ") " +
+      "AND eo.status_seq >= 1 " +
+      "AND eo.order_date >= @startDate_vc" + b + " AND eo.order_date < @endDate_vc" + b + " " +
+      "AND c.Card_Div = 'D05' " +
+      "GROUP BY eo.member_id";
+    var result = await request.query(q);
+    results = results.concat(result.recordset);
+  }
+  return results;
+}
+
 async function trackAdditionalProductOrders(memberIds, startDate, endDate) {
   if (memberIds.length === 0) return [];
   var results = [];
@@ -1556,9 +1594,12 @@ async function trackConversionRevenue(purpose, memberIds, startDate, endDate) {
     var addonCO = "SELECT 'c' src, co.order_seq oseq, co.settle_price amt FROM custom_order co WITH (NOLOCK) WHERE " + coWhere +
       " AND EXISTS (SELECT 1 FROM custom_order_item coi WITH (NOLOCK) INNER JOIN S2_Card c2 WITH (NOLOCK) ON coi.card_seq=c2.Card_Seq WHERE coi.order_seq=co.order_seq AND c2.Card_Div IN ('C29','C04','D02'))" +
       " AND NOT EXISTS (SELECT 1 FROM custom_order_item coi2 WITH (NOLOCK) INNER JOIN S2_Card c3 WITH (NOLOCK) ON coi2.card_seq=c3.Card_Seq WHERE coi2.order_seq=co.order_seq AND c3.Card_Div='A01')";
+    var voucherEO = "SELECT 'e' src, eo.order_seq oseq, eo.settle_price amt FROM CUSTOM_ETC_ORDER eo WITH (NOLOCK) WHERE " + eoWhere +
+      " AND EXISTS (SELECT 1 FROM CUSTOM_ETC_ORDER_ITEM eoi WITH (NOLOCK) INNER JOIN S2_Card c WITH (NOLOCK) ON eoi.card_seq=c.Card_Seq WHERE eoi.order_seq=eo.order_seq AND c.Card_Div='D05')";
     var parts;
     if (ctRev === "returngift") parts = [rgCO, rgEO];
     else if (ctRev === "addon") parts = [addonEO, addonCO, rgCO, rgEO];
+    else if (ctRev === "voucher") parts = [voucherEO];
     else parts = [invitationCO]; // invitation / sample_invitation(당일샘플): 청첩장 결제
     var q = "SELECT COALESCE(SUM(amt),0) AS total FROM (SELECT DISTINCT src, oseq, amt FROM (" + parts.join(" UNION ALL ") + ") u) d";
     var result = await request.query(q);
@@ -1586,6 +1627,8 @@ async function trackConversionInfo(purpose, memberIds, startDate, endDate) {
   } else if (ct === "addon") {
     add(await trackAdditionalProductOrders(memberIds, startDate, endDate));
     add(await trackReturnGiftOrders(memberIds, startDate, endDate));
+  } else if (ct === "voucher") {
+    add(await trackVoucherOrders(memberIds, startDate, endDate)); // 이용권(D05)만 — 부가상품과 섞지 않는다
   } else { // sample_invitation (샘플 전환·당일 샘플): 샘플 + 청첩장 결제 (각각 별도 집계도 반환)
     var sSet = {}, iSet = {};
     (await trackSampleOrders(memberIds, startDate, endDate)).forEach(function (r) { sSet[r.MEMBER_ID] = 1; set[r.MEMBER_ID] = 1; });
@@ -1961,9 +2004,11 @@ async function runBitlyAllJob(limitN) {
 // SB 스코프: 주문.member_id를 S2_UserInfo u ON u.uid=member_id AND u.site_div='SS' AND u.REFERER_SALES_GUBUN='SB'로 조인
 //   (site_div='SS'가 uid당 1행이라 중복제거 역할; 기존 고객추출 관례와 동일 — 745·758행 참고).
 // 이 무거운 조회는 자동실행하지 않고 [성과 조회] 버튼 클릭 시에만 백그라운드+폴링으로 실행한다.
-var PERF_WINDOWS = { invitation: 7, sample: 7, returngift: 21, addon: 21 }; // 목적별 귀속 윈도우(일) — 조정가능
+// 목적별 귀속 윈도우(일) — 조정가능.
+// voucher(이용권)는 11만~86만원대 고관여 상품이라 부가상품과 같은 21일로 둔다(2026-07-24 판매 개시라 실측 근거는 아직 없음).
+var PERF_WINDOWS = { invitation: 7, sample: 7, returngift: 21, addon: 21, voucher: 21 };
 var PERF_MAX_DAYS = 92; // from~to 최대 범위 캡(초과 시 잘라내고 경고)
-var PERF_TYPES = ["invitation", "sample", "returngift", "addon"];
+var PERF_TYPES = ["invitation", "sample", "returngift", "addon", "voucher"];
 
 function psYMD(s) { var p = (s || "").slice(0, 10).split("-").map(Number); return new Date(p[0], (p[1] || 1) - 1, p[2] || 1); }
 function psAddDays(s, n) {
@@ -2010,6 +2055,14 @@ async function psBuyersByDay(convType, fromDt, toDt) {
       "WHERE eo.status_seq>=1 AND c2.Card_Div='D01' " +
       "AND eo.order_date>=" + f + " AND eo.order_date<" + t +
       ") x GROUP BY member";
+  } else if (convType === "voucher") {
+    // 이용권(D05) — CUSTOM_ETC_ORDER 전용(custom_order에는 D05가 들어오지 않는다)
+    inner = "SELECT eo.member_id AS member, CONVERT(date, MIN(eo.order_date)) AS day " +
+      "FROM CUSTOM_ETC_ORDER eo WITH (NOLOCK) " +
+      "INNER JOIN CUSTOM_ETC_ORDER_ITEM eoi WITH (NOLOCK) ON eo.order_seq=eoi.order_seq " +
+      "INNER JOIN S2_Card c WITH (NOLOCK) ON eoi.card_seq=c.Card_Seq" + sbEo + " " +
+      "WHERE c.Card_Div='D05' AND eo.status_seq>=1 AND eo.order_date>=" + f + " AND eo.order_date<" + t + " " +
+      "GROUP BY eo.member_id";
   } else { // addon (부가상품만 — 답례품 미포함, 분자/분모 정의 일치)
     inner = "SELECT member, CONVERT(date, MIN(od)) AS day FROM (" +
       "SELECT eo.member_id AS member, eo.order_date AS od " +
@@ -2055,9 +2108,12 @@ function psRevenueSql(convType, useMemberIn, inClause, fp, tp) {
   var addonCO = "SELECT 'c' src, co.order_seq oseq, co.order_date od, co.settle_price amt FROM custom_order co WITH (NOLOCK)" + coJoin + " WHERE " + coWhere +
     " AND EXISTS (SELECT 1 FROM custom_order_item coi WITH (NOLOCK) INNER JOIN S2_Card c2 WITH (NOLOCK) ON coi.card_seq=c2.Card_Seq WHERE coi.order_seq=co.order_seq AND c2.Card_Div IN ('C29','C04','D02'))" +
     " AND NOT EXISTS (SELECT 1 FROM custom_order_item coi2 WITH (NOLOCK) INNER JOIN S2_Card c3 WITH (NOLOCK) ON coi2.card_seq=c3.Card_Seq WHERE coi2.order_seq=co.order_seq AND c3.Card_Div='A01')";
+  var voucherEO = "SELECT 'e' src, eo.order_seq oseq, eo.order_date od, eo.settle_price amt FROM CUSTOM_ETC_ORDER eo WITH (NOLOCK)" + eoJoin + " WHERE " + eoWhere +
+    " AND EXISTS (SELECT 1 FROM CUSTOM_ETC_ORDER_ITEM eoi WITH (NOLOCK) INNER JOIN S2_Card c WITH (NOLOCK) ON eoi.card_seq=c.Card_Seq WHERE eoi.order_seq=eo.order_seq AND c.Card_Div='D05')";
   var parts;
   if (convType === "returngift") parts = [rgCO, rgEO];
   else if (convType === "addon") parts = [addonEO, addonCO]; // 부가상품만(답례품 미포함) — 분모 buyers 정의와 일치
+  else if (convType === "voucher") parts = [voucherEO];
   else parts = [invitationCO]; // invitation
   return "SELECT CONVERT(varchar(10), d.od, 120) AS day, COALESCE(SUM(d.amt),0) AS rev FROM (SELECT DISTINCT src, oseq, od, amt FROM (" + parts.join(" UNION ALL ") + ") u) d GROUP BY CONVERT(varchar(10), d.od, 120)";
 }
@@ -2095,6 +2151,7 @@ function psTrackerFor(convType, memberIds, fromDt, toDt) {
   if (convType === "invitation") return trackInvitationOrders(memberIds, fromDt, toDt);
   if (convType === "sample") return trackSampleOrders(memberIds, fromDt, toDt);
   if (convType === "returngift") return trackReturnGiftOrders(memberIds, fromDt, toDt);
+  if (convType === "voucher") return trackVoucherOrders(memberIds, fromDt, toDt);
   return trackAdditionalProductOrders(memberIds, fromDt, toDt);
 }
 
@@ -2112,7 +2169,7 @@ async function computePerfSummary(from, to) {
   // ── 분자용: 캠페인 → 수신자 send-date 맵(convType별). extractionHistory가 비면 자연히 분자=0 ──
   var cdData = fs.existsSync(CAMPAIGN_DATA_PATH) ? JSON.parse(fs.readFileSync(CAMPAIGN_DATA_PATH, "utf8")) : { campaigns: [] };
   var camps = cdData.campaigns || [];
-  var sendMap = { invitation: {}, sample: {}, returngift: {}, addon: {} };
+  var sendMap = { invitation: {}, sample: {}, returngift: {}, addon: {}, voucher: {} };
   camps.forEach(function (c) {
     if (!c || c.type === "취소" || !c.extraction_id || !c.send_date || !c.purpose) return;
     var sd = c.send_date.slice(0, 10);
@@ -2129,7 +2186,7 @@ async function computePerfSummary(from, to) {
     });
   });
 
-  var byType = { invitation: {}, sample: {}, returngift: {}, addon: {} };
+  var byType = { invitation: {}, sample: {}, returngift: {}, addon: {}, voucher: {} };
   function cell(tt, day) { var m = byType[tt]; if (!m[day]) m[day] = { total: { buyers: 0, revenue: 0 }, lms: { buyers: 0, revenue: 0 } }; return m[day]; }
 
   for (var ti = 0; ti < PERF_TYPES.length; ti++) {
@@ -3598,7 +3655,7 @@ function generateHTML() {
           <div><label style="font-size:12px;color:#666">채널</label><select id="edChannel" class="filter-input" style="width:100%"><option>LMS</option><option>알림톡</option><option>SMS</option></select></div>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
-          <div><label style="font-size:12px;color:#666">캠페인 목적</label><select id="edPurpose" class="filter-input" style="width:100%"><option value="">-- 선택 --</option><option>당일 샘플 전환</option><option>샘플 전환</option><option>원주문 전환</option><option>답례품 전환</option><option>부가 상품 전환</option><option>기타</option></select></div>
+          <div><label style="font-size:12px;color:#666">캠페인 목적</label><select id="edPurpose" class="filter-input" style="width:100%"><option value="">-- 선택 --</option><option>당일 샘플 전환</option><option>샘플 전환</option><option>원주문 전환</option><option>답례품 전환</option><option>부가 상품 전환</option><option>이용권 전환</option><option>기타</option></select></div>
           <div><label style="font-size:12px;color:#666">기간 조건</label><input type="text" id="edTarget" class="filter-input" style="width:100%"></div>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:10px">
@@ -3692,7 +3749,7 @@ function generateHTML() {
         .tr-metric-toggle button.active{background:#1a73e8;color:#fff;border-color:#1a73e8}
         .tr-purpose-section{margin-bottom:24px;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden}
         .tr-purpose-header{padding:10px 16px;color:#fff;font-size:13px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
-        .tr-h-sample{background:#1a73e8}.tr-h-order{background:#137333}.tr-h-gift{background:#e37400}.tr-h-addon{background:#7b1fa2}.tr-h-etc{background:#64748b}
+        .tr-h-sample{background:#1a73e8}.tr-h-order{background:#137333}.tr-h-gift{background:#e37400}.tr-h-addon{background:#7b1fa2}.tr-h-voucher{background:#c2185b}.tr-h-etc{background:#64748b}
         .tr-purpose-header .tr-purpose-stat{font-size:11px;font-weight:400;opacity:.92}
         .tr-table{width:100%;border-collapse:collapse;font-size:11px;background:#fff}
         .tr-table th{padding:6px 8px;text-align:center;border-bottom:1px solid #e2e8f0;background:#f8fafc;font-size:10px;color:#475569;white-space:nowrap}
@@ -3967,7 +4024,7 @@ function generateHTML() {
         .ab-group:last-child{border-bottom:none}
         .ab-group-title{font-size:13px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px}
         .ab-purpose-tag{padding:2px 8px;border-radius:4px;font-size:11px;color:#fff;font-weight:600}
-        .ab-purpose-sample{background:#1a73e8}.ab-purpose-order{background:#137333}.ab-purpose-gift{background:#e37400}.ab-purpose-addon{background:#7b1fa2}
+        .ab-purpose-sample{background:#1a73e8}.ab-purpose-order{background:#137333}.ab-purpose-gift{background:#e37400}.ab-purpose-addon{background:#7b1fa2}.ab-purpose-voucher{background:#c2185b}
         .ab-seg{font-size:11px;color:#666}
         .ab-table{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
         .ab-table th{padding:6px 8px;text-align:center;background:#f8f9fa;border:1px solid #e8e8e8;font-size:11px;color:#666;white-space:nowrap}
@@ -3998,7 +4055,7 @@ function generateHTML() {
             <div><label style="font-size:12px;color:#666">채널</label><select id="cmChannel" class="filter-input" style="width:100%"><option>LMS</option><option>알림톡</option><option>SMS</option></select></div>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
-            <div><label style="font-size:12px;color:#666">캠페인 목적</label><select id="cmPurpose" class="filter-input" style="width:100%"><option value="">-- 선택 --</option><option>당일 샘플 전환</option><option>샘플 전환</option><option>원주문 전환</option><option>답례품 전환</option><option>부가 상품 전환</option><option>기타</option></select></div>
+            <div><label style="font-size:12px;color:#666">캠페인 목적</label><select id="cmPurpose" class="filter-input" style="width:100%"><option value="">-- 선택 --</option><option>당일 샘플 전환</option><option>샘플 전환</option><option>원주문 전환</option><option>답례품 전환</option><option>부가 상품 전환</option><option>이용권 전환</option><option>기타</option></select></div>
             <div><label style="font-size:12px;color:#666">기간 조건</label><input type="text" id="cmTarget" class="filter-input" style="width:100%" placeholder="예: 가입 후 3일~5일"></div>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:10px">
@@ -5027,7 +5084,7 @@ function dpSegOf(t){
   if(has('주문자')) return '기존 주문자';
   return '기타';
 }
-var DP_PUR=['당일 샘플 전환','원주문 전환','부가 상품 전환','답례품 전환','기타'];
+var DP_PUR=['당일 샘플 전환','원주문 전환','부가 상품 전환','답례품 전환','이용권 전환','기타'];
 // 세그먼트 정렬 순위 — 라벨이 동적(샘플 N일차/예식일 D-N)이라 고정 배열 대신 순위 함수를 쓴다
 function dpSegRank(s){
   if(s==='가입자') return 100;
@@ -5805,8 +5862,11 @@ var PERF_METRICS=[
  {label:'샘플 주문',type:'sample',kind:'buyers'},
  {label:'답례품 구매',type:'returngift',kind:'buyers'},
  {label:'부가상품 주문',type:'addon',kind:'buyers'},
+ {label:'이용권 구매',type:'voucher',kind:'buyers'},
  {label:'매출액',type:null,kind:'rev'}
 ];
+// 서버 PERF_TYPES와 같은 순서를 유지할 것 — byType 키 집합이다.
+var PS_TYPES=['invitation','sample','returngift','addon','voucher'];
 function perfDS(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
 function perfYMD(s){var p=s.split('-').map(Number);return new Date(p[0],p[1]-1,p[2]);}
 function perfMD(d){return (d.getMonth()+1)+'/'+d.getDate();}
@@ -5860,12 +5920,12 @@ async function startPerfSummary(){
 function perfBuildColumns(mode){
  var bt=(perfResult&&perfResult.byType)||{};
  var set={};
- ['invitation','sample','returngift','addon'].forEach(function(tt){var m=bt[tt]||{};Object.keys(m).forEach(function(d){set[d]=1;});});
+ PS_TYPES.forEach(function(tt){var m=bt[tt]||{};Object.keys(m).forEach(function(d){set[d]=1;});});
  var days=Object.keys(set).sort();
  var dayAgg={};
  days.forEach(function(d){
    var agg={types:{},revTot:0,revLms:0};
-   ['invitation','sample','returngift','addon'].forEach(function(tt){
+   PS_TYPES.forEach(function(tt){
      var c=(bt[tt]||{})[d];
      agg.types[tt]={tot:c?c.total.buyers:0,lms:c?c.lms.buyers:0};
      if(c){agg.revTot+=c.total.revenue||0;agg.revLms+=c.lms.revenue||0;}
@@ -5878,9 +5938,9 @@ function perfBuildColumns(mode){
  var wk={}, order=[];
  days.forEach(function(d){
    var dt=perfYMD(d);var s=new Date(dt);s.setDate(dt.getDate()-dt.getDay());var wkey=perfDS(s);
-   if(!wk[wkey]){wk[wkey]={types:{invitation:{tot:0,lms:0},sample:{tot:0,lms:0},returngift:{tot:0,lms:0},addon:{tot:0,lms:0}},revTot:0,revLms:0};order.push(wkey);}
+   if(!wk[wkey]){var _t={};PS_TYPES.forEach(function(tt){_t[tt]={tot:0,lms:0};});wk[wkey]={types:_t,revTot:0,revLms:0};order.push(wkey);}
    var a=wk[wkey], da=dayAgg[d];
-   ['invitation','sample','returngift','addon'].forEach(function(tt){a.types[tt].tot+=da.types[tt].tot;a.types[tt].lms+=da.types[tt].lms;});
+   PS_TYPES.forEach(function(tt){a.types[tt].tot+=da.types[tt].tot;a.types[tt].lms+=da.types[tt].lms;});
    a.revTot+=da.revTot;a.revLms+=da.revLms;
  });
  order.sort();
@@ -6048,8 +6108,8 @@ function renderTrend(){
     cell.c2d += cv['2d']?(cv['2d'].count||0):0;
   });
   // 렌더
-  var PURPOSE_ORDER = ['당일 샘플 전환','원주문 전환','답례품 전환','부가 상품 전환'];
-  var hMap = {'당일 샘플 전환':'tr-h-sample','원주문 전환':'tr-h-order','답례품 전환':'tr-h-gift','부가 상품 전환':'tr-h-addon'};
+  var PURPOSE_ORDER = ['당일 샘플 전환','원주문 전환','답례품 전환','부가 상품 전환','이용권 전환'];
+  var hMap = {'당일 샘플 전환':'tr-h-sample','원주문 전환':'tr-h-order','답례품 전환':'tr-h-gift','부가 상품 전환':'tr-h-addon','이용권 전환':'tr-h-voucher'};
   // 대상자별 모드일 때 헤더 색상 (세그먼트별로 다르게)
   var hMapTarget = {'당일 샘플 발송':'tr-h-sample','샘플 2일 경과':'tr-h-sample','샘플 3~5일 경과':'tr-h-sample','샘플 7일 경과':'tr-h-sample','샘플 7~14일 경과':'tr-h-sample','가입 후 3일':'tr-h-order','금주 예식자':'tr-h-gift','지난주 예식자':'tr-h-gift','예식 D-60':'tr-h-addon','예식 D-30':'tr-h-addon','예식 D+30':'tr-h-addon','예식 1년 도래':'tr-h-etc','회원가입 최근 3개월':'tr-h-order','26.01월 주문자':'tr-h-etc','26.02월 주문자':'tr-h-etc'};
   // 그룹 순서: 목적별이면 PURPOSE_ORDER, 대상자별이면 총 발송수 내림차순
@@ -6213,7 +6273,7 @@ function buildInlineCharts(query, camps) {
   // 소구 패턴 / 목적별
   if (q.indexOf('소구')>=0 || q.indexOf('패턴')>=0 || q.indexOf('목적')>=0) {
     var pm={};camps.forEach(function(c){var p=c.purpose||'기타';if(!pm[p])pm[p]={s:0,cv:0,n:0};pm[p].s+=c.send_count||0;pm[p].n++;var cv=c.conversions||{};pm[p].cv+=cv['2d']?parseInt(cv['2d'].count)||0:0;});
-    var pColors={'당일 샘플 전환':'#3b82f6','원주문 전환':'#059669','답례품 전환':'#f59e0b','부가 상품 전환':'#8b5cf6'};
+    var pColors={'당일 샘플 전환':'#3b82f6','원주문 전환':'#059669','답례품 전환':'#f59e0b','부가 상품 전환':'#8b5cf6','이용권 전환':'#ec4899'};
     var sorted=Object.keys(pm).sort(function(a,b){var ra=pm[a].s>0?pm[a].cv/pm[a].s:0;var rb=pm[b].s>0?pm[b].cv/pm[b].s:0;return rb-ra;});
     var maxP=0;sorted.forEach(function(p){var r=pm[p].s>0?pm[p].cv/pm[p].s*100:0;if(r>maxP)maxP=r;});
     html += '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;margin-bottom:10px"><div style="font-size:11px;font-weight:700;color:#475569;margin-bottom:6px">목적별 전환률 비교</div>';
@@ -7837,14 +7897,14 @@ function _cmMsgGripDblClick(e){
 
 // ═══ 앱 설정: 캠페인 목적 관리 (서버 공유) ═══
 var APP_PURPOSES = [];
-var CONV_LABELS = { invitation:'청첩장 결제', sample:'샘플 신청', sample_invitation:'샘플 신청 + 청첩장 결제', returngift:'답례품', addon:'부가상품', review:'리뷰 작성' };
-var CONV_ORDER = ['invitation','sample','sample_invitation','returngift','addon','review'];
+var CONV_LABELS = { invitation:'청첩장 결제', sample:'샘플 신청', sample_invitation:'샘플 신청 + 청첩장 결제', returngift:'답례품', addon:'부가상품', voucher:'이용권(뷰티라운지)', review:'리뷰 작성' };
+var CONV_ORDER = ['invitation','sample','sample_invitation','returngift','addon','voucher','review'];
 async function loadAppSettings(){
   try{
     var res=await fetch('api/settings'); var d=await res.json();
     if(d && Array.isArray(d.purposes) && d.purposes.length) APP_PURPOSES=d.purposes;
   }catch(e){}
-  if(!APP_PURPOSES.length) APP_PURPOSES=[{name:'당일 샘플 전환',conv:'invitation'},{name:'샘플 전환',conv:'invitation'},{name:'원주문 전환',conv:'invitation'},{name:'답례품 전환',conv:'returngift'},{name:'부가 상품 전환',conv:'addon'},{name:'기타',conv:'invitation'}];
+  if(!APP_PURPOSES.length) APP_PURPOSES=[{name:'당일 샘플 전환',conv:'invitation'},{name:'샘플 전환',conv:'invitation'},{name:'원주문 전환',conv:'invitation'},{name:'답례품 전환',conv:'returngift'},{name:'부가 상품 전환',conv:'addon'},{name:'이용권 전환',conv:'voucher'},{name:'기타',conv:'invitation'}];
   applyPurposeDropdowns();
 }
 function purposeOptionsHtml(sel){
@@ -9731,7 +9791,7 @@ function renderAiDash(campaigns) {
     pm[p].sent+=c.send_count||0;
     var cv=c.conversions||{};pm[p].conv+=cv['2d']?parseInt(cv['2d'].count)||0:0;
   });
-  var pColors={'당일 샘플 전환':'#1a73e8','원주문 전환':'#137333','답례품 전환':'#e37400','부가 상품 전환':'#7b1fa2'};
+  var pColors={'당일 샘플 전환':'#1a73e8','원주문 전환':'#137333','답례품 전환':'#e37400','부가 상품 전환':'#7b1fa2','이용권 전환':'#c2185b'};
   var maxPRate=0;Object.values(pm).forEach(function(v){var r=v.sent>0?v.conv/v.sent*100:0;if(r>maxPRate)maxPRate=r;});
   if(maxPRate===0)maxPRate=1;
   var pHtml='';
@@ -9783,7 +9843,7 @@ async function loadAbTest() {
 
 function renderAbTest(data) {
   var weekNums = Object.keys(data.weekAbMap).map(Number).sort(function(a,b){return b-a;});
-  var pClasses = {"당일 샘플 전환":"sample","원주문 전환":"order","답례품 전환":"gift","부가 상품 전환":"addon"};
+  var pClasses = {"당일 샘플 전환":"sample","원주문 전환":"order","답례품 전환":"gift","부가 상품 전환":"addon","이용권 전환":"voucher"};
   var html = '';
 
   weekNums.forEach(function(wn) {
