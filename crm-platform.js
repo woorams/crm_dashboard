@@ -1754,7 +1754,21 @@ async function runAutoConvAllJob() {
 //   자격증명은 GOOGLE_APPLICATION_CREDENTIALS(파일경로) / GA4_SA_JSON(원문 JSON) / 앱 폴더의 barunsoncard-*.json 중 하나.
 //   해당 서비스계정을 GA4 속성에 '뷰어'로 추가해야 한다.
 var GA4_SCOPE = "https://www.googleapis.com/auth/analytics.readonly";
+// 바른손카드 GA4 속성 ID(숫자). 측정 ID G-W61QP8FFT2 는 웹 태그용이라 Data API에서 쓸 수 없다.
+// 비밀값이 아니고 속성이 하나뿐이라 기본값으로 둔다 — 환경변수(GA4_PROPERTY_ID)가 있으면 그쪽이 우선.
+var GA4_DEFAULT_PROPERTY_ID = "265717923";
 var ga4AuthCache = null;
+
+// 서비스계정 이메일(client_email)을 꺼낸다. GA4 속성에 '뷰어'로 추가할 대상을 화면에 안내하기 위함.
+function ga4ClientEmail() {
+  try {
+    var c = ga4Credentials();
+    if (!c) return null;
+    if (c.credentials) return c.credentials.client_email || null;
+    if (c.keyFile) return (JSON.parse(fs.readFileSync(c.keyFile, "utf-8")) || {}).client_email || null;
+  } catch (e) { /* noop */ }
+  return null;
+}
 
 function ga4Credentials() {
   // 1) 원문 JSON 환경변수 (컨테이너에 파일을 넣기 어려울 때)
@@ -1790,7 +1804,7 @@ async function ga4Client() {
 // from~to(둘 다 포함) 기간의 브랜드메시지 유입 세션을 utm_content별로 집계한다.
 async function fetchGa4Clicks(from, to, opt) {
   opt = opt || {};
-  var propId = String(opt.propertyId || env.GA4_PROPERTY_ID || process.env.GA4_PROPERTY_ID || "").replace(/[^0-9]/g, "");
+  var propId = String(opt.propertyId || env.GA4_PROPERTY_ID || process.env.GA4_PROPERTY_ID || GA4_DEFAULT_PROPERTY_ID || "").replace(/[^0-9]/g, "");
   if (!propId) throw new Error("GA4_PROPERTY_ID가 설정되지 않았습니다 (GA4 관리 > 속성 설정의 숫자 속성 ID)");
   var client = await ga4Client();
   var exprs = [];
@@ -8846,7 +8860,11 @@ async function bmGa4Check() {
     var j = await res.json();
     if (!j.ok) {
       el.style.color = '#c5221f';
-      el.textContent = '✗ ' + j.error + (j.propertyId ? '' : ' (GA4_PROPERTY_ID 미설정)');
+      var hint = '';
+      if (!j.propertyId) hint = ' (GA4_PROPERTY_ID 미설정)';
+      else if (!j.credential) hint = ' — Docker Manager 환경변수에 GA4_SA_JSON(서비스계정 키 JSON 원문)을 추가해야 합니다';
+      else if (j.clientEmail) hint = ' — GA4 관리 > 속성 액세스 관리에서 ' + j.clientEmail + ' 을(를) 뷰어로 추가했는지 확인하세요';
+      el.textContent = '✗ ' + j.error + hint;
       return;
     }
     el.style.color = '#137333';
@@ -11120,7 +11138,8 @@ var server = http.createServer(async function (req, res) {
       var gcTo = parsedUrl.searchParams.get("to") || gcFrom;
       var gcCred = null;
       try { gcCred = ga4Credentials(); } catch (e) { /* 아래에서 메시지로 처리 */ }
-      var gcProp = String(env.GA4_PROPERTY_ID || process.env.GA4_PROPERTY_ID || "").replace(/[^0-9]/g, "");
+      var gcProp = String(env.GA4_PROPERTY_ID || process.env.GA4_PROPERTY_ID || GA4_DEFAULT_PROPERTY_ID || "").replace(/[^0-9]/g, "");
+      var gcEmail = ga4ClientEmail();
       try {
         var gcRes = await fetchGa4Clicks(gcFrom, gcTo, {
           source: parsedUrl.searchParams.get("source") || "kakao",
@@ -11128,11 +11147,12 @@ var server = http.createServer(async function (req, res) {
         });
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: true, propertyId: gcProp, credential: gcCred ? (gcCred.keyFile || "GA4_SA_JSON") : null,
-                                 from: gcFrom, to: gcTo, sessions: gcRes.sessions, byContent: gcRes.byContent }));
+                                 clientEmail: gcEmail, from: gcFrom, to: gcTo, sessions: gcRes.sessions, byContent: gcRes.byContent }));
       } catch (gcErr) {
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ ok: false, propertyId: gcProp || null,
-                                 credential: gcCred ? (gcCred.keyFile || "GA4_SA_JSON") : null, error: gcErr.message }));
+                                 credential: gcCred ? (gcCred.keyFile || "GA4_SA_JSON") : null,
+                                 clientEmail: gcEmail, error: gcErr.message }));
       }
       return;
     }
