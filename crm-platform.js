@@ -1606,12 +1606,45 @@ function buildConvObj(info, sendCount) {
 // ── 전환수 자동 조회(일괄) 백그라운드 작업 ──
 // 308개 캠페인 × 4쿼리를 동기 처리하면 수분이 걸려 리버스 프록시가 504(HTML)를 반환하고
 // 프론트의 res.json()이 "Unexpected token <"로 터진다. 그래서 즉시 응답 + 백그라운드 실행 + 폴링으로 바꾼다.
+// ── 추출 명단 N분할 (A/B/C/D) ─────────────────────────────
+// split 값: 'all' | 'A'~'D' | 'A3'~'C3' | 'A4'~'D4'
+//   접미사 없는 'A'/'B'는 2분할(기존 데이터 호환). 접미사는 총 그룹 수.
+// 경계는 앞 그룹부터 ceil로 채운다 → 2분할이면 기존 ceil(n/2)와 정확히 같은 결과.
+// 다운로드(파일 분할)와 전환추적(성과 집계)이 같은 함수를 써야 그룹이 어긋나지 않는다.
+function parseSplit(split) {
+  if (!split || split === "all") return null;
+  var s = String(split).trim().toUpperCase();
+  var letter = s.charAt(0);
+  if ("ABCD".indexOf(letter) < 0) return null;
+  var groups = s.length > 1 ? parseInt(s.slice(1), 10) : 2;
+  if (!(groups >= 2 && groups <= 4)) groups = 2;
+  var index = letter.charCodeAt(0) - 65;
+  if (index >= groups) return null;
+  return { letter: letter, index: index, groups: groups };
+}
+
+function splitRange(total, index, groups) {
+  var start = 0;
+  for (var i = 0; i < index; i++) start += Math.ceil((total - start) / (groups - i));
+  var end = start + Math.ceil((total - start) / (groups - index));
+  return { start: Math.min(start, total), end: Math.min(end, total) };
+}
+
+function applySplitList(list, split) {
+  var p = parseSplit(split);
+  if (!p) return list;
+  var r = splitRange(list.length, p.index, p.groups);
+  return list.slice(r.start, r.end);
+}
+
+function splitLabel(split) {
+  var p = parseSplit(split);
+  if (!p) return "전체";
+  return p.letter + "그룹" + (p.groups > 2 ? "(" + p.groups + "분할)" : "");
+}
+
 function acApplySplit(recipients, split) {
-  if (!split || split === "all") return recipients;
-  var half = Math.ceil(recipients.length / 2);
-  if (split === "A") return recipients.slice(0, half);
-  if (split === "B") return recipients.slice(half);
-  return recipients;
+  return applySplitList(recipients, split);
 }
 
 // 캠페인 1건 처리. 반환: { updated:0|1, attempted:0|1, error:null|Error }
@@ -3177,6 +3210,7 @@ function generateHTML() {
     <button class="tab-btn active" data-tab="extraction" onclick="switchTab('extraction')">고객 추출</button>
     <button class="tab-btn" data-tab="crm" onclick="switchTab('crm')" style="display:none">전환 추적</button>
     <button class="tab-btn" data-tab="sample-inducement" onclick="switchTab('sample-inducement')" style="display:none">샘플 유도</button>
+    <button class="tab-btn" data-tab="brandmsg" onclick="switchTab('brandmsg');bmInit()">브랜드메시지 성과</button>
     <button class="tab-btn" data-tab="refuse" onclick="switchTab('refuse')">수신거부</button>
     <button class="tab-btn" data-tab="settings" onclick="switchTab('settings');renderSettingsPurposes()">설정</button>
   </div>
@@ -3458,10 +3492,23 @@ function generateHTML() {
             <select id="edExtractionId" class="filter-input" style="flex:1;min-width:0" onchange="updateEdSplitInfo()">
               <option value="">-- 추출이력 선택 (선택사항) --</option>
             </select>
-            <select id="edExtractionSplit" class="filter-input" style="width:140px;flex-shrink:0" onchange="updateEdSplitInfo()">
+            <select id="edExtractionSplit" class="filter-input" style="width:150px;flex-shrink:0" onchange="updateEdSplitInfo()">
               <option value="all">전체</option>
-              <option value="A">A그룹 (앞 50%)</option>
-              <option value="B">B그룹 (뒤 50%)</option>
+              <optgroup label="2분할 (A/B)">
+                <option value="A">A그룹 (1/2)</option>
+                <option value="B">B그룹 (2/2)</option>
+              </optgroup>
+              <optgroup label="3분할 (A/B/C)">
+                <option value="A3">A그룹 (1/3)</option>
+                <option value="B3">B그룹 (2/3)</option>
+                <option value="C3">C그룹 (3/3)</option>
+              </optgroup>
+              <optgroup label="4분할 (A/B/C/D)">
+                <option value="A4">A그룹 (1/4)</option>
+                <option value="B4">B그룹 (2/4)</option>
+                <option value="C4">C그룹 (3/4)</option>
+                <option value="D4">D그룹 (4/4)</option>
+              </optgroup>
             </select>
           </div>
           <div id="edSplitInfo" style="font-size:11px;color:#7b1fa2;margin-top:3px"></div>
@@ -3847,8 +3894,21 @@ function generateHTML() {
               </select>
               <select id="cmExtractionSplit" class="filter-input" style="width:160px" onchange="updateExtractionSplitInfo()">
                 <option value="all">전체</option>
-                <option value="A">A그룹 (앞 50%)</option>
-                <option value="B">B그룹 (뒤 50%)</option>
+                <optgroup label="2분할 (A/B)">
+                  <option value="A">A그룹 (1/2)</option>
+                  <option value="B">B그룹 (2/2)</option>
+                </optgroup>
+                <optgroup label="3분할 (A/B/C)">
+                  <option value="A3">A그룹 (1/3)</option>
+                  <option value="B3">B그룹 (2/3)</option>
+                  <option value="C3">C그룹 (3/3)</option>
+                </optgroup>
+                <optgroup label="4분할 (A/B/C/D)">
+                  <option value="A4">A그룹 (1/4)</option>
+                  <option value="B4">B그룹 (2/4)</option>
+                  <option value="C4">C그룹 (3/4)</option>
+                  <option value="D4">D그룹 (4/4)</option>
+                </optgroup>
               </select>
             </div>
             <div id="cmSplitInfo" style="font-size:11px;color:#7b1fa2;margin-top:3px"></div>
@@ -4350,7 +4410,15 @@ function generateHTML() {
         <button class="btn btn-primary" id="btnQuery" onclick="doQuery()">조회하기</button>
         <button class="btn btn-success" id="btnDownload" onclick="doDownload()" disabled>엑셀 다운로드</button>
         <button class="btn" id="btnAdminDownload" onclick="doAdminDownload()" disabled style="background:#7c3aed;color:#fff;">어드민 발송양식 다운로드</button>
-        <label style="margin-left:6px;font-size:13px;color:#374151;display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" id="extAbSplit"> A/B 분할 (A·B 2파일 자동 생성)</label>
+        <label style="margin-left:6px;font-size:13px;color:#374151;display:inline-flex;align-items:center;gap:5px">그룹 분할
+          <select id="extSplitCount" style="padding:5px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:13px">
+            <option value="1">분할 없음 (1파일)</option>
+            <option value="2">A/B 2분할 (2파일)</option>
+            <option value="3">A/B/C 3분할 (3파일)</option>
+            <option value="4">A/B/C/D 4분할 (4파일)</option>
+          </select>
+          <span style="font-size:12px;color:#888">앞에서부터 균등 분할 · 그룹별 파일 자동 생성</span>
+        </label>
       </div>
     </div>
 
@@ -4362,6 +4430,87 @@ function generateHTML() {
   <!-- ═══════════════════════════════════════════ -->
   <!-- 탭: 080 수신거부 명단 관리                    -->
   <!-- ═══════════════════════════════════════════ -->
+  <!-- ═══ 카카오 브랜드메시지 성과 ═══ -->
+  <div id="tab-brandmsg" class="tab-content">
+
+    <div class="panel">
+      <div class="panel-title">📨 카카오 브랜드메시지 성과</div>
+      <p style="font-size:13px;color:#6b7280;margin:6px 0 12px;line-height:1.7;">
+        발송 명단과 <b>홍보한 상품의 실제 구매</b>를 대조합니다. 판매 채널을 가리지 않고
+        <b>이용권 · 청첩장/카드 주문 · 부가상품 주문 · 샘플신청</b> 네 곳을 모두 조회합니다.
+        홍보 대상은 기획전(MdSeq) 또는 개별 상품번호로 지정합니다.<br>
+        <span style="color:#b45309">※ 상품 조회수는 사이트 전체 기준입니다 — 회원별 조회 로그가 2023-06 이후 DB에 남지 않아 "명단 중 몇 명이 봤는지"는 산출할 수 없습니다. 명단 단위로 확정되는 지표는 <b>구매·샘플신청</b>입니다. UTM 기준 유입은 GA4에서만 조회됩니다.</span>
+      </p>
+      <div class="filter-row">
+        <div class="filter-label">발송일</div>
+        <div class="filter-body">
+          <input type="date" id="bmDate" style="padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;">
+          <span style="font-size:12px;color:#888;">발송일 당일 + 다음날(D+1)까지의 전환을 집계합니다</span>
+        </div>
+      </div>
+      <div class="filter-row">
+        <div class="filter-label">발송 명단</div>
+        <div class="filter-body" style="flex-direction:column;align-items:flex-start;gap:6px">
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <select id="bmExtractionId" style="padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;min-width:340px">
+              <option value="">-- 추출이력 선택 --</option>
+            </select>
+            <select id="bmSplit" style="padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px">
+              <option value="all">전체</option>
+              <optgroup label="2분할 (A/B)">
+                <option value="A">A그룹 (1/2)</option>
+                <option value="B">B그룹 (2/2)</option>
+              </optgroup>
+              <optgroup label="3분할 (A/B/C)">
+                <option value="A3">A그룹 (1/3)</option>
+                <option value="B3">B그룹 (2/3)</option>
+                <option value="C3">C그룹 (3/3)</option>
+              </optgroup>
+              <optgroup label="4분할 (A/B/C/D)">
+                <option value="A4">A그룹 (1/4)</option>
+                <option value="B4">B그룹 (2/4)</option>
+                <option value="C4">C그룹 (3/4)</option>
+                <option value="D4">D그룹 (4/4)</option>
+              </optgroup>
+            </select>
+            <span id="bmListInfo" style="font-size:12px;color:#7c3aed;font-weight:600"></span>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;font-size:12px;color:#888">
+            명단이 목록에 없으면 발송양식 업로드:
+            <input type="file" id="bmFile" accept=".xlsx,.xls" style="font-size:12px">
+            <button class="btn" style="padding:4px 10px;font-size:12px" onclick="bmUpload()">업로드</button>
+            <span id="bmUploadInfo" style="font-size:12px"></span>
+          </div>
+        </div>
+      </div>
+      <div class="filter-row">
+        <div class="filter-label">홍보 대상</div>
+        <div class="filter-body" style="flex-direction:column;align-items:flex-start;gap:6px">
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <select id="bmMdPick" style="padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;min-width:400px">
+              <option value="">-- 기획전 선택 (CardList?MdSeq= 값) --</option>
+            </select>
+            <button class="btn" style="padding:5px 12px;font-size:12px" onclick="bmAddMd()">추가</button>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <span style="font-size:12px;color:#666;width:78px">기획전 MdSeq</span>
+            <input type="text" id="bmMdSeqs" placeholder="예: 247,248,249,250" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;width:300px">
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <span style="font-size:12px;color:#666;width:78px">상품번호</span>
+            <input type="text" id="bmCardSeqs" placeholder="예: 42230,42234,42248 (기획전이 없는 개별 상품 홍보 시)" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;width:420px">
+          </div>
+          <span style="font-size:12px;color:#888">둘 다 비워두면 홍보 상품 집계는 건너뛰고 명단 전체 전환만 보여줍니다.</span>
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="bmBtn" onclick="bmLoad()">성과 조회</button>
+      </div>
+    </div>
+
+    <div id="bmResult"><div class="empty-state"><p>발송일 · 명단 · 홍보 대상을 지정한 후 [성과 조회]를 눌러주세요</p></div></div>
+  </div>
+
   <div id="tab-refuse" class="tab-content">
 
     <div class="panel" style="border:1px solid #93c5fd;background:#eff6ff;">
@@ -7329,6 +7478,33 @@ function deleteMessage(i){if(!confirm('삭제하시겠습니까?'))return;savedM
 function clearCompose(){_cloneSrc=null;['cmPurpose','cmSendDate','cmTarget','cmDepth1','cmDepth2','cmDepth3','cmDepth4','cmIncentive','cmSendCount','cmMessage','cmExtractionId'].forEach(function(id){document.getElementById(id).value='';});document.getElementById('cmExtractionSplit').value='all';document.getElementById('cmSplitInfo').textContent='';}
 
 var _extractionCounts={};
+// 서버 parseSplit/splitRange와 동일한 규칙 (A~D, 접미사 없으면 2분할).
+// 두 쪽 계산이 어긋나면 다운로드 파일과 성과 집계 대상이 달라지므로 로직을 그대로 옮겨 둔다.
+function _parseSplit(split){
+  if(!split||split==='all')return null;
+  var s=String(split).trim().toUpperCase();
+  var letter=s.charAt(0);
+  if('ABCD'.indexOf(letter)<0)return null;
+  var groups=s.length>1?(parseInt(s.slice(1),10)||2):2;
+  if(!(groups>=2&&groups<=4))groups=2;
+  var index=letter.charCodeAt(0)-65;
+  if(index>=groups)return null;
+  return {letter:letter,index:index,groups:groups};
+}
+function _splitRange(total,index,groups){
+  var start=0;
+  for(var i=0;i<index;i++)start+=Math.ceil((total-start)/(groups-i));
+  var end=start+Math.ceil((total-start)/(groups-index));
+  return {start:Math.min(start,total),end:Math.min(end,total)};
+}
+// 분할 안내문 + 해당 그룹 인원 반환
+function _splitInfoText(count,split){
+  var p=_parseSplit(split);
+  if(!p)return {target:count,text:'전체 '+count+'명 대상 전환 추적'};
+  var r=_splitRange(count,p.index,p.groups);
+  var n=r.end-r.start;
+  return {target:n,text:p.letter+'그룹('+p.groups+'분할): '+n+'명 ('+(r.start+1)+'~'+r.end+'번) 대상 전환 추적'};
+}
 function updateExtractionSplitInfo(){
   var sel=document.getElementById('cmExtractionId');
   var split=document.getElementById('cmExtractionSplit').value;
@@ -7336,11 +7512,9 @@ function updateExtractionSplitInfo(){
   var sendCountInput=document.getElementById('cmSendCount');
   if(!sel.value){info.textContent='';return;}
   var count=_extractionCounts[sel.value]||0;
-  var targetCount=count;
-  if(split==='all'){info.textContent='전체 '+count+'명 대상 전환 추적';}
-  else if(split==='A'){targetCount=Math.ceil(count/2);info.textContent='A그룹: 앞 '+targetCount+'명 (1~'+targetCount+'번) 대상 전환 추적';}
-  else{var halfA=Math.ceil(count/2);targetCount=count-halfA;info.textContent='B그룹: 뒤 '+targetCount+'명 ('+(halfA+1)+'~'+count+'번) 대상 전환 추적';}
-  sendCountInput.value=targetCount;
+  var r=_splitInfoText(count,split);
+  info.textContent=r.text;
+  sendCountInput.value=r.target;
 }
 
 async function populateExtractionHistory(){
@@ -7924,11 +8098,9 @@ function updateEdSplitInfo(){
   var scInput=document.getElementById('edSendCount');
   if(!sel.value){info.textContent='';return;}
   var count=_extractionCounts[sel.value]||0;
-  var target=count;
-  if(split==='all'){info.textContent='전체 '+count+'명 대상 전환 추적';}
-  else if(split==='A'){target=Math.ceil(count/2);info.textContent='A그룹: 앞 '+target+'명 대상 전환 추적';}
-  else{var hA=Math.ceil(count/2);target=count-hA;info.textContent='B그룹: 뒤 '+target+'명 대상 전환 추적';}
-  scInput.value=target;
+  var r=_splitInfoText(count,split);
+  info.textContent=r.text;
+  scInput.value=r.target;
 }
 
 // 수기 엑셀 업로드 → 추출이력 생성/연동 (기존 발송양식 동일 양식)
@@ -8362,16 +8534,16 @@ function renderExtResult(data) {
 
 async function doAdminDownload() {
   var btnA = document.getElementById('btnAdminDownload');
-  var abEl = document.getElementById('extAbSplit');
-  var abSplit = abEl && abEl.checked;
+  var scEl = document.getElementById('extSplitCount');
+  var splitCount = scEl ? (parseInt(scEl.value, 10) || 1) : 1;
   btnA.disabled = true; btnA.textContent = '다운로드 중...';
   try {
     var filters = getFilters();
     filters.campaignName = document.getElementById('extCampaignName').value || '';
     var base = filters.campaignName || new Date().toISOString().slice(0,10);
-    var groups = abSplit ? ['A','B'] : [null];
+    var groups = splitCount > 1 ? 'ABCD'.slice(0, splitCount).split('') : [null];
     for (var gi = 0; gi < groups.length; gi++) {
-      var f = Object.assign({}, filters, { abGroup: groups[gi] });
+      var f = Object.assign({}, filters, { abGroup: groups[gi], abGroupCount: splitCount });
       var resp = await fetch('api/admin-download', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(f) });
       if (!resp.ok) throw new Error((await resp.json()).error || resp.statusText);
       var blob = await resp.blob();
@@ -8386,6 +8558,218 @@ async function doAdminDownload() {
 }
 
 function toggleSql() { document.getElementById('sqlBox').classList.toggle('hidden'); }
+
+// ═══ 카카오 브랜드메시지 성과 ═══
+// 홍보 대상(기획전 MdSeq / 상품번호)을 지정하면 판매 채널 4곳을 모두 조회해 명단과 대조한다.
+var _bmCounts = {};
+function bmInit() {
+  var d = document.getElementById('bmDate');
+  if (d && !d.value) {
+    var y = new Date(Date.now() - 86400000); // 기본값: 어제(전일 발송분 확인이 가장 잦다)
+    d.value = y.getFullYear() + '-' + String(y.getMonth()+1).padStart(2,'0') + '-' + String(y.getDate()).padStart(2,'0');
+  }
+  bmPopulate();
+}
+async function bmPopulate() {
+  var sel = document.getElementById('bmExtractionId');
+  if (!sel || sel.dataset.loaded === '1') return;
+  sel.dataset.loaded = '1';
+  try {
+    var res = await fetch('api/extraction-history');
+    var list = await res.json();
+    list.sort(function(a,b){ return (b.createdAt||'').localeCompare(a.createdAt||''); });
+    list.forEach(function(h) {
+      _bmCounts[h.id] = h.count;
+      var o = document.createElement('option');
+      o.value = h.id;
+      o.textContent = h.campaignName + ' (' + h.count.toLocaleString() + '명, ' + (h.createdAt||'').slice(0,10) + ')';
+      sel.appendChild(o);
+    });
+    sel.onchange = bmUpdateInfo;
+    document.getElementById('bmSplit').onchange = bmUpdateInfo;
+  } catch (e) { /* 목록 실패해도 업로드 경로로 사용 가능 */ }
+  try {
+    var mres = await fetch('api/md-choices');
+    var mds = await mres.json();
+    var msel = document.getElementById('bmMdPick');
+    mds.forEach(function(m) {
+      var o = document.createElement('option');
+      o.value = m.mdseq;
+      o.textContent = 'MD' + m.mdseq + ' · ' + m.label + ' (상품 ' + m.cnt + ')';
+      msel.appendChild(o);
+    });
+  } catch (e) { /* 기획전 목록 실패 시 MdSeq 직접 입력 사용 */ }
+}
+function bmAddMd() {
+  var v = document.getElementById('bmMdPick').value;
+  if (!v) return;
+  var el = document.getElementById('bmMdSeqs');
+  var cur = el.value.split(',').map(function(s){return s.trim();}).filter(Boolean);
+  if (cur.indexOf(v) < 0) cur.push(v);
+  el.value = cur.join(',');
+}
+function bmUpdateInfo() {
+  var sel = document.getElementById('bmExtractionId');
+  var info = document.getElementById('bmListInfo');
+  if (!sel.value) { info.textContent = ''; return; }
+  var cnt = _bmCounts[sel.value] || 0;
+  var r = _splitInfoText(cnt, document.getElementById('bmSplit').value);
+  info.textContent = '대상 ' + r.target.toLocaleString() + '명';
+}
+async function bmUpload() {
+  var fi = document.getElementById('bmFile');
+  var el = document.getElementById('bmUploadInfo');
+  if (!fi || !fi.files || !fi.files[0]) { alert('엑셀 파일을 선택하세요.'); return; }
+  var file = fi.files[0];
+  el.style.color = '#666'; el.textContent = '업로드 중...';
+  try {
+    var dataUrl = await new Promise(function(resolve, reject) {
+      var fr = new FileReader();
+      fr.onload = function(){ resolve(fr.result); };
+      fr.onerror = function(){ reject(new Error('파일 읽기 실패')); };
+      fr.readAsDataURL(file);
+    });
+    var parts = String(dataUrl).split(',');
+    var res = await fetch('api/extraction-history/upload', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ filename: file.name, dataBase64: parts.length>1?parts[1]:'', campaignName: file.name }) });
+    var data = await res.json();
+    if (!data.ok) throw new Error(data.error || '업로드 실패');
+    var sel = document.getElementById('bmExtractionId');
+    var o = document.createElement('option');
+    o.value = data.id; o.textContent = data.campaignName + ' (' + data.count.toLocaleString() + '명)';
+    sel.appendChild(o); sel.value = String(data.id);
+    _bmCounts[data.id] = data.count;
+    bmUpdateInfo();
+    el.style.color = '#137333'; el.textContent = '✓ ' + data.count.toLocaleString() + '명 등록';
+  } catch (e) { el.style.color = '#c5221f'; el.textContent = '✗ ' + e.message; }
+}
+function _bmNums(id) {
+  return document.getElementById(id).value.split(',').map(function(s){ return parseInt(s.trim(), 10); })
+    .filter(function(n){ return n > 0; });
+}
+async function bmLoad() {
+  var btn = document.getElementById('bmBtn');
+  var area = document.getElementById('bmResult');
+  var date = document.getElementById('bmDate').value;
+  if (!date) { alert('발송일을 선택하세요.'); return; }
+  btn.disabled = true; btn.textContent = '조회 중...';
+  area.innerHTML = '<div class="empty-state"><p>조회 중... (판매 채널 4곳 + 조회수 집계)</p></div>';
+  try {
+    var res = await fetch('api/brandmsg-perf', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ date: date, extractionId: document.getElementById('bmExtractionId').value || null,
+                             split: document.getElementById('bmSplit').value,
+                             mdSeqs: _bmNums('bmMdSeqs'), cardSeqs: _bmNums('bmCardSeqs') }) });
+    var d = await res.json();
+    if (d.error) throw new Error(d.error);
+    bmRender(d);
+  } catch (e) {
+    area.innerHTML = '<div class="warning">조회 실패: ' + escHtml(e.message) + '</div>';
+  } finally { btn.disabled = false; btn.textContent = '성과 조회'; }
+}
+function bmKpi(label, value, color, sub) {
+  return '<div style="background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:12px 14px">' +
+    '<div style="font-size:11px;color:#6b7280;margin-bottom:4px">' + label + '</div>' +
+    '<div style="font-size:20px;font-weight:700;color:' + (color||'#111827') + '">' + value + '</div>' +
+    (sub ? '<div style="font-size:11px;color:#9ca3af;margin-top:2px">' + sub + '</div>' : '') + '</div>';
+}
+function bmRender(d) {
+  var won = function(n){ return (n||0).toLocaleString() + '원'; };
+  var html = '';
+  if (d.warn) html += '<div class="warning">' + escHtml(d.warn) + '</div>';
+
+  html += '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:12px">';
+  html += bmKpi('발송 대상', d.sendCount ? d.sendCount.toLocaleString() + '명' : '명단 미선택', '#7c3aed', escHtml(d.listName || ''));
+  if (d.hasTarget) {
+    html += bmKpi('홍보상품 전환(명단)', d.promoMatched + '건', d.promoMatched > 0 ? '#059669' : '#9ca3af', d.promoMatchedPeople + '명');
+    html += bmKpi('홍보상품 매출(명단)', won(d.promoMatchedRev), '#059669');
+    html += bmKpi('전환률', d.sendCount ? (d.promoMatchedPeople / d.sendCount * 100).toFixed(2) + '%' : '-', '#2563eb');
+    html += bmKpi('사이트 전체 홍보상품', d.promoSite + '건', '#111827', won(d.promoSiteRev));
+  } else {
+    html += bmKpi('홍보 대상', '미지정', '#9ca3af', '기획전/상품번호 입력 시 집계');
+    html += bmKpi('명단 주문(발송일)', d.overall.day.orders + '건', '#059669', won(d.overall.day.revenue));
+    html += bmKpi('명단 샘플신청(발송일)', d.overall.day.samples + '건', '#2563eb');
+    html += bmKpi('대상 상품 수', '0');
+  }
+  html += '</div>';
+
+  // 명단 전체 전환 (홍보 상품과 무관) — 7/24 인생네컷처럼 "홍보상품은 안 팔렸지만 샘플이 늘어난" 케이스를 놓치지 않으려면 필요하다.
+  if (d.overall) {
+    var o = d.overall, cmp = function(a, b) {
+      if (!b) return '';
+      var diff = b > 0 ? ((a - b) / b * 100) : null;
+      if (diff === null) return '';
+      var c = diff > 5 ? '#059669' : (diff < -5 ? '#c5221f' : '#6b7280');
+      return ' <span style="color:' + c + ';font-weight:700">(' + (diff >= 0 ? '+' : '') + diff.toFixed(0) + '%)</span>';
+    };
+    html += '<div class="panel" style="padding:12px 14px;margin-bottom:12px">' +
+      '<div style="font-size:11px;font-weight:700;color:#475569;margin-bottom:6px">명단 전체 전환 (홍보 상품 무관 · 발송일 vs 전일)</div>' +
+      '<div style="font-size:13px;color:#374151;line-height:1.8">' +
+      '청첩장 주문 <b>' + o.day.orders + '건</b>' + cmp(o.day.orders, o.prev.orders) +
+      ' <span style="color:#9ca3af">(전일 ' + o.prev.orders + '건)</span> · 매출 <b>' + won(o.day.revenue) + '</b>' +
+      cmp(o.day.revenue, o.prev.revenue) + '<br>' +
+      '샘플신청 <b>' + o.day.samples + '건</b>' + cmp(o.day.samples, o.prev.samples) +
+      ' <span style="color:#9ca3af">(전일 ' + o.prev.samples + '건)</span>' +
+      (d.sendCount ? ' · 명단 대비 주문 ' + (o.day.orders / d.sendCount * 100).toFixed(2) + '% / 샘플 ' + (o.day.samples / d.sendCount * 100).toFixed(2) + '%' : '') +
+      '</div></div>';
+  }
+
+  if (d.hasTarget && d.viewTotals) {
+    var vt = d.viewTotals;
+    var lift = vt.prevComparable > 0 ? ((vt.dayComparable - vt.prevComparable) / vt.prevComparable * 100) : null;
+    var liftTxt = lift === null ? '비교 불가' : (lift >= 0 ? '+' : '') + lift.toFixed(0) + '%';
+    var liftColor = lift === null ? '#6b7280' : (lift > 5 ? '#059669' : (lift < -5 ? '#c5221f' : '#6b7280'));
+    html += '<div class="panel" style="padding:12px 14px;margin-bottom:12px">' +
+      '<span style="font-size:13px;color:#374151">홍보상품 상세조회 발송일 <b>' + vt.day.toLocaleString() + '</b>회 ' +
+      '(전일 ' + vt.prev.toLocaleString() + '회, 익일 ' + vt.next.toLocaleString() + '회) &nbsp;·&nbsp; ' +
+      '양일 공통 판매 상품만 비교하면 <b style="color:' + liftColor + '">' + liftTxt + '</b> ' +
+      '<span style="color:#9ca3af">(' + vt.prevComparable.toLocaleString() + ' → ' + vt.dayComparable.toLocaleString() + ')</span></span></div>';
+  }
+
+  if (d.hasTarget) {
+    html += '<div class="panel"><div class="panel-title">홍보상품 전환 내역 (' + escHtml(d.rangeLabel) + ')' +
+      ' <span style="font-size:11px;font-weight:400;color:#9ca3af">대상 상품 ' + d.targetCount + '개</span></div>';
+    if (!d.conversions || d.conversions.length === 0) {
+      html += '<div class="empty-state"><p>해당 기간 홍보 상품의 구매/신청이 없습니다</p></div>';
+    } else {
+      html += '<div class="table-wrap"><table class="ext-table"><thead><tr><th>채널</th><th>시각</th><th>이름</th><th>회원ID</th><th>연락처</th><th style="text-align:left">상품</th><th>금액</th><th>명단</th></tr></thead><tbody>';
+      d.conversions.forEach(function(c) {
+        var tag = c.matched
+          ? '<span style="background:#059669;color:#fff;padding:1px 6px;border-radius:4px;font-size:11px">발송대상</span>'
+          : '<span style="color:#9ca3af;font-size:11px">미발송</span>';
+        if (c.test) tag += ' <span style="color:#b45309;font-size:11px">테스트</span>';
+        var chColor = { '이용권':'#db2777', '청첩장주문':'#2563eb', '부가상품':'#7c3aed', '샘플신청':'#059669' }[c.channel] || '#6b7280';
+        html += '<tr' + (c.matched ? ' style="background:#ecfdf5"' : (c.test ? ' style="color:#9ca3af"' : '')) + '>' +
+          '<td><span style="color:' + chColor + ';font-weight:700;font-size:11px">' + escHtml(c.channel) + '</span></td>' +
+          '<td>' + escHtml(c.time) + '</td><td>' + escHtml(c.name||'-') + '</td><td>' + escHtml(c.uid||'-') + '</td>' +
+          '<td>' + escHtml(c.phone||'-') + '</td><td style="text-align:left">' + escHtml(c.product||'-') + '</td>' +
+          '<td style="text-align:right">' + won(c.price) + '</td><td>' + tag + '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div>';
+
+    html += '<div class="panel"><div class="panel-title">홍보상품 상세조회수 <span style="font-size:11px;font-weight:400;color:#9ca3af">(사이트 전체 · 명단 한정 아님' + (d.viewsTruncated ? ' · 조회 상위 ' + d.views.length + '개만 표시' : '') + ')</span></div>';
+    if (!d.views || d.views.length === 0) {
+      html += '<div class="empty-state"><p>조회수 데이터가 없습니다</p></div>';
+    } else {
+      html += '<div class="table-wrap"><table class="ext-table"><thead><tr><th style="text-align:left">상품</th><th>가격</th><th>구분</th><th>전일</th><th>발송일</th><th>익일</th><th>증감</th></tr></thead><tbody>';
+      d.views.forEach(function(v) {
+        var diff = v.isNew ? null : v.day - v.prev;
+        var diffTxt = v.isNew ? '<span style="color:#7c3aed;font-size:11px">발송일 신규</span>'
+          : (diff > 0 ? '<span style="color:#059669">+' + diff + '</span>' : (diff < 0 ? '<span style="color:#c5221f">' + diff + '</span>' : '0'));
+        html += '<tr><td style="text-align:left">' + escHtml(v.name) + '</td>' +
+          '<td style="text-align:right">' + won(v.price) + '</td><td style="font-size:11px">' + escHtml(v.cats||'-') + '</td>' +
+          '<td>' + (v.isNew ? '-' : v.prev) + '</td><td style="font-weight:700">' + v.day + '</td><td>' + v.next + '</td>' +
+          '<td>' + diffTxt + '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div>';
+  }
+
+  html += '<div style="font-size:11px;color:#9ca3af;padding:4px 2px">' + escHtml(d.note || '') + '</div>';
+  document.getElementById('bmResult').innerHTML = html;
+}
 
 // ═══ 080 수신거부 명단 ═══
 function _abToB64(buf) {
@@ -9146,7 +9530,8 @@ function renderAbTest(data) {
           if (otherRate > 0) badge = '<span class="ab-winner-badge">WIN ' + (maxRate / otherRate).toFixed(1) + 'x</span>';
         }
         testsHtml += '<tr class="' + cls + '">';
-        testsHtml += '<td style="font-weight:700">' + s.split + '</td>';
+        var spP = _parseSplit(s.split);
+        testsHtml += '<td style="font-weight:700">' + (spP ? spP.letter + (spP.groups > 2 ? '<span style="font-weight:400;color:#999;font-size:10px"> /' + spP.groups + '</span>' : '') : escHtml(s.split)) + '</td>';
         testsHtml += '<td style="text-align:left;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escHtml(s.incentive) + '">' + escHtml(s.incentive) + '</td>';
         testsHtml += '<td>' + s.sent.toLocaleString() + '</td>';
         testsHtml += '<td>' + s.clk.toLocaleString() + '</td>';
@@ -9893,17 +10278,19 @@ var server = http.createServer(async function (req, res) {
       var adminResult = await executeQuery(adminFilters);
       var adminCampName = adminFilters.campaignName || ("추출_" + new Date().toISOString().slice(0, 10));
       var adminAllRows = adminResult.rows;
-      // A/B 분할: 전체 추출 기준 앞/뒤 절반 (applySplit과 동일한 ceil 로직 → 전환추적과 일치)
+      // N분할(2~4): 전체 추출 기준 앞에서부터 순서대로 나눈다.
+      // applySplitList를 그대로 쓰므로 전환추적/뷰티라운지 성과와 그룹 경계가 항상 일치한다.
       var adminAbGroup = adminFilters.abGroup;
+      var adminGroupCount = parseInt(adminFilters.abGroupCount, 10) || 2;
+      var adminSplitKey = adminAbGroup ? adminAbGroup + (adminGroupCount > 2 ? String(adminGroupCount) : "") : "";
       var adminFileRows = adminAllRows;
       var adminNameSuffix = "";
-      if (adminAbGroup === "A" || adminAbGroup === "B") {
-        var adminHalf = Math.ceil(adminAllRows.length / 2);
-        adminFileRows = adminAbGroup === "A" ? adminAllRows.slice(0, adminHalf) : adminAllRows.slice(adminHalf);
+      if (parseSplit(adminSplitKey)) {
+        adminFileRows = applySplitList(adminAllRows, adminSplitKey);
         adminNameSuffix = " (" + adminAbGroup + "그룹)";
       }
-      // 추출 이력 저장: 전체 기준 1회만 (단일 다운로드 또는 A그룹 호출 시 저장, B그룹 호출 시 중복 방지)
-      if (adminAllRows.length > 0 && adminAbGroup !== "B") {
+      // 추출 이력 저장: 전체 기준 1회만 (단일 다운로드 또는 A그룹 호출 시 저장, B~D 호출 시 중복 방지)
+      if (adminAllRows.length > 0 && (!adminAbGroup || adminAbGroup === "A")) {
         addExtractionRecord(adminCampName, adminAllRows);
       }
       var adminBuf = buildAdminExcel(adminFileRows, adminCampName + adminNameSuffix);
@@ -10067,13 +10454,9 @@ var server = http.createServer(async function (req, res) {
       return;
     }
 
-    // AB 분할 헬퍼: recipients 배열에서 split에 따라 부분 추출
+    // AB 분할 헬퍼: recipients 배열에서 split에 따라 부분 추출 (A/B/C/D — applySplitList 위임)
     function applySplit(recipients, split) {
-      if (!split || split === "all") return recipients;
-      var half = Math.ceil(recipients.length / 2);
-      if (split === "A") return recipients.slice(0, half);
-      if (split === "B") return recipients.slice(half);
-      return recipients;
+      return applySplitList(recipients, split);
     }
 
     // 전환수 자동 조회 (추출이력 기반)
@@ -10380,6 +10763,328 @@ var server = http.createServer(async function (req, res) {
         console.log("[추출이력 업로드 에러]", upErr.message);
         res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ error: "엑셀 파싱 실패: " + upErr.message }));
+      }
+      return;
+    }
+
+    // ── 기획전(MDChoice) 목록 — 브랜드메시지 홍보 대상 지정용 ──
+    if (pathname === "/api/md-choices" && req.method === "GET") {
+      try {
+        if (!pool) pool = await sql.connect(dbConfig);
+        var mcRs = await pool.request().query(
+          "SELECT m.MDSEQ, m.SiteCode, m.Cate1, m.Cate2, m.Cate3," +
+          "       (SELECT COUNT(*) FROM MDChoiceItem i WITH(NOLOCK) WHERE i.MDSEQ = m.MDSEQ) AS cnt" +
+          "  FROM MDChoice m WITH(NOLOCK) WHERE m.Status = 1 ORDER BY m.MDSEQ DESC"
+        );
+        var mcList = mcRs.recordset.map(function (r) {
+          var parts = [r.Cate1, r.Cate2, r.Cate3].filter(function (x) { return x && String(x).trim(); });
+          return { mdseq: r.MDSEQ, site: r.SiteCode, label: "[" + r.SiteCode + "] " + parts.join(" / "), cnt: r.cnt };
+        });
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify(mcList));
+      } catch (mcErr) {
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: mcErr.message }));
+      }
+      return;
+    }
+
+    // ── 카카오 브랜드메시지 성과 ──
+    // 홍보 대상(기획전 MdSeq / 개별 상품번호)의 구매를 판매 채널 4곳에서 모두 찾아 발송 명단과 대조한다.
+    // 채널이 나뉘는 이유: 상품 종류마다 주문 테이블이 다르다.
+    //   이용권(뷰티라운지, Card_Div=D05) → TB_Lounge_Voucher   ※ custom_order에는 안 남는다
+    //   청첩장/카드(A01 등)             → custom_order + custom_order_item
+    //   부가상품                        → CUSTOM_ETC_ORDER + CUSTOM_ETC_ORDER_ITEM
+    //   샘플신청                        → CUSTOM_SAMPLE_ORDER + CUSTOM_SAMPLE_ORDER_ITEM
+    // 회원별 조회 로그(S5_TodayViewItems)는 2023-06 이후 죽어서 조회수는 S2CardStats(상품×일자 집계)뿐이다.
+    if (pathname === "/api/brandmsg-perf" && req.method === "POST") {
+      try {
+        var bmB = await parseBody(req);
+        var bmDate = String(bmB.date || "").slice(0, 10);
+        if (bmDate.length !== 10) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ error: "발송일을 지정해 주세요 (YYYY-MM-DD)" }));
+          return;
+        }
+        if (!pool) pool = await sql.connect(dbConfig);
+        var bmWarn = null;
+
+        // 발송 명단 → 전화번호/회원ID 집합
+        var bmPhones = {}, bmUids = {}, bmSendCount = 0, bmListName = "";
+        if (bmB.extractionId) {
+          var bmRec = null;
+          for (var bmi = 0; bmi < extractionHistory.length; bmi++) {
+            if (String(extractionHistory[bmi].id) === String(bmB.extractionId)) { bmRec = extractionHistory[bmi]; break; }
+          }
+          if (!bmRec) {
+            res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ error: "추출이력을 찾을 수 없습니다" }));
+            return;
+          }
+          var bmList = applySplitList(bmRec.recipients || [], bmB.split);
+          bmSendCount = bmList.length;
+          bmListName = bmRec.campaignName + " / " + splitLabel(bmB.split);
+          for (var bmj = 0; bmj < bmList.length; bmj++) {
+            var bmp = String(bmList[bmj].phone || "").replace(/[^0-9]/g, "");
+            if (bmp) bmPhones[bmp] = true;
+            var bmu = String(bmList[bmj].uid || "").trim().toLowerCase();
+            if (bmu) bmUids[bmu] = true;
+          }
+        }
+        function bmMatch(phone, uid) {
+          var p = String(phone || "").replace(/[^0-9]/g, "");
+          var u = String(uid || "").trim().toLowerCase();
+          return (!!p && !!bmPhones[p]) || (!!u && !!bmUids[u]);
+        }
+
+        // 홍보 대상 상품 = 기획전(MdSeq) 소속 상품 ∪ 직접 지정한 상품번호
+        var bmMdSeqs = (Array.isArray(bmB.mdSeqs) ? bmB.mdSeqs : []).map(Number).filter(function (n) { return n > 0; });
+        var bmCardSet = {}, bmCats = {};
+        (Array.isArray(bmB.cardSeqs) ? bmB.cardSeqs : []).map(Number).filter(function (n) { return n > 0; })
+          .forEach(function (n) { bmCardSet[n] = true; });
+        if (bmMdSeqs.length > 0) {
+          var bmMdRs = await pool.request().query(
+            "SELECT i.CardSeq, m.Cate1, m.Cate2, m.Cate3 FROM MDChoiceItem i WITH(NOLOCK)" +
+            "  JOIN MDChoice m WITH(NOLOCK) ON m.MDSEQ = i.MDSEQ" +
+            " WHERE i.MDSEQ IN (" + bmMdSeqs.join(",") + ")"
+          );
+          bmMdRs.recordset.forEach(function (r) {
+            bmCardSet[r.CardSeq] = true;
+            // 카테고리 라벨은 '전체'처럼 뭉뚱그린 값보다 구체적인 쪽을 남긴다.
+            var c = [r.Cate3, r.Cate2].filter(function (x) { return x && String(x).trim() && String(x).trim() !== "전체"; })[0];
+            if (c && !bmCats[r.CardSeq]) bmCats[r.CardSeq] = c;
+          });
+        }
+        // 이용권(뷰티라운지)은 기획전에 '노출되는 카드'와 '실제 결제되는 하위 카드'가 다르다.
+        // (예: 노출 42282 [고센 뷰티] 1:1 퍼스널 스타일링 ↔ 결제 42283 퍼스널 웨딩 컨설팅 상품(60분))
+        // 노출 카드만 보면 실결제를 통째로 놓치므로, 대상에 D05(이용권)가 하나라도 있으면
+        // 판매 등록된 이용권 딜 전체를 대상에 포함시킨다. 상품명을 표에 그대로 보여주므로 검증 가능하다.
+        var bmScopeNote = null;
+        if (Object.keys(bmCardSet).length > 0) {
+          var bmD05Rs = await pool.request().query(
+            "SELECT COUNT(*) AS n FROM S2_Card WITH(NOLOCK)" +
+            " WHERE Card_Div = 'D05' AND Card_Seq IN (" + Object.keys(bmCardSet).map(Number).join(",") + ")"
+          );
+          if ((bmD05Rs.recordset[0] || {}).n > 0) {
+            var bmDealRs2 = await pool.request().query("SELECT DISTINCT Card_Seq FROM TB_Lounge_Deal WITH(NOLOCK)");
+            var bmAdded = 0;
+            bmDealRs2.recordset.forEach(function (r) {
+              if (r.Card_Seq && !bmCardSet[r.Card_Seq]) { bmCardSet[r.Card_Seq] = true; bmAdded++; }
+            });
+            if (bmAdded > 0) bmScopeNote = "이용권 홍보로 판단해 판매용 하위상품 " + bmAdded + "개를 대상에 포함했습니다(노출 카드와 결제 카드가 다름).";
+          }
+        }
+
+        var bmSeqs = Object.keys(bmCardSet).map(Number);
+        var BM_MAX_CARDS = 2000;
+        if (bmSeqs.length > BM_MAX_CARDS) {
+          bmWarn = "홍보 대상 상품이 " + bmSeqs.length.toLocaleString() + "개로 너무 많아 앞 " + BM_MAX_CARDS +
+                   "개만 집계했습니다. 기획전 대신 실제 홍보한 상품번호를 지정하면 정확해집니다.";
+          bmSeqs = bmSeqs.slice(0, BM_MAX_CARDS);
+        }
+        var bmHasTarget = bmSeqs.length > 0;
+        var bmIn = bmHasTarget ? bmSeqs.join(",") : "";
+
+        var bmNext = addDay(bmDate);
+        var bmTo = addDay(bmNext);
+        var bmPrev = null;
+        (function () {
+          var p = bmDate.split("-").map(Number);
+          var dt = new Date(p[0], p[1] - 1, p[2] - 1);
+          bmPrev = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
+        })();
+
+        // 상품명 사전 (이용권 딜명 우선, 없으면 카드명)
+        var bmNames = {};
+        if (bmHasTarget) {
+          var bmNmRs = await pool.request().query(
+            "SELECT c.Card_Seq AS seq, c.Card_Name AS nm, c.Card_Price AS pp, c.Card_Div AS dv," +
+            "       (SELECT MAX(d.Product_Name) FROM TB_Lounge_Deal d WITH(NOLOCK) WHERE d.Card_Seq = c.Card_Seq) AS dealNm," +
+            "       (SELECT MAX(d.Paid_Price) FROM TB_Lounge_Deal d WITH(NOLOCK) WHERE d.Card_Seq = c.Card_Seq) AS dealPp" +
+            "  FROM S2_Card c WITH(NOLOCK) WHERE c.Card_Seq IN (" + bmIn + ")"
+          );
+          bmNmRs.recordset.forEach(function (r) {
+            bmNames[r.seq] = { nm: r.dealNm || r.nm || ("상품 " + r.seq), pp: r.dealPp || r.pp || 0, div: r.dv };
+          });
+        }
+        function bmNameOf(seq) { return (bmNames[seq] && bmNames[seq].nm) || ("상품 " + seq); }
+
+        // ── 홍보 상품 전환: 채널 4곳 ──
+        var bmConv = [];
+        if (bmHasTarget) {
+          // 1) 청첩장/카드 주문
+          // status_seq >= 1 = 유효 주문(0은 결제 전 이탈). 대시보드 다른 전환 집계와 같은 기준.
+          var q2 = pool.request();
+          q2.input("f", sql.VarChar(10), bmDate); q2.input("t", sql.VarChar(10), bmTo);
+          var r2 = await q2.query(
+            "SELECT CONVERT(varchar(16), o.order_date, 120) AS at, o.member_id AS uid, o.order_hphone AS ph," +
+            "       o.last_total_price AS price, i.card_seq AS cs, i.item_count AS qty, o.order_seq AS oseq" +
+            "  FROM custom_order o WITH(NOLOCK) JOIN custom_order_item i WITH(NOLOCK) ON i.order_seq = o.order_seq" +
+            " WHERE o.order_date >= @f AND o.order_date < @t AND o.status_seq >= 1 AND i.card_seq IN (" + bmIn + ")" +
+            " ORDER BY o.order_date"
+          );
+          r2.recordset.forEach(function (r) {
+            bmConv.push({ channel: "청첩장주문", time: r.at || "", name: "", phone: r.ph || "", uid: r.uid || "",
+                          product: bmNameOf(r.cs) + (r.qty ? " (" + r.qty + "장)" : ""), price: r.price || 0,
+                          status: "order " + r.oseq, test: false, matched: bmMatch(r.ph, r.uid) });
+          });
+
+          // 2) 부가상품 주문 (이용권도 결제 자체는 이 테이블을 거친다)
+          var bmEtcSeqs = {};
+          var q3 = pool.request();
+          q3.input("f", sql.VarChar(10), bmDate); q3.input("t", sql.VarChar(10), bmTo);
+          var r3 = await q3.query(
+            "SELECT CONVERT(varchar(16), o.order_date, 120) AS at, o.member_id AS uid, o.order_hphone AS ph," +
+            "       o.settle_price AS price, i.card_seq AS cs, i.order_count AS qty, o.order_seq AS oseq" +
+            "  FROM CUSTOM_ETC_ORDER o WITH(NOLOCK) JOIN CUSTOM_ETC_ORDER_ITEM i WITH(NOLOCK) ON i.order_seq = o.order_seq" +
+            " WHERE o.order_date >= @f AND o.order_date < @t AND o.status_seq >= 1 AND i.card_seq IN (" + bmIn + ")" +
+            " ORDER BY o.order_date"
+          );
+          r3.recordset.forEach(function (r) {
+            bmEtcSeqs[r.oseq] = true;
+            bmConv.push({ channel: "부가상품", time: r.at || "", name: "", phone: r.ph || "", uid: r.uid || "",
+                          product: bmNameOf(r.cs) + (r.qty ? " (" + r.qty + "개)" : ""), price: r.price || 0,
+                          status: "order " + r.oseq, test: false, matched: bmMatch(r.ph, r.uid) });
+          });
+
+          // 3) 이용권 발급
+          // 이용권은 부가상품 주문(CUSTOM_ETC_ORDER)이 결제되면 발급되는 후속 기록이다.
+          // 같은 order_seq가 위에서 이미 잡혔으면 매출이 두 번 계산되므로 건너뛴다.
+          // 부가상품 쪽에 없는 발급분만 별도 채널로 남긴다(다른 결제 경로 대비).
+          var q1 = pool.request();
+          q1.input("f", sql.VarChar(10), bmDate); q1.input("t", sql.VarChar(10), bmTo);
+          var r1 = await q1.query(
+            "SELECT CONVERT(varchar(16), v.Buy_DateTime, 120) AS at, v.Cust_Name AS nm, v.Cust_Phone AS ph," +
+            "       v.Paid_Price AS price, v.Status AS st, v.Order_Seq AS oseq, d.Product_Name AS pn," +
+            "       d.Card_Seq AS cs, u.UserId AS uid" +
+            "  FROM TB_Lounge_Voucher v WITH(NOLOCK)" +
+            "  LEFT JOIN TB_Lounge_Deal d WITH(NOLOCK) ON d.Deal_ID = v.Deal_ID" +
+            "  LEFT JOIN UserInfo u WITH(NOLOCK) ON u.MemberId = v.Member_UID" +
+            " WHERE v.Buy_DateTime >= @f AND v.Buy_DateTime < @t AND d.Card_Seq IN (" + bmIn + ")" +
+            " ORDER BY v.Buy_DateTime"
+          );
+          r1.recordset.forEach(function (r) {
+            if (r.oseq && bmEtcSeqs[r.oseq]) return; // 부가상품 주문으로 이미 집계됨
+            var nm = String(r.pn || "");
+            // 오픈 초기 내부 검증분(무료/[test]/시스템테스트)은 실적에서 분리한다.
+            var isTest = String(r.nm || "").indexOf("시스템테스트") === 0 || nm.toLowerCase().indexOf("[test]") >= 0 || !r.price;
+            bmConv.push({ channel: "이용권", time: r.at || "", name: r.nm || "", phone: r.ph || "", uid: r.uid || "",
+                          product: nm, price: r.price || 0, status: r.st || "", test: isTest,
+                          matched: !isTest && bmMatch(r.ph, r.uid) });
+          });
+
+          // 4) 샘플신청 (무료 — 매출 0으로 두고 건수만 센다)
+          var q4 = pool.request();
+          q4.input("f", sql.VarChar(10), bmDate); q4.input("t", sql.VarChar(10), bmTo);
+          var r4 = await q4.query(
+            "SELECT CONVERT(varchar(16), s.REQUEST_DATE, 120) AS at, s.MEMBER_ID AS uid, s.MEMBER_NAME AS nm," +
+            "       s.MEMBER_HPHONE AS ph, i.CARD_SEQ AS cs" +
+            "  FROM CUSTOM_SAMPLE_ORDER s WITH(NOLOCK)" +
+            "  JOIN CUSTOM_SAMPLE_ORDER_ITEM i WITH(NOLOCK) ON i.SAMPLE_ORDER_SEQ = s.sample_order_seq" +
+            " WHERE s.REQUEST_DATE >= @f AND s.REQUEST_DATE < @t AND i.CARD_SEQ IN (" + bmIn + ")" +
+            " ORDER BY s.REQUEST_DATE"
+          );
+          r4.recordset.forEach(function (r) {
+            bmConv.push({ channel: "샘플신청", time: r.at || "", name: r.nm || "", phone: r.ph || "", uid: r.uid || "",
+                          product: bmNameOf(r.cs), price: 0, status: "", test: false, matched: bmMatch(r.ph, r.uid) });
+          });
+          bmConv.sort(function (a, b) { return String(a.time).localeCompare(String(b.time)); });
+        }
+
+        var bmPromoMatched = 0, bmPromoMatchedRev = 0, bmPromoSite = 0, bmPromoSiteRev = 0;
+        var bmPeople = {};
+        bmConv.forEach(function (c) {
+          if (c.test) return;
+          bmPromoSite++; bmPromoSiteRev += c.price || 0;
+          if (c.matched) {
+            bmPromoMatched++; bmPromoMatchedRev += c.price || 0;
+            var k = String(c.uid || c.phone || "").toLowerCase();
+            if (k) bmPeople[k] = true;
+          }
+        });
+
+        // ── 명단 전체 전환 (홍보 상품과 무관) : 발송일 vs 전일 ──
+        // 홍보상품은 안 팔렸는데 샘플 리드만 늘어나는 패턴이 실제로 있었다(7/24 인생네컷).
+        async function bmOverall(day) {
+          var out = { orders: 0, revenue: 0, samples: 0 };
+          if (bmSendCount === 0) return out;
+          var nxt = addDay(day);
+          var oq = pool.request();
+          oq.input("f", sql.VarChar(10), day); oq.input("t", sql.VarChar(10), nxt);
+          var ors = await oq.query(
+            "SELECT member_id AS uid, order_hphone AS ph, last_total_price AS price" +
+            "  FROM custom_order WITH(NOLOCK) WHERE order_date >= @f AND order_date < @t"
+          );
+          ors.recordset.forEach(function (r) {
+            if (bmMatch(r.ph, r.uid)) { out.orders++; out.revenue += r.price || 0; }
+          });
+          var sq = pool.request();
+          sq.input("f", sql.VarChar(10), day); sq.input("t", sql.VarChar(10), nxt);
+          var srs = await sq.query(
+            "SELECT MEMBER_ID AS uid, MEMBER_HPHONE AS ph" +
+            "  FROM CUSTOM_SAMPLE_ORDER WITH(NOLOCK) WHERE REQUEST_DATE >= @f AND REQUEST_DATE < @t"
+          );
+          srs.recordset.forEach(function (r) { if (bmMatch(r.ph, r.uid)) out.samples++; });
+          return out;
+        }
+        var bmOverallDay = await bmOverall(bmDate);
+        var bmOverallPrev = await bmOverall(bmPrev);
+
+        // ── 상품별 상세조회수 (전일 / 발송일 / 익일) ──
+        // ASEQ=2만 쓴다. 나머지 ASEQ 코드값은 의미가 확인되지 않았다
+        // (ASEQ=3은 구매가 없는 상품에도 붙어서 '주문'으로 읽으면 틀린다).
+        var bmViews = [], bmVT = { prev: 0, day: 0, next: 0, prevComparable: 0, dayComparable: 0 }, bmViewsTrunc = false;
+        if (bmHasTarget) {
+          var vq = pool.request();
+          vq.input("vf", sql.VarChar(10), bmPrev); vq.input("vt", sql.VarChar(10), bmNext);
+          var vrs = await vq.query(
+            "SELECT CardSeq, CONVERT(varchar(10),[Date],23) AS d, SUM(Cnt) AS c" +
+            "  FROM S2CardStats WITH(NOLOCK)" +
+            " WHERE CardSeq IN (" + bmIn + ") AND ASEQ = 2 AND [Date] >= @vf AND [Date] <= @vt" +
+            " GROUP BY CardSeq, CONVERT(varchar(10),[Date],23)"
+          );
+          var vAgg = {};
+          vrs.recordset.forEach(function (r) {
+            if (!vAgg[r.CardSeq]) vAgg[r.CardSeq] = { prev: 0, day: 0, next: 0, seenPrev: false };
+            var a = vAgg[r.CardSeq];
+            if (r.d === bmPrev) { a.prev += r.c; a.seenPrev = true; }
+            else if (r.d === bmDate) { a.day += r.c; }
+            else if (r.d === bmNext) { a.next += r.c; }
+          });
+          Object.keys(vAgg).forEach(function (cs) {
+            var a = vAgg[cs];
+            // 발송일에 처음 등록된 상품은 전일 데이터가 없어 증감 비교에서 뺀다(리프트 과대평가 방지).
+            var isNew = !a.seenPrev;
+            bmViews.push({ cardSeq: Number(cs), name: bmNameOf(cs), price: (bmNames[cs] && bmNames[cs].pp) || 0,
+                           cats: bmCats[cs] || (bmNames[cs] && bmNames[cs].div) || "", prev: a.prev, day: a.day,
+                           next: a.next, isNew: isNew });
+            bmVT.prev += a.prev; bmVT.day += a.day; bmVT.next += a.next;
+            if (!isNew) { bmVT.prevComparable += a.prev; bmVT.dayComparable += a.day; }
+          });
+          bmViews.sort(function (x, y) { return y.day - x.day; });
+          if (bmViews.length > 40) { bmViews = bmViews.slice(0, 40); bmViewsTrunc = true; }
+        }
+
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({
+          date: bmDate, rangeLabel: bmDate + " ~ " + bmNext + " (발송일 + D+1)",
+          sendCount: bmSendCount, listName: bmListName, warn: bmWarn,
+          hasTarget: bmHasTarget, targetCount: bmSeqs.length,
+          promoMatched: bmPromoMatched, promoMatchedRev: bmPromoMatchedRev,
+          promoMatchedPeople: Object.keys(bmPeople).length,
+          promoSite: bmPromoSite, promoSiteRev: bmPromoSiteRev,
+          conversions: bmConv, views: bmViews, viewTotals: bmVT, viewsTruncated: bmViewsTrunc,
+          overall: { day: bmOverallDay, prev: bmOverallPrev },
+          scopeNote: bmScopeNote,
+          note: "전환 = 이용권(TB_Lounge_Voucher) / 청첩장주문(custom_order) / 부가상품(CUSTOM_ETC_ORDER) / 샘플신청(CUSTOM_SAMPLE_ORDER)"
+            + " · 명단 매칭 = 연락처 또는 회원ID · 조회수 = S2CardStats ASEQ2(사이트 전체)"
+            + (bmScopeNote ? " · " + bmScopeNote : "")
+            + (bmListName ? " · 명단: " + bmListName : " · 명단 미선택")
+        }));
+      } catch (bmErr) {
+        console.log("[브랜드메시지 성과] 조회 실패:", bmErr.message);
+        res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: bmErr.message }));
       }
       return;
     }
