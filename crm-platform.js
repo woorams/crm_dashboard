@@ -1745,6 +1745,100 @@ async function runAutoConvAllJob() {
 // 성과 요약(전체 vs LMS 귀속 vs 비중) — "일자별 성과" 상단 패널 데이터
 // 분모(전체) = 바른손카드(SB) 전체 구매자(마케팅동의 필터 없음). 유형별 첫 구매일(range내 MIN) 1회 카운트.
 // 분자(LMS 귀속) = 그 구매자 중, 구매일 기준 목적별 윈도우 내에 매칭 목적 LMS를 수신한 회원.
+// ── GA4 클릭(세션) 조회 ─────────────────────────────────────
+// 카카오 브랜드메시지는 외부 플랫폼 발송이라 클릭 로그가 사내 DB에 없다.
+// 다만 발송 링크에 UTM이 붙어 있으면 유입이 GA4에 남는다 → Bitly 단축링크가 없어도 클릭을 알 수 있다.
+// 단위는 '세션'이다. 클릭과 정확히 같지 않다(이탈·봇 필터·세션 병합) → 근사치로 읽어야 한다.
+// 개인 식별은 불가(집계 전용). 누가 눌렀는지가 필요하면 대행사 리포트 업로드나 자체 트래킹 링크가 필요하다.
+// 설정: GA4_PROPERTY_ID(숫자 속성 ID) + 서비스계정 자격증명
+//   자격증명은 GOOGLE_APPLICATION_CREDENTIALS(파일경로) / GA4_SA_JSON(원문 JSON) / 앱 폴더의 barunsoncard-*.json 중 하나.
+//   해당 서비스계정을 GA4 속성에 '뷰어'로 추가해야 한다.
+var GA4_SCOPE = "https://www.googleapis.com/auth/analytics.readonly";
+var ga4AuthCache = null;
+
+function ga4Credentials() {
+  // 1) 원문 JSON 환경변수 (컨테이너에 파일을 넣기 어려울 때)
+  var raw = env.GA4_SA_JSON || process.env.GA4_SA_JSON;
+  if (raw && String(raw).trim().charAt(0) === "{") {
+    try { return { credentials: JSON.parse(raw) }; } catch (e) { throw new Error("GA4_SA_JSON 파싱 실패: " + e.message); }
+  }
+  // 2) 명시 경로
+  var kp = env.GOOGLE_APPLICATION_CREDENTIALS || process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  if (kp && fs.existsSync(kp)) return { keyFile: kp };
+  // 3) 앱 폴더의 서비스계정 키 (구글시트 동기화가 쓰는 것과 동일 파일)
+  try {
+    var found = fs.readdirSync(__dirname).filter(function (f) {
+      return /^barunsoncard-.*\.json$/.test(f);
+    });
+    if (found.length) return { keyFile: path.join(__dirname, found[0]) };
+  } catch (e) { /* noop */ }
+  return null;
+}
+
+async function ga4Client() {
+  if (ga4AuthCache) return ga4AuthCache;
+  var cred = ga4Credentials();
+  if (!cred) throw new Error("GA4 서비스계정 자격증명이 없습니다 (GA4_SA_JSON 또는 GOOGLE_APPLICATION_CREDENTIALS 설정 필요)");
+  var google2 = require("googleapis").google;
+  var authOpt = { scopes: [GA4_SCOPE] };
+  if (cred.keyFile) authOpt.keyFile = cred.keyFile; else authOpt.credentials = cred.credentials;
+  var auth = new google2.auth.GoogleAuth(authOpt);
+  ga4AuthCache = google2.analyticsdata({ version: "v1beta", auth: auth });
+  return ga4AuthCache;
+}
+
+// from~to(둘 다 포함) 기간의 브랜드메시지 유입 세션을 utm_content별로 집계한다.
+async function fetchGa4Clicks(from, to, opt) {
+  opt = opt || {};
+  var propId = String(opt.propertyId || env.GA4_PROPERTY_ID || process.env.GA4_PROPERTY_ID || "").replace(/[^0-9]/g, "");
+  if (!propId) throw new Error("GA4_PROPERTY_ID가 설정되지 않았습니다 (GA4 관리 > 속성 설정의 숫자 속성 ID)");
+  var client = await ga4Client();
+  var exprs = [];
+  function eq(field, value) {
+    return { filter: { fieldName: field, stringFilter: { matchType: "EXACT", value: value, caseSensitive: false } } };
+  }
+  if (opt.source) exprs.push(eq("sessionSource", opt.source));
+  if (opt.medium) exprs.push(eq("sessionMedium", opt.medium));
+  if (opt.campaign) exprs.push(eq("sessionCampaignName", opt.campaign));
+  var body = {
+    dateRanges: [{ startDate: from, endDate: to }],
+    dimensions: [{ name: "date" }, { name: "sessionManualAdContent" }],
+    metrics: [{ name: "sessions" }, { name: "totalUsers" }],
+    limit: 200,
+  };
+  if (exprs.length === 1) body.dimensionFilter = exprs[0];
+  else if (exprs.length > 1) body.dimensionFilter = { andGroup: { expressions: exprs } };
+  var resp;
+  try {
+    resp = await client.properties.runReport({ property: "properties/" + propId, requestBody: body });
+  } catch (e) {
+    // 실제로 걸리는 원인이 세 가지로 갈리는데 구글 원문 메시지가 불친절해서 안내를 붙인다.
+    var m = String((e && e.message) || e);
+    if (/DECODER|PEM|private_key|Invalid key/i.test(m)) {
+      throw new Error("서비스계정 키가 올바르지 않습니다(private_key 형식 확인). 원문: " + m);
+    }
+    if (/PERMISSION_DENIED|403|does not have sufficient permissions/i.test(m)) {
+      throw new Error("서비스계정에 이 GA4 속성 권한이 없습니다. GA4 관리 > 속성 액세스 관리에서 서비스계정 이메일을 '뷰어'로 추가하세요. 원문: " + m);
+    }
+    if (/NOT_FOUND|404/i.test(m)) {
+      throw new Error("GA4 속성 " + propId + "을 찾을 수 없습니다(측정 ID G-xxxx가 아니라 숫자 속성 ID여야 합니다). 원문: " + m);
+    }
+    throw e;
+  }
+  var rows = (resp.data && resp.data.rows) || [];
+  var out = { sessions: 0, users: 0, byContent: {}, byDate: {}, propertyId: propId };
+  rows.forEach(function (r) {
+    var d = (r.dimensionValues[0] || {}).value || "";
+    var c = (r.dimensionValues[1] || {}).value || "(없음)";
+    var s = parseInt((r.metricValues[0] || {}).value || "0", 10);
+    var u = parseInt((r.metricValues[1] || {}).value || "0", 10);
+    out.sessions += s; out.users += u;
+    out.byContent[c] = (out.byContent[c] || 0) + s;
+    out.byDate[d] = (out.byDate[d] || 0) + s;
+  });
+  return out;
+}
+
 // ── Bitly 클릭 "전체" 업데이트 백그라운드 작업 ──
 // 동기로 수백 URL을 순차 조회하면 프록시 504(HTML)로 "실패 알럿"이 뜬다. 즉시 응답 + 백그라운드 + 폴링.
 // 대상 URL = 레코드 bitly_url ∪ 캠페인 메시지 내 bit.ly (저장 안 된 링크도 포함). total은 summary로 보정.
@@ -4531,10 +4625,19 @@ function generateHTML() {
             <span id="bmClickInfo" style="font-size:12px;color:#888"></span>
           </div>
           <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <span style="font-size:12px;color:#666;width:78px">GA4 자동조회</span>
+            <label style="font-size:13px;display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" id="bmUseGa4" checked> UTM 유입(세션)으로 클릭 집계</label>
+            <input type="text" id="bmGa4Source" value="kakao" placeholder="utm_source" style="padding:5px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;width:100px">
+            <input type="text" id="bmGa4Medium" value="brandmessage" placeholder="utm_medium" style="padding:5px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;width:130px">
+            <input type="text" id="bmGa4Campaign" placeholder="utm_campaign (비우면 전체)" style="padding:5px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;width:190px">
+            <button class="btn" style="padding:4px 10px;font-size:12px" onclick="bmGa4Check()">연결 확인</button>
+            <span id="bmGa4Info" style="font-size:12px;color:#888"></span>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
             <span style="font-size:12px;color:#666;width:78px">bit.ly URL</span>
             <input type="text" id="bmBitly" placeholder="예: https://bit.ly/xxxx (단축링크를 쓴 경우, 콤마로 여러 개)" style="padding:6px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;width:420px">
           </div>
-          <span style="font-size:12px;color:#b45309">카카오 브랜드메시지는 외부 플랫폼에서 발송되어 클릭 로그가 사내 DB에 없습니다. <b>대행사 클릭 리포트(전화번호 포함)</b>를 올리면 클릭 수·클릭률과 <b>클릭한 사람 명단</b>까지 나옵니다. bit.ly만 있으면 총 클릭 수만 집계됩니다(누가 눌렀는지는 알 수 없음).</span>
+          <span style="font-size:12px;color:#b45309">카카오 브랜드메시지는 외부 플랫폼에서 발송되어 클릭 로그가 사내 DB에 없습니다. 링크에 UTM이 붙어 있으면 <b>GA4 세션</b>으로 클릭을 집계할 수 있고(단축링크 불필요, 소재별 분리 가능) 개인 식별은 안 됩니다. <b>클릭한 사람 명단</b>이 필요하면 대행사 클릭 리포트를 올려주세요 — 리포트가 있으면 그쪽이 우선 적용됩니다.</span>
         </div>
       </div>
       <div class="btn-row">
@@ -8730,6 +8833,26 @@ function bmClickClear() {
   var el = document.getElementById('bmClickInfo');
   el.style.color = '#888'; el.textContent = '클릭 데이터를 비웠습니다';
 }
+// GA4 연결 확인 — 속성 ID/서비스계정 권한 문제를 성과 조회 전에 잡는다.
+async function bmGa4Check() {
+  var el = document.getElementById('bmGa4Info');
+  var d = document.getElementById('bmDate').value || '';
+  el.style.color = '#666'; el.textContent = '확인 중...';
+  try {
+    var qs = 'from=' + encodeURIComponent(d) + '&to=' + encodeURIComponent(d) +
+      '&source=' + encodeURIComponent(document.getElementById('bmGa4Source').value) +
+      '&medium=' + encodeURIComponent(document.getElementById('bmGa4Medium').value);
+    var res = await fetch('api/ga4-check?' + qs);
+    var j = await res.json();
+    if (!j.ok) {
+      el.style.color = '#c5221f';
+      el.textContent = '✗ ' + j.error + (j.propertyId ? '' : ' (GA4_PROPERTY_ID 미설정)');
+      return;
+    }
+    el.style.color = '#137333';
+    el.textContent = '✓ 속성 ' + j.propertyId + ' 연결됨 · ' + d + ' 세션 ' + (j.sessions || 0).toLocaleString();
+  } catch (e) { el.style.color = '#c5221f'; el.textContent = '✗ ' + e.message; }
+}
 function _bmNums(id) {
   return document.getElementById(id).value.split(',').map(function(s){ return parseInt(s.trim(), 10); })
     .filter(function(n){ return n > 0; });
@@ -8747,6 +8870,10 @@ async function bmLoad() {
                              split: document.getElementById('bmSplit').value,
                              mdSeqs: _bmNums('bmMdSeqs'), cardSeqs: _bmNums('bmCardSeqs'),
                              clickPhones: _bmClickPhones,
+                             useGa4: document.getElementById('bmUseGa4').checked,
+                             ga4Source: document.getElementById('bmGa4Source').value,
+                             ga4Medium: document.getElementById('bmGa4Medium').value,
+                             ga4Campaign: document.getElementById('bmGa4Campaign').value,
                              bitlyUrls: document.getElementById('bmBitly').value || '' }) });
     var d = await res.json();
     if (d.error) throw new Error(d.error);
@@ -8807,8 +8934,10 @@ function bmRender(d) {
   var scopeLabel = d.hasTarget ? '홍보상품 기준' : '명단 전체 기준(홍보 대상 미지정)';
   var clickVal = d.clickCount === null ? '-' : d.clickCount.toLocaleString() + '명';
   var clickSub = d.clickMode === 'list' ? '대행사 리포트 · 명단 매칭'
-    : (d.clickMode === 'bitly' ? 'Bitly 집계(클릭 수)' : '클릭 데이터 없음');
+    : (d.clickMode === 'ga4' ? 'GA4 세션(UTM 유입)'
+    : (d.clickMode === 'bitly' ? 'Bitly 집계(클릭 수)' : (d.ga4Error ? 'GA4 오류' : '클릭 데이터 없음')));
   if (d.clickMode === 'bitly') clickVal = d.clickCount === null ? '-' : d.clickCount.toLocaleString() + '회';
+  if (d.clickMode === 'ga4') clickVal = d.clickCount === null ? '-' : d.clickCount.toLocaleString() + '세션';
   html += '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:7px;margin-bottom:6px">';
   html += bmKpi('발송 대상', d.sendCount ? d.sendCount.toLocaleString() + '명' : '미선택', '#7c3aed');
   html += bmKpi('구매 수', d.buyCount + '건', d.buyCount > 0 ? '#059669' : '#9ca3af', d.buyerCount + '명 · ' + won(d.buyRevenue));
@@ -8863,6 +8992,22 @@ function bmRender(d) {
       return '<td>' + escHtml(r.time) + '</td><td>' + escHtml(r.name||'-') + '</td><td>' + escHtml(r.uid||'-') + '</td>' +
              '<td>' + escHtml(r.phone||'-') + '</td><td style="text-align:left">' + escHtml(r.product||'-') + '</td>';
     }, '해당 기간 명단 내 샘플신청이 없습니다');
+
+  // ── GA4 소재별(utm_content) 유입 ──
+  if (d.ga4Error) {
+    html += '<div class="warning">GA4 조회 실패: ' + escHtml(d.ga4Error) + '</div>';
+  } else if (d.ga4 && d.ga4.sessions > 0) {
+    var cs = Object.keys(d.ga4.byContent).sort(function(a,b){ return d.ga4.byContent[b] - d.ga4.byContent[a]; });
+    html += '<div class="panel"><div class="panel-title">GA4 유입 — 소재별(utm_content) <span style="font-size:11px;font-weight:400;color:#9ca3af">세션 ' +
+      d.ga4.sessions.toLocaleString() + ' · 사용자 ' + d.ga4.users.toLocaleString() + ' · 속성 ' + escHtml(String(d.ga4.propertyId)) + '</span></div>';
+    html += '<div class="table-wrap"><table class="ext-table"><thead><tr><th style="text-align:left">utm_content</th><th>세션</th><th>비중</th></tr></thead><tbody>';
+    cs.forEach(function(c) {
+      var v = d.ga4.byContent[c];
+      html += '<tr><td style="text-align:left">' + escHtml(c) + '</td><td style="font-weight:700">' + v.toLocaleString() + '</td>' +
+        '<td>' + (v / d.ga4.sessions * 100).toFixed(1) + '%</td></tr>';
+    });
+    html += '</tbody></table></div></div>';
+  }
 
   // ── 참고: 명단 전체 전환 / 조회수 ──
   var ref = '';
@@ -10968,6 +11113,30 @@ var server = http.createServer(async function (req, res) {
       return;
     }
 
+    // ── GA4 설정 점검 ──
+    // 속성 ID / 서비스계정 권한 문제를 성과 조회 전에 따로 확인할 수 있게 한다.
+    if (pathname === "/api/ga4-check" && req.method === "GET") {
+      var gcFrom = parsedUrl.searchParams.get("from") || nowKstStr().slice(0, 10);
+      var gcTo = parsedUrl.searchParams.get("to") || gcFrom;
+      var gcCred = null;
+      try { gcCred = ga4Credentials(); } catch (e) { /* 아래에서 메시지로 처리 */ }
+      var gcProp = String(env.GA4_PROPERTY_ID || process.env.GA4_PROPERTY_ID || "").replace(/[^0-9]/g, "");
+      try {
+        var gcRes = await fetchGa4Clicks(gcFrom, gcTo, {
+          source: parsedUrl.searchParams.get("source") || "kakao",
+          medium: parsedUrl.searchParams.get("medium") || "brandmessage",
+        });
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, propertyId: gcProp, credential: gcCred ? (gcCred.keyFile || "GA4_SA_JSON") : null,
+                                 from: gcFrom, to: gcTo, sessions: gcRes.sessions, byContent: gcRes.byContent }));
+      } catch (gcErr) {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: false, propertyId: gcProp || null,
+                                 credential: gcCred ? (gcCred.keyFile || "GA4_SA_JSON") : null, error: gcErr.message }));
+      }
+      return;
+    }
+
     // ── 클릭 리포트 업로드 (카카오 비즈메시지 대행사 리포트) ──
     // 카카오 브랜드메시지는 외부 플랫폼에서 발송되므로 클릭 로그가 사내 DB에 없다.
     // (사내 발송로그 ata_mmt_log에도 브랜드메시지 건은 안 남는다.)
@@ -11290,7 +11459,18 @@ var server = http.createServer(async function (req, res) {
         // ── 클릭 ──
         // (1) 대행사 클릭 리포트 번호 목록 → 개인 단위 매칭 (클릭자 명단 제공 가능)
         // (2) bit.ly 단축URL → Bitly 집계 (총 클릭수만, 누가 눌렀는지는 알 수 없음)
+        // (3) GA4 — UTM이 붙은 링크면 Bitly 없이도 유입(세션)이 남는다. 개인 식별은 불가.
         var bmClickMode = "none", bmClickCount = null, bmClickRows = [], bmClickNote = null, bmClickOffList = 0;
+        var bmGa4 = null, bmGa4Err = null;
+        if (bmB.useGa4) {
+          try {
+            bmGa4 = await fetchGa4Clicks(bmDate, bmNext, {
+              source: (bmB.ga4Source || "kakao").trim() || null,
+              medium: (bmB.ga4Medium || "brandmessage").trim() || null,
+              campaign: (bmB.ga4Campaign || "").trim() || null,
+            });
+          } catch (ge) { bmGa4Err = ge.message; }
+        }
         var bmClickPhones = Array.isArray(bmB.clickPhones) ? bmB.clickPhones : [];
         if (bmClickPhones.length > 0) {
           bmClickMode = "list";
@@ -11307,6 +11487,11 @@ var server = http.createServer(async function (req, res) {
           });
           bmClickCount = bmClickRows.length;
           if (bmClickOffList > 0) bmClickNote = "리포트 번호 중 " + bmClickOffList.toLocaleString() + "개는 이 명단(그룹)에 없어 제외했습니다.";
+        } else if (bmGa4) {
+          bmClickMode = "ga4";
+          bmClickCount = bmGa4.sessions;
+          bmClickNote = "GA4 세션 기준입니다(클릭과 정확히 일치하지 않는 근사치). 개인 식별이 안 되어 클릭자 명단은 제공되지 않습니다."
+            + (bmSendCount ? " 클릭률 분모는 발송 대상이지만 GA4 세션에는 비발송 유입도 섞일 수 있습니다." : "");
         } else if (bmB.bitlyUrls && String(bmB.bitlyUrls).trim()) {
           var bmBitToken = env.BITLY_TOKEN;
           if (!bmBitToken) {
@@ -11398,6 +11583,7 @@ var server = http.createServer(async function (req, res) {
           sampleCount: bmSmpRows.length, samplerCount: Object.keys(bmSamplerSet).length,
           siteBuyCount: bmSiteBuy, siteBuyRevenue: bmSiteBuyRev,
           clickMode: bmClickMode, clickCount: bmClickCount, clickNote: bmClickNote,
+          ga4: bmGa4, ga4Error: bmGa4Err,
           clickRows: bmClickRows, purchaseRows: bmBuyRows, sampleRows: bmSmpRows,
           views: bmViews, viewTotals: bmVT, viewsTruncated: bmViewsTrunc,
           overall: { day: bmOverallDay, prev: bmOverallPrev },
