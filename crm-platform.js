@@ -2046,6 +2046,200 @@ async function runPerfSummaryJob(from, to) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════
+// AI 데일리 브리핑 — 하루 발송 성과를 Claude로 요약
+// ═══════════════════════════════════════════════════════════
+// 집계는 프론트([성과 분석] 탭)에서 화면과 똑같은 함수로 계산해 보내온다.
+// → 브리핑 숫자와 그래프 숫자가 어긋날 수 없다. 서버는 프롬프트 구성·API 호출·캐시만 담당.
+// 응답이 20~60초 걸려 프록시 504(HTML) 위험이 있으므로 즉시 응답 + 백그라운드 + 폴링.
+var BRIEFING_PATH = path.join(DATA_DIR, "daily-briefing.json");
+var briefingStore = {};   // { "2026-07-29": { md, html, createdAt, model, usage, servedBy } }
+var briefingJob = { running: false, date: null, startedAt: null, finishedAt: null, error: null };
+
+function loadBriefings() {
+  try {
+    if (fs.existsSync(BRIEFING_PATH)) {
+      briefingStore = JSON.parse(fs.readFileSync(BRIEFING_PATH, "utf-8")) || {};
+      console.log("[브리핑] 저장본 " + Object.keys(briefingStore).length + "일치 로드");
+    }
+  } catch (e) { console.log("[브리핑] 로드 실패:", e.message); briefingStore = {}; }
+}
+function saveBriefings() {
+  try {
+    // 최근 120일만 보관 (파일 무한 증가 방지)
+    var keys = Object.keys(briefingStore).sort();
+    while (keys.length > 120) { delete briefingStore[keys.shift()]; }
+    fs.writeFileSync(BRIEFING_PATH, JSON.stringify(briefingStore, null, 1), "utf-8");
+  } catch (e) { console.log("[브리핑] 저장 실패:", e.message); }
+}
+
+var BRIEFING_SYSTEM =
+  "당신은 바른손카드 CRM팀의 LMS 성과 분석가입니다. 주어진 JSON만 근거로 어제 발송 성과를 데일리 브리핑으로 정리합니다.\n" +
+  "\n" +
+  "출력은 마크다운으로, 아래 5개 섹션을 이 순서대로만 씁니다.\n" +
+  "## 한 줄 요약\n" +
+  "어제 성과가 좋았는지 나빴는지 한 문장으로 명확히.\n" +
+  "## 어제 발송 내역\n" +
+  "표로: 목적 | 세그먼트 | 발송 | 클릭(률) | 전환(률) | 매출 | ROAS. 발송량 많은 순. 건이 많으면 상위 8개만 쓰고 나머지는 '기타 N건' 한 줄로 합칩니다.\n" +
+  "## 잘된 것 / 아쉬운 것\n" +
+  "각각 최대 3개. 비교 기준(전주 동요일 · 최근 7일 평균 · 4주 추이)의 숫자를 함께 적습니다.\n" +
+  "## 매출 기여\n" +
+  "어제 발송에 귀속된 매출 · 비용 · ROAS · 전환당 비용. 전주 동요일과 최근 7일 평균 대비 증감을 숫자로.\n" +
+  "## 오늘 할 일\n" +
+  "2~3개. 각 항목 한 문장으로 '무엇을 왜'. 데이터로 뒷받침되지 않는 제안은 쓰지 않습니다.\n" +
+  "\n" +
+  "데이터 해석 규칙:\n" +
+  "- 전환·매출은 발송 후 24/48시간 내 '귀속' 실적입니다. 발송이 원인이라는 증거가 아니므로 '발송 덕분에 매출이 늘었다'처럼 인과로 단정하지 말고 '귀속 매출 X원'으로 씁니다. 순증분은 대조군 없이 알 수 없습니다.\n" +
+  "- 발송 당일·전일 캠페인은 아직 집계 중일 수 있습니다. 전환이 0이면 '집계 전일 가능성'을 함께 적습니다.\n" +
+  "- 클릭률이 100%를 넘으면 여러 캠페인이 같은 단축 URL을 공유해 클릭이 중복 집계된 것입니다. 성과로 해석하지 말고 그 사실을 표시합니다.\n" +
+  "- 발송 30명 미만 캠페인의 비율은 표본이 작아 크게 흔들립니다. 단정하지 않습니다.\n" +
+  "- JSON에 없는 수치는 만들지 않습니다. 모르면 '데이터 없음'이라고 씁니다.\n" +
+  "- 금액은 원 단위 천단위 구분, 비율은 소수 1자리로 씁니다.\n" +
+  "\n" +
+  "톤: 실무 보고. 미사여구·서론 없이 짧게, 표와 짧은 문장 위주로 전체 500단어 이내. 요청한 5개 섹션 외에는 아무것도 덧붙이지 않습니다.";
+
+// 마크다운 → HTML (서버에서 처리 — 프론트 코드는 템플릿 리터럴 안이라 정규식 백슬래시를 못 씀)
+function mdEsc(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function mdInline(s) {
+  var t = mdEsc(s);
+  t = t.replace(/`([^`]+)`/g, '<code>$1</code>');
+  t = t.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+  t = t.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<i>$2</i>");
+  return t;
+}
+function mdToHtml(md) {
+  var lines = String(md || "").replace(/\r\n/g, "\n").split("\n");
+  var out = [], i = 0;
+  function isTableSep(s) { return /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(s) && s.indexOf("-") >= 0; }
+  function cells(s) {
+    var t = s.trim().replace(/^\|/, "").replace(/\|$/, "");
+    return t.split("|").map(function (c) { return c.trim(); });
+  }
+  while (i < lines.length) {
+    var ln = lines[i];
+    if (!ln.trim()) { i++; continue; }
+    // 표 — 구분행(|---:|)의 정렬 지정을 그대로 반영한다(숫자 열은 우측 정렬로 온다)
+    if (ln.indexOf("|") >= 0 && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+      var head = cells(ln);
+      var align = cells(lines[i + 1]).map(function (c) {
+        var right = c.charAt(c.length - 1) === ":", left = c.charAt(0) === ":";
+        if (right && !left) return "right";
+        if (right && left) return "center";
+        return "left";
+      });
+      i += 2;
+      var body = [];
+      while (i < lines.length && lines[i].indexOf("|") >= 0 && lines[i].trim()) { body.push(cells(lines[i])); i++; }
+      function al(c) { return ' style="text-align:' + (align[c] || "left") + '"'; }
+      var h = '<table class="br-tbl"><thead><tr>';
+      head.forEach(function (c, ci) { h += "<th" + al(ci) + ">" + mdInline(c) + "</th>"; });
+      h += "</tr></thead><tbody>";
+      body.forEach(function (r) {
+        h += "<tr>";
+        for (var c = 0; c < head.length; c++) h += "<td" + al(c) + ">" + mdInline(r[c] == null ? "" : r[c]) + "</td>";
+        h += "</tr>";
+      });
+      out.push(h + "</tbody></table>");
+      continue;
+    }
+    // 제목
+    var hm = ln.match(/^(#{1,4})\s+(.*)$/);
+    if (hm) { var lv = Math.min(4, hm[1].length + 1); out.push("<h" + lv + ">" + mdInline(hm[2]) + "</h" + lv + ">"); i++; continue; }
+    // 구분선
+    if (/^\s*(---+|\*\*\*+|___+)\s*$/.test(ln)) { out.push("<hr>"); i++; continue; }
+    // 목록 (불릿 / 번호)
+    var bullet = /^\s*([-*·•]|\d+\.)\s+/;
+    if (bullet.test(ln)) {
+      var ordered = /^\s*\d+\.\s+/.test(ln);
+      var items = [];
+      while (i < lines.length && bullet.test(lines[i])) { items.push(lines[i].replace(bullet, "")); i++; }
+      var tag = ordered ? "ol" : "ul";
+      out.push("<" + tag + ">" + items.map(function (t) { return "<li>" + mdInline(t) + "</li>"; }).join("") + "</" + tag + ">");
+      continue;
+    }
+    // 단락 (빈 줄까지 묶기)
+    var para = [];
+    while (i < lines.length && lines[i].trim() && !bullet.test(lines[i]) && !/^#{1,4}\s/.test(lines[i]) && lines[i].indexOf("|") < 0) {
+      para.push(lines[i]); i++;
+    }
+    if (para.length) out.push("<p>" + para.map(mdInline).join("<br>") + "</p>");
+    else { out.push("<p>" + mdInline(lines[i]) + "</p>"); i++; }
+  }
+  return out.join("\n");
+}
+
+// Claude 호출. 반환: { md, model, usage, servedBy, refused }
+async function callBriefingModel(pkg) {
+  var Mod = require("@anthropic-ai/sdk");
+  var Anthropic = Mod.default || Mod;
+  var client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  var userMsg = "아래는 " + pkg.date + "(" + (pkg.weekday || "") + ") 발송 성과 데이터입니다. 데일리 브리핑을 작성해주세요.\n\n" +
+    JSON.stringify(pkg, null, 1);
+  var base = {
+    model: "claude-opus-5",
+    max_tokens: 16000,   // 사고+본문 합산 상한. 브리핑 본문은 1~2천 토큰이라 여유 충분.
+    system: BRIEFING_SYSTEM,
+    messages: [{ role: "user", content: userMsg }]
+  };
+  var res;
+  try {
+    // 안전 분류기가 거절하면 서버가 대체 모델로 자동 재시도 (Opus 5 권장 설정)
+    res = await client.beta.messages.create(Object.assign({}, base, {
+      betas: ["server-side-fallback-2026-07-01"],
+      fallbacks: "default"
+    }));
+  } catch (e) {
+    // 조직에 해당 베타가 없으면 400이 난다 → 폴백 없이 한 번 더 (기능 자체는 살린다)
+    var em = (e && e.message) || "";
+    if (e && e.status === 400 && (em.indexOf("fallback") >= 0 || em.indexOf("beta") >= 0)) {
+      console.log("[브리핑] 서버측 폴백 미지원 → 폴백 없이 재시도");
+      res = await client.messages.create(base);
+    } else throw e;
+  }
+  if (res.stop_reason === "refusal") {
+    var cat = (res.stop_details && res.stop_details.category) || "미분류";
+    return { refused: true, md: "", model: res.model, usage: res.usage, servedBy: null, category: cat };
+  }
+  var md = (res.content || []).filter(function (b) { return b.type === "text"; })
+    .map(function (b) { return b.text; }).join("\n").trim();
+  var servedBy = null;
+  var iters = (res.usage && res.usage.iterations) || [];
+  for (var k = 0; k < iters.length; k++) if (iters[k].type === "fallback_message") servedBy = res.model;
+  return { md: md, model: res.model, usage: res.usage, servedBy: servedBy, refused: false };
+}
+
+async function runBriefingJob(dateStr, pkg) {
+  try {
+    var r = await callBriefingModel(pkg);
+    if (r.refused) {
+      briefingJob.error = "모델이 응답을 거절했습니다 (분류: " + r.category + "). 데이터에 민감한 내용이 있는지 확인해주세요.";
+      console.log("[브리핑] 거절:", r.category);
+      return;
+    }
+    if (!r.md) { briefingJob.error = "브리핑 본문이 비어 있습니다. 다시 시도해주세요."; return; }
+    briefingStore[dateStr] = {
+      md: r.md, html: mdToHtml(r.md), createdAt: nowKstStr(),
+      model: r.model, servedBy: r.servedBy,
+      usage: r.usage ? { input: r.usage.input_tokens, output: r.usage.output_tokens } : null,
+      campaigns: (pkg.campaigns || []).length
+    };
+    saveBriefings();
+    console.log("[브리핑] " + dateStr + " 생성 완료 (" + r.model + ", 캠페인 " + ((pkg.campaigns || []).length) + "건)");
+  } catch (e) {
+    var msg = e.message || String(e);
+    if (e.status === 401 || /authentication/i.test(msg)) msg = "ANTHROPIC_API_KEY가 없거나 잘못되었습니다. 서버 환경변수를 확인해주세요.";
+    else if (e.status === 429) msg = "Claude API 사용량 제한입니다. 잠시 후 다시 시도해주세요.";
+    else if (e.code === "MODULE_NOT_FOUND") msg = "@anthropic-ai/sdk 모듈이 설치되지 않았습니다 (이미지 재빌드 필요).";
+    briefingJob.error = "브리핑 생성 실패: " + msg;
+    console.log("[브리핑] 실패:", msg);
+  } finally {
+    briefingJob.finishedAt = nowKstStr();
+    briefingJob.running = false;
+  }
+}
+
 // 장바구니 필터가 걸렸는지 — 이때만 조회가 UserBasket 전수 스캔으로 느려진다.
 function cartFilterActive(filters) {
   if (!cartSchema.available) return false;
@@ -3733,7 +3927,41 @@ function generateHTML() {
       .an-tbl .sum { background:#f9fafb; font-weight:600; }
       .an-tbl .den { color:#9ca3af; font-size:10px; display:block; }
       .an-tbl .nil { color:#d1d5db; }
+      .br-body { font-size:13.5px; color:#1f2937; line-height:1.8; }
+      .br-body h2, .br-body h3 { font-size:14px; font-weight:700; color:#1e3a5f; margin:18px 0 8px; padding-bottom:5px; border-bottom:1px solid #e5e7eb; }
+      .br-body h3:first-child, .br-body h2:first-child { margin-top:2px; }
+      .br-body h4 { font-size:13px; font-weight:700; color:#374151; margin:14px 0 6px; }
+      .br-body p { margin:6px 0; }
+      .br-body ul, .br-body ol { margin:6px 0 6px 20px; }
+      .br-body li { margin:3px 0; }
+      .br-body code { background:#f3f4f6; padding:1px 5px; border-radius:3px; font-size:12px; }
+      .br-body hr { border:0; border-top:1px solid #e5e7eb; margin:14px 0; }
+      .br-tbl { border-collapse:collapse; font-size:12.5px; margin:8px 0; width:100%; }
+      .br-tbl th { background:#1e3a5f; color:#fff; padding:7px 9px; text-align:center; font-weight:600; white-space:nowrap; }
+      .br-tbl td { padding:6px 9px; border-bottom:1px solid #eef0f3; text-align:right; }
+      .br-tbl td:first-child, .br-tbl th:first-child { text-align:left; }
+      .br-tbl tr:hover td { background:#f8faff; }
+      .br-meta { font-size:11px; color:#9ca3af; }
+      .br-wrap { overflow-x:auto; }
     </style>
+
+    <div class="panel" style="border:1px solid #c7d2fe;background:#f5f7ff">
+      <div class="panel-title" style="color:#3730a3">🤖 AI 데일리 브리핑</div>
+      <p class="an-note">
+        하루치 발송 내역과 성과를 <b>Claude</b>가 요약합니다 — 무엇을 보냈고, 전주·최근 7일 대비 어땠고, 귀속 매출이 얼마이고, 오늘 뭘 볼지.
+        화면의 그래프와 <b>같은 집계값</b>을 그대로 넘기므로 숫자가 어긋나지 않습니다.
+      </p>
+      <div class="an-row" style="margin-top:12px">
+        <label>대상일</label>
+        <input type="date" id="brDate">
+        <button class="an-q" onclick="brShift(-1)">◀ 전일</button>
+        <button class="an-q" onclick="brShift(1)">다음일 ▶</button>
+        <button class="btn btn-primary" id="btnBrief" onclick="brRun(false)" style="margin-left:4px">브리핑 생성</button>
+        <button class="an-q" id="btnBriefRegen" onclick="brRun(true)">다시 생성</button>
+        <span class="br-meta" id="brMeta"></span>
+      </div>
+      <div id="brResult" style="margin-top:14px"></div>
+    </div>
 
     <div class="panel">
       <div class="panel-title">📈 기간별 성과 추이</div>
@@ -4666,6 +4894,7 @@ function anEnter(){
 function anBoot(){
   if(!anInit){
     anInit = true;
+    brDefaultDate(); brLoadCached();   // 어제 브리핑이 이미 있으면 바로 보여준다
     anFillSelect('anPurpose','전체 목적','purpose',DP_PUR);
     anFillSelect('anChannel','전체 채널','channel',['LMS','SMS','MMS','알림톡','친구톡']);
     anFillMetricChips();
@@ -5034,6 +5263,204 @@ function anRenderSumTable(series, grand){
   if(!(series.length === 1 && series[0].name === '전체')) h += row('전체', grand, 'sum');   // 계열=전체 합계면 같은 행이 두 번 나오는 걸 방지
   h += '</tbody></table>';
   document.getElementById('anSumTbl').innerHTML = h;
+}
+
+// ═══ AI 데일리 브리핑 ═══
+// 집계는 여기서(그래프와 동일한 함수로) 계산해 서버에 넘기고, 서버는 Claude 호출만 한다.
+// → 브리핑에 적힌 숫자와 아래 그래프의 숫자가 항상 일치한다.
+var brPolling = false, brTries = 0;
+
+function brDefaultDate(){
+  var el = document.getElementById('brDate');
+  if (!el || el.value) return;
+  var y = new Date(); y.setDate(y.getDate() - 1);   // 기본값: 어제
+  el.value = dpDS(y);
+}
+function brShift(n){
+  var el = document.getElementById('brDate');
+  if (!el.value) { brDefaultDate(); return; }
+  var d = dpYMD(el.value); d.setDate(d.getDate() + n);
+  el.value = dpDS(d);
+  brLoadCached();
+}
+function brRate(num, den){ return den ? Math.round(num / den * 1000) / 10 : null; }   // % 소수1자리
+function brPack(o){
+  if (!o) return null;
+  return {
+    캠페인수: o.n, 발송: o.s, 클릭: o.clk, 클릭률: brRate(o.clk, o.s),
+    전환: o.cv, 전환율: brRate(o.cv, o.s), 매출: o.rev, 비용: o.cost,
+    ROAS: o.cost ? brRate(o.rev, o.cost) : null,
+    전환당비용: o.cv ? Math.round(o.cost / o.cv) : null
+  };
+}
+// 서버로 보낼 데이터 패키지 — 대상일 캠페인 + 비교기준 + 최근 추이
+function brBuildPkg(dateStr){
+  var camps = anCampsAll();
+  function onDay(d){ return camps.filter(function(c){ return c.send_date.slice(0,10) === d; }); }
+  function agg(list){ var o = anCell(); list.forEach(function(c){ anAdd(o, c); }); return o; }
+  function head(s, n){ s = (s||'').split(String.fromCharCode(10)).join(' '); return s.length > n ? s.slice(0, n) + '…' : s; }
+
+  var today = onDay(dateStr);
+  var dt = dpYMD(dateStr);
+  var prevW = new Date(dt.getTime()); prevW.setDate(prevW.getDate() - 7);
+  var prevWStr = dpDS(prevW);
+
+  // 직전 7일(대상일 제외) 일평균
+  var last7 = [], l7n = 0;
+  for (var i = 1; i <= 7; i++){
+    var d7 = new Date(dt.getTime()); d7.setDate(d7.getDate() - i);
+    var day = onDay(dpDS(d7));
+    if (day.length) l7n++;
+    last7 = last7.concat(day);
+  }
+  var l7 = agg(last7);
+  var l7avg = l7n ? { 캠페인수: Math.round(l7.n/l7n*10)/10, 발송: Math.round(l7.s/l7n), 클릭: Math.round(l7.clk/l7n),
+    클릭률: brRate(l7.clk, l7.s), 전환: Math.round(l7.cv/l7n*10)/10, 전환율: brRate(l7.cv, l7.s),
+    매출: Math.round(l7.rev/l7n), 비용: Math.round(l7.cost/l7n),
+    ROAS: l7.cost ? brRate(l7.rev, l7.cost) : null, 발송일수: l7n } : null;
+
+  // 목적별 합계 (대상일)
+  var byPur = {};
+  today.forEach(function(c){ var p = c.purpose || '기타'; byPur[p] = byPur[p] || anCell(); anAdd(byPur[p], c); });
+
+  // 대상일에 발송한 세그먼트의 최근 4주 주간 추이
+  var segsToday = {};
+  today.forEach(function(c){ segsToday[dpSegOf(c.target)] = 1; });
+  var weeks = [];
+  var wStart = dpYMD(dateStr); wStart.setDate(wStart.getDate() - wStart.getDay());
+  for (var w = 3; w >= 0; w--){
+    var ws = new Date(wStart.getTime()); ws.setDate(ws.getDate() - w*7);
+    var we = new Date(ws.getTime()); we.setDate(we.getDate() + 6);
+    weeks.push({ from: dpDS(ws), to: dpDS(we), label: dpWN(ws) + '주차(' + dpMD(ws) + '~' + dpMD(we) + ')' });
+  }
+  var segTrend = dpSegSort(Object.keys(segsToday)).map(function(sg){
+    return {
+      세그먼트: sg,
+      주간: weeks.map(function(wk){
+        var list = camps.filter(function(c){
+          var d = c.send_date.slice(0,10);
+          return d >= wk.from && d <= wk.to && dpSegOf(c.target) === sg;
+        });
+        var o = agg(list);
+        return { 주차: wk.label, 발송: o.s, 클릭률: brRate(o.clk, o.s), 전환율: brRate(o.cv, o.s) };
+      })
+    };
+  });
+
+  // 최근 14일 일별 합계
+  var daily = [];
+  for (var k = 13; k >= 0; k--){
+    var dd = new Date(dt.getTime()); dd.setDate(dd.getDate() - k);
+    var ds = dpDS(dd), o = agg(onDay(ds));
+    if (!o.n) continue;
+    daily.push({ 일자: ds + '(' + DP_WD[dd.getDay()] + ')', 발송: o.s, 클릭률: brRate(o.clk, o.s),
+      전환: o.cv, 전환율: brRate(o.cv, o.s), 매출: o.rev });
+  }
+
+  return {
+    date: dateStr,
+    weekday: DP_WD[dt.getDay()],
+    지표정의: '전환·매출은 발송 후 24/48시간 내 귀속 실적(캠페인 저장값), 클릭은 Bitly 총 클릭. 비율은 합계÷합계(발송수 가중).',
+    campaigns: today.sort(function(a,b){ return (b.send_count||0) - (a.send_count||0); }).map(function(c){
+      var o = anCell(); anAdd(o, c);
+      return {
+        발송시각: (c.send_date||'').slice(11) || null,
+        목적: c.purpose || null, 세그먼트: dpSegOf(c.target), 채널: c.channel || null,
+        기간조건: head(c.target, 40), 소구점: head(c.incentive, 40), 카피앞부분: head(c.message, 60),
+        발송: o.s, 클릭: o.clk, 클릭률: brRate(o.clk, o.s),
+        전환: o.cv, 전환율: brRate(o.cv, o.s), 매출: o.rev, 비용: o.cost,
+        ROAS: o.cost ? brRate(o.rev, o.cost) : null
+      };
+    }),
+    합계: brPack(agg(today)),
+    목적별: Object.keys(byPur).map(function(p){ var r = brPack(byPur[p]); r.목적 = p; return r; }),
+    비교: {
+      전주동요일: { 일자: prevWStr, 값: brPack(agg(onDay(prevWStr))) },
+      직전7일일평균: l7avg
+    },
+    세그먼트_주간추이: segTrend,
+    최근14일: daily
+  };
+}
+
+function brRender(b){
+  var box = document.getElementById('brResult');
+  if (!b){ box.innerHTML = ''; return; }
+  var meta = '생성 ' + (b.createdAt || '') + (b.model ? ' · ' + b.model : '') +
+    (b.usage ? ' · 토큰 in ' + b.usage.input.toLocaleString() + ' / out ' + b.usage.output.toLocaleString() : '') +
+    (b.campaigns != null ? ' · 캠페인 ' + b.campaigns + '건' : '');
+  document.getElementById('brMeta').textContent = meta;
+  box.innerHTML = '<div class="br-wrap"><div class="br-body">' + b.html + '</div></div>' +
+    '<p class="br-meta" style="margin-top:14px;border-top:1px dashed #d1d5db;padding-top:8px">' +
+    'AI가 작성한 요약입니다. 전환·매출은 <b>귀속</b> 기준이라 발송의 순증분 효과가 아닙니다. 의사결정 전 위 표·그래프의 원 수치를 함께 확인해주세요.</p>';
+}
+function brLoadCached(){
+  var d = document.getElementById('brDate').value;
+  if (!d) return;
+  document.getElementById('brMeta').textContent = '';
+  document.getElementById('brResult').innerHTML = '<div class="an-empty">불러오는 중…</div>';
+  fetch('api/daily-briefing-status?date=' + encodeURIComponent(d)).then(function(r){ return r.json(); }).then(function(j){
+    if (j.briefing) brRender(j.briefing);
+    else document.getElementById('brResult').innerHTML =
+      '<div class="an-empty">' + d + ' 브리핑이 없습니다. [브리핑 생성]을 눌러주세요.</div>';
+  }).catch(function(){ document.getElementById('brResult').innerHTML = ''; });
+}
+async function brRun(force){
+  var d = document.getElementById('brDate').value;
+  if (!d){ alert('대상일을 선택해주세요.'); return; }
+  var btn = document.getElementById('btnBrief'), btn2 = document.getElementById('btnBriefRegen');
+  if (!cdLoaded){ await loadCampaignDashboard(); }
+  var pkg = brBuildPkg(d);
+  if (!pkg.campaigns.length && !force){
+    document.getElementById('brResult').innerHTML =
+      '<div class="an-empty">' + d + '에 발송된 캠페인이 없습니다. 다른 날짜를 선택해주세요.</div>';
+    return;
+  }
+  btn.disabled = true; btn2.disabled = true; btn.textContent = '생성 중…';
+  document.getElementById('brResult').innerHTML =
+    '<div class="an-empty">Claude가 작성 중입니다… (20~60초, 캠페인 ' + pkg.campaigns.length + '건)</div>';
+  function done(){ btn.disabled = false; btn2.disabled = false; btn.textContent = '브리핑 생성'; brPolling = false; }
+  async function readJson(res){
+    var ct = res.headers.get('content-type') || '';
+    if (ct.indexOf('json') === -1) throw new Error('서버 응답 오류 (HTTP ' + res.status + ')');
+    return res.json();
+  }
+  try {
+    var r = await fetch('api/daily-briefing', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ date: d, force: !!force, data: pkg }) });
+    var j = await readJson(r);
+    if (j.error) throw new Error(j.error);
+    if (j.cached && j.briefing){ brRender(j.briefing); done(); return; }
+    if (j.busy){ throw new Error('다른 날짜(' + j.date + ') 브리핑이 생성 중입니다. 잠시 후 다시 시도해주세요.'); }
+    brPolling = true; brTries = 0;
+    async function poll(){
+      if (!brPolling) return;
+      brTries++;
+      try {
+        var s = await fetch('api/daily-briefing-status?date=' + encodeURIComponent(d));
+        var sj = await readJson(s);
+        if (sj.error){ document.getElementById('brResult').innerHTML =
+            '<div class="an-empty" style="color:#b91c1c">' + escHtml(sj.error) + '</div>'; done(); return; }
+        if (sj.briefing && !sj.running){ brRender(sj.briefing); done(); return; }
+        if (!sj.running && brTries > 2){
+          document.getElementById('brResult').innerHTML = '<div class="an-empty">생성이 끝났지만 결과가 없습니다. 다시 시도해주세요.</div>';
+          done(); return;
+        }
+        if (brTries > 60){ document.getElementById('brResult').innerHTML = '<div class="an-empty">시간이 초과되었습니다. 다시 시도해주세요.</div>'; done(); return; }
+        document.getElementById('brResult').innerHTML =
+          '<div class="an-empty">Claude가 작성 중입니다… (' + (brTries * 3) + '초 경과)</div>';
+        setTimeout(poll, 3000);
+      } catch(e){
+        if (brTries > 60){ done(); return; }
+        setTimeout(poll, 3000);
+      }
+    }
+    setTimeout(poll, 3000);
+  } catch(e){
+    document.getElementById('brResult').innerHTML =
+      '<div class="an-empty" style="color:#b91c1c">' + escHtml(e.message) + '</div>';
+    done();
+  }
 }
 
 // ═══ 성과 요약(전체 vs LMS 귀속 vs 비중) — 일자별 성과 상단 패널 ═══
@@ -9528,6 +9955,49 @@ var server = http.createServer(async function (req, res) {
       return;
     }
 
+    // ── AI 데일리 브리핑: 생성 시작(즉시 응답 + 백그라운드) ──
+    if (pathname === "/api/daily-briefing" && req.method === "POST") {
+      var dbBody = await parseBody(req);
+      var dbDate = (dbBody && dbBody.date) || "";
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dbDate)) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "date(YYYY-MM-DD)가 필요합니다." }));
+        return;
+      }
+      // 저장본이 있으면 재호출 없이 그대로 (force일 때만 다시 생성 → 불필요한 API 비용 방지)
+      if (!dbBody.force && briefingStore[dbDate]) {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, cached: true, briefing: briefingStore[dbDate] }));
+        return;
+      }
+      if (briefingJob.running) {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, started: false, busy: true, date: briefingJob.date }));
+        return;
+      }
+      if (!env.ANTHROPIC_API_KEY) {
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "ANTHROPIC_API_KEY가 설정되지 않았습니다. 서버 환경변수에 추가한 뒤 재시작해주세요." }));
+        return;
+      }
+      briefingJob = { running: true, date: dbDate, startedAt: nowKstStr(), finishedAt: null, error: null };
+      runBriefingJob(dbDate, dbBody.data || { date: dbDate });   // 백그라운드 (await 안 함)
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, started: true, date: dbDate }));
+      return;
+    }
+    if (pathname === "/api/daily-briefing-status" && req.method === "GET") {
+      var dbQDate = parsedUrl.searchParams.get("date") || briefingJob.date || "";
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({
+        running: briefingJob.running, date: briefingJob.date,
+        startedAt: briefingJob.startedAt, finishedAt: briefingJob.finishedAt,
+        error: briefingJob.error,
+        briefing: briefingStore[dbQDate] || null
+      }));
+      return;
+    }
+
     // ── 앱 설정: 캠페인 목적 목록 조회/저장 ──
     if (pathname === "/api/settings" && req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -10025,6 +10495,7 @@ async function start() {
   loadExtractionHistory();
   loadRefuseList();
   loadSettings();
+  loadBriefings();
 
   // HTTP 서버를 먼저 listen → /health 가 DB 연결과 무관하게 즉시 응답(배포 헬스체크 통과).
   server.listen(PORT, "0.0.0.0", function () {
