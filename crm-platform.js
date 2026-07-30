@@ -2085,8 +2085,15 @@ async function runPerfSummaryJob(from, to) {
 // 집계는 프론트([성과 분석] 탭)에서 화면과 똑같은 함수로 계산해 보내온다.
 // → 브리핑 숫자와 그래프 숫자가 어긋날 수 없다. 서버는 프롬프트 구성·API 호출·캐시만 담당.
 // 응답이 20~60초 걸려 프록시 504(HTML) 위험이 있으므로 즉시 응답 + 백그라운드 + 폴링.
+// 생성 경로는 두 가지 — 둘 다 같은 저장소에 쌓이고 화면에서 똑같이 보인다.
+//  (1) API: 서버가 직접 Claude API 호출 (ANTHROPIC_API_KEY 필요, 토큰 과금)
+//  (2) Claude Code: 대시보드가 올려둔 집계 패키지를 로컬 Claude Code가 받아 쓰고 결과를 되돌려 저장
+//      (Max 구독으로 커버 — API 크레딧 불필요)
+// 어느 쪽이든 집계는 항상 프론트가 화면과 같은 함수로 계산한 값을 쓴다.
 var BRIEFING_PATH = path.join(DATA_DIR, "daily-briefing.json");
-var briefingStore = {};   // { "2026-07-29": { md, html, createdAt, model, usage, servedBy } }
+var BRIEFING_DATA_PATH = path.join(DATA_DIR, "briefing-data.json");
+var briefingStore = {};   // { "2026-07-29": { md, html, createdAt, source, model, usage } }
+var briefingData = {};    // { "2026-07-29": { uploadedAt, data } } — Claude Code가 받아갈 집계 패키지
 var briefingJob = { running: false, date: null, startedAt: null, finishedAt: null, error: null };
 
 function loadBriefings() {
@@ -2096,6 +2103,9 @@ function loadBriefings() {
       console.log("[브리핑] 저장본 " + Object.keys(briefingStore).length + "일치 로드");
     }
   } catch (e) { console.log("[브리핑] 로드 실패:", e.message); briefingStore = {}; }
+  try {
+    if (fs.existsSync(BRIEFING_DATA_PATH)) briefingData = JSON.parse(fs.readFileSync(BRIEFING_DATA_PATH, "utf-8")) || {};
+  } catch (e) { briefingData = {}; }
 }
 function saveBriefings() {
   try {
@@ -2104,6 +2114,13 @@ function saveBriefings() {
     while (keys.length > 120) { delete briefingStore[keys.shift()]; }
     fs.writeFileSync(BRIEFING_PATH, JSON.stringify(briefingStore, null, 1), "utf-8");
   } catch (e) { console.log("[브리핑] 저장 실패:", e.message); }
+}
+function saveBriefingData() {
+  try {
+    var keys = Object.keys(briefingData).sort();
+    while (keys.length > 21) { delete briefingData[keys.shift()]; }   // 집계 패키지는 3주만
+    fs.writeFileSync(BRIEFING_DATA_PATH, JSON.stringify(briefingData), "utf-8");
+  } catch (e) { console.log("[브리핑] 집계 저장 실패:", e.message); }
 }
 
 var BRIEFING_SYSTEM =
@@ -2263,7 +2280,7 @@ async function runBriefingJob(dateStr, pkg) {
     }
     if (!r.md) { briefingJob.error = "브리핑 본문이 비어 있습니다. 다시 시도해주세요."; return; }
     briefingStore[dateStr] = {
-      md: r.md, html: mdToHtml(r.md), createdAt: nowKstStr(),
+      md: r.md, html: mdToHtml(r.md), createdAt: nowKstStr(), source: "api",
       model: r.model, servedBy: r.servedBy,
       usage: r.usage ? { input: r.usage.input_tokens, output: r.usage.output_tokens } : null,
       campaigns: (pkg.campaigns || []).length
@@ -5546,13 +5563,32 @@ function brBuildPkg(dateStr){
 function brRender(b){
   var box = document.getElementById('brResult');
   if (!b){ box.innerHTML = ''; return; }
-  var meta = '생성 ' + (b.createdAt || '') + (b.model ? ' · ' + b.model : '') +
+  var src = b.source === 'claude-code' ? 'Claude Code(구독)' : (b.source === 'api' || b.model ? 'Claude API' : '');
+  var meta = '생성 ' + (b.createdAt || '') + (src ? ' · ' + src : '') + (b.model ? ' · ' + b.model : '') +
     (b.usage ? ' · 토큰 in ' + b.usage.input.toLocaleString() + ' / out ' + b.usage.output.toLocaleString() : '') +
     (b.campaigns != null ? ' · 캠페인 ' + b.campaigns + '건' : '');
   document.getElementById('brMeta').textContent = meta;
   box.innerHTML = '<div class="br-wrap"><div class="br-body">' + b.html + '</div></div>' +
     '<p class="br-meta" style="margin-top:14px;border-top:1px dashed #d1d5db;padding-top:8px">' +
     'AI가 작성한 요약입니다. 전환·매출은 <b>귀속</b> 기준이라 발송의 순증분 효과가 아닙니다. 의사결정 전 위 표·그래프의 원 수치를 함께 확인해주세요.</p>';
+}
+// 구독(Claude Code) 경로 안내 — 서버에 API 키가 없을 때
+function brShowCcGuide(d, n){
+  var cmd = '/daily-briefing ' + d;
+  document.getElementById('brResult').innerHTML =
+    '<div style="border:1px solid #93c5fd;background:#eff6ff;border-radius:8px;padding:14px 16px">' +
+    '<div style="font-weight:700;color:#1d4ed8;font-size:13px">집계 데이터를 서버에 올렸습니다 (' + d + ' · 캠페인 ' + n + '건)</div>' +
+    '<p class="an-note" style="margin-top:8px">이 서버에는 Claude API 키가 없어 <b>구독(Claude Code)으로 작성</b>하는 방식입니다. 본인 PC의 Claude Code에서 아래를 실행하면 브리핑이 이 화면에 저장됩니다.</p>' +
+    '<div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+    '<code style="background:#111827;color:#fff;padding:7px 12px;border-radius:5px;font-size:13px">' + cmd + '</code>' +
+    '<button class="an-q" onclick="brCopyCmd(this)" data-cmd="' + d + '">명령어 복사</button>' +
+    '<button class="an-q" onclick="brLoadCached()">작성 후 새로고침</button></div>' +
+    '<p class="an-note" style="margin-top:8px;color:#6b7280">Claude Code가 서버에서 집계를 받아 브리핑을 쓰고 다시 저장합니다. 완료되면 [작성 후 새로고침]을 누르세요.</p>' +
+    '</div>';
+}
+function brCopyCmd(btn){
+  var t = '/daily-briefing ' + btn.getAttribute('data-cmd');
+  if (navigator.clipboard) navigator.clipboard.writeText(t).then(function(){ btn.textContent = '복사됨'; setTimeout(function(){ btn.textContent = '명령어 복사'; }, 1500); });
 }
 function brLoadCached(){
   var d = document.getElementById('brDate').value;
@@ -5592,6 +5628,8 @@ async function brRun(force){
     if (j.error) throw new Error(j.error);
     if (j.cached && j.briefing){ brRender(j.briefing); done(); return; }
     if (j.busy){ throw new Error('다른 날짜(' + j.date + ') 브리핑이 생성 중입니다. 잠시 후 다시 시도해주세요.'); }
+    // API 키가 없는 서버 = 구독(Claude Code) 경로. 집계는 올라갔으니 로컬에서 작성하면 된다.
+    if (j.mode === 'claude-code'){ brShowCcGuide(d, pkg.campaigns.length); done(); return; }
     brPolling = true; brTries = 0;
     async function poll(){
       if (!brPolling) return;
@@ -10362,6 +10400,11 @@ var server = http.createServer(async function (req, res) {
         res.end(JSON.stringify({ error: "date(YYYY-MM-DD)가 필요합니다." }));
         return;
       }
+      // 집계 패키지는 항상 저장해둔다 — Claude Code 경로에서 이걸 받아가고, 재생성 때도 재사용
+      if (dbBody.data && dbBody.data.campaigns) {
+        briefingData[dbDate] = { uploadedAt: nowKstStr(), data: dbBody.data };
+        saveBriefingData();
+      }
       // 저장본이 있으면 재호출 없이 그대로 (force일 때만 다시 생성 → 불필요한 API 비용 방지)
       if (!dbBody.force && briefingStore[dbDate]) {
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -10373,15 +10416,16 @@ var server = http.createServer(async function (req, res) {
         res.end(JSON.stringify({ ok: true, started: false, busy: true, date: briefingJob.date }));
         return;
       }
+      // API 키가 없으면 Claude Code(구독) 경로로 안내 — 집계 패키지는 이미 위에서 저장됐다
       if (!env.ANTHROPIC_API_KEY) {
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ error: "ANTHROPIC_API_KEY가 설정되지 않았습니다. 서버 환경변수에 추가한 뒤 재시작해주세요." }));
+        res.end(JSON.stringify({ ok: true, mode: "claude-code", dataReady: true, date: dbDate }));
         return;
       }
       briefingJob = { running: true, date: dbDate, startedAt: nowKstStr(), finishedAt: null, error: null };
       runBriefingJob(dbDate, dbBody.data || { date: dbDate });   // 백그라운드 (await 안 함)
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: true, started: true, date: dbDate }));
+      res.end(JSON.stringify({ ok: true, started: true, mode: "api", date: dbDate }));
       return;
     }
     if (pathname === "/api/daily-briefing-status" && req.method === "GET") {
@@ -10391,8 +10435,57 @@ var server = http.createServer(async function (req, res) {
         running: briefingJob.running, date: briefingJob.date,
         startedAt: briefingJob.startedAt, finishedAt: briefingJob.finishedAt,
         error: briefingJob.error,
+        mode: env.ANTHROPIC_API_KEY ? "api" : "claude-code",
+        dataReady: !!briefingData[dbQDate],
         briefing: briefingStore[dbQDate] || null
       }));
+      return;
+    }
+
+    // ── 집계 패키지 조회 (로컬 Claude Code가 받아간다) ──
+    if (pathname === "/api/daily-briefing/data" && req.method === "GET") {
+      var bdDate = parsedUrl.searchParams.get("date") || "";
+      var rec = briefingData[bdDate];
+      if (!rec) {
+        res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({
+          error: bdDate + " 집계 패키지가 없습니다. 대시보드 [성과 분석] 탭에서 해당 날짜로 [브리핑 생성]을 한 번 눌러 올려주세요.",
+          available: Object.keys(briefingData).sort()
+        }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, date: bdDate, uploadedAt: rec.uploadedAt, data: rec.data }));
+      return;
+    }
+
+    // ── 브리핑 규격(시스템 프롬프트) — API 경로와 Claude Code 경로가 같은 규격을 쓰도록 ──
+    if (pathname === "/api/daily-briefing/spec" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, spec: BRIEFING_SYSTEM }));
+      return;
+    }
+
+    // ── 외부(Claude Code)에서 작성한 브리핑 저장 ──
+    if (pathname === "/api/daily-briefing/save" && req.method === "POST") {
+      var svBody = await parseBody(req);
+      var svDate = (svBody && svBody.date) || "";
+      var svMd = (svBody && svBody.md) || "";
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(svDate) || !svMd.trim()) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "date(YYYY-MM-DD)와 md(브리핑 본문)가 필요합니다." }));
+        return;
+      }
+      briefingStore[svDate] = {
+        md: svMd, html: mdToHtml(svMd), createdAt: nowKstStr(),
+        source: svBody.source || "claude-code",
+        model: svBody.model || null, usage: null,
+        campaigns: (briefingData[svDate] && briefingData[svDate].data && (briefingData[svDate].data.campaigns || []).length) || null
+      };
+      saveBriefings();
+      console.log("[브리핑] " + svDate + " 외부 저장 (" + briefingStore[svDate].source + ", " + svMd.length + "자)");
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, date: svDate, briefing: briefingStore[svDate] }));
       return;
     }
 
