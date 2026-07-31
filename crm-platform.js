@@ -2245,7 +2245,7 @@ async function runPerfSummaryJob(from, to) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// AI 데일리 브리핑 — 하루 발송 성과를 Claude로 요약
+// AI 브리핑 — 하루(데일리) / 한 주(위클리) 발송 성과를 Claude로 요약
 // ═══════════════════════════════════════════════════════════
 // 집계는 프론트([성과 분석] 탭)에서 화면과 똑같은 함수로 계산해 보내온다.
 // → 브리핑 숫자와 그래프 숫자가 어긋날 수 없다. 서버는 프롬프트 구성·API 호출·캐시만 담당.
@@ -2257,9 +2257,20 @@ async function runPerfSummaryJob(from, to) {
 // 어느 쪽이든 집계는 항상 프론트가 화면과 같은 함수로 계산한 값을 쓴다.
 var BRIEFING_PATH = path.join(DATA_DIR, "daily-briefing.json");
 var BRIEFING_DATA_PATH = path.join(DATA_DIR, "briefing-data.json");
-var briefingStore = {};   // { "2026-07-29": { md, html, createdAt, source, model, usage } }
-var briefingData = {};    // { "2026-07-29": { uploadedAt, data } } — Claude Code가 받아갈 집계 패키지
-var briefingJob = { running: false, date: null, startedAt: null, finishedAt: null, error: null };
+var briefingStore = {};   // { "2026-07-29" | "W2026-07-26": { md, html, createdAt, source, period, model, usage } }
+var briefingData = {};    // { 같은 키: { uploadedAt, period, data } } — Claude Code가 받아갈 집계 패키지
+var briefingJob = { running: false, key: null, date: null, period: "day", startedAt: null, finishedAt: null, error: null };
+
+// 일간·주간을 같은 저장소에 쌓는다. 키 = 일간 "2026-07-30" / 주간 "W2026-07-26"(그 주 일요일).
+// 주간 키에 접두사를 두는 이유: 같은 날짜로 일간·주간 브리핑이 서로를 덮어쓰지 않게.
+function briefingKey(period, date) { return period === "week" ? "W" + date : date; }
+function isWeekPeriod(p) { return p === "week"; }
+// 주간 패키지의 campaigns는 상위 N건만 담기므로 건수는 합계에서 읽는다.
+function briefingCampCount(pkg) {
+  if (!pkg) return null;
+  if (pkg.합계 && pkg.합계.캠페인수 != null) return pkg.합계.캠페인수;
+  return (pkg.campaigns || []).length;
+}
 
 function loadBriefings() {
   try {
@@ -2272,18 +2283,23 @@ function loadBriefings() {
     if (fs.existsSync(BRIEFING_DATA_PATH)) briefingData = JSON.parse(fs.readFileSync(BRIEFING_DATA_PATH, "utf-8")) || {};
   } catch (e) { briefingData = {}; }
 }
+// 일간 키와 주간 키는 따로 센다 — 섞어서 자르면 주간 몇 건에 일간 보관분이 밀려난다.
+function prunePeriods(store, dayMax, weekMax) {
+  var all = Object.keys(store);
+  var days = all.filter(function (k) { return k.charAt(0) !== "W"; }).sort();
+  var weeks = all.filter(function (k) { return k.charAt(0) === "W"; }).sort();
+  while (days.length > dayMax) { delete store[days.shift()]; }
+  while (weeks.length > weekMax) { delete store[weeks.shift()]; }
+}
 function saveBriefings() {
   try {
-    // 최근 120일만 보관 (파일 무한 증가 방지)
-    var keys = Object.keys(briefingStore).sort();
-    while (keys.length > 120) { delete briefingStore[keys.shift()]; }
+    prunePeriods(briefingStore, 120, 52);   // 일간 120일 · 주간 1년 (파일 무한 증가 방지)
     fs.writeFileSync(BRIEFING_PATH, JSON.stringify(briefingStore, null, 1), "utf-8");
   } catch (e) { console.log("[브리핑] 저장 실패:", e.message); }
 }
 function saveBriefingData() {
   try {
-    var keys = Object.keys(briefingData).sort();
-    while (keys.length > 21) { delete briefingData[keys.shift()]; }   // 집계 패키지는 3주만
+    prunePeriods(briefingData, 21, 8);      // 집계 패키지는 일간 3주 · 주간 8주만
     fs.writeFileSync(BRIEFING_DATA_PATH, JSON.stringify(briefingData), "utf-8");
   } catch (e) { console.log("[브리핑] 집계 저장 실패:", e.message); }
 }
@@ -2322,6 +2338,48 @@ var BRIEFING_SYSTEM =
   "- 금액은 원 단위 천단위 구분, 비율은 소수 1자리로 씁니다.\n" +
   "\n" +
   "톤: 실무 보고. 미사여구·서론 없이 짧게, 표와 짧은 문장 위주로 전체 600단어 이내. 요청한 7개 섹션 외에는 아무것도 덧붙이지 않습니다.";
+
+// 위클리 — 하루 단위 사건이 아니라 '한 주의 결과와 이어지는 추세'를 본다.
+var BRIEFING_WEEKLY_SYSTEM =
+  "당신은 바른손카드 CRM팀의 LMS 성과 분석가입니다. 주어진 JSON만 근거로 지난 한 주(일~토) 발송 성과를 위클리 브리핑으로 정리합니다.\n" +
+  "\n" +
+  "출력은 마크다운으로, 아래 8개 섹션을 이 순서대로만 씁니다.\n" +
+  "## 한 줄 요약\n" +
+  "이번 주 성과가 전주 대비 좋았는지 나빴는지 한 문장으로 명확히.\n" +
+  "## 주간 실적\n" +
+  "표로: 지표 | 이번 주 | 전주 | 증감 | 직전 4주 평균. 행은 발송 · 클릭률 · 전환 · 전환율 · 매출 · 비용 · ROAS · 전환당 비용 순서로 8행.\n" +
+  "증감은 절대량 지표(발송·전환·매출·비용)는 %로, 비율 지표(클릭률·전환율·ROAS)는 %p 또는 절대차로 씁니다.\n" +
+  "## 목적별 성과\n" +
+  "표로: 목적 | 캠페인 | 발송 | 클릭률 | 전환 | 전환율 | 매출 | ROAS. 발송량 많은 순, 최대 6행 + 나머지는 '기타 N건' 한 줄.\n" +
+  "발송 비중은 큰데 전환·매출 기여가 그에 못 미치는 목적이 있으면 표 아래 한 줄로 지적합니다.\n" +
+  "## Good\n" +
+  "이번 주에 나온 좋은 결과를 숫자로. 최대 3개, 한 항목당 한 문장.\n" +
+  "'무엇을 했다'가 아니라 '결과가 어떻게 나왔다'를 씁니다. 비교 기준(전주 · 직전 4주 평균 · 8주 추이)을 함께 적습니다.\n" +
+  "기준을 넘긴 결과가 없으면 '이번 주는 기준을 넘긴 결과가 없었습니다'라고 그대로 씁니다. 억지로 찾아내지 않습니다.\n" +
+  "## Bad\n" +
+  "좋지 않은 결과를 숫자로. 최대 3개, 한 항목당 한 문장.\n" +
+  "나쁜 소식을 완곡하게 다듬거나 변명을 덧붙이지 않습니다. 하락폭과 비교 대상을 분명히 적습니다.\n" +
+  "단, 집계 미완 · 소표본 · 단축URL 중복 같은 데이터 한계는 사실이므로 해당될 때 짧게 병기합니다.\n" +
+  "## 추세\n" +
+  "주간추이·세그먼트_주간추이에서 읽히는 흐름을 2~3개. 3주 이상 같은 방향으로 이어지는 변화만 '추세'로 부르고,\n" +
+  "한 주만 튄 값은 '단발 변동'으로 구분해 적습니다. 다음 발송에 쓸 수 있는 판단으로 씁니다 — 무엇이 통하고 무엇이 통하지 않는가.\n" +
+  "숫자를 다시 나열하지 말고, 데이터로 뒷받침되지 않는 일반론('꾸준한 최적화가 중요하다' 등)은 쓰지 않습니다.\n" +
+  "## 매출 기여\n" +
+  "이번 주 발송에 귀속된 매출 · 비용 · ROAS · 전환당 비용. 전주와 직전 4주 평균 대비 증감을 숫자로.\n" +
+  "일별 편차에서 두드러진 날이 있으면 한 줄까지만 덧붙입니다.\n" +
+  "## 다음 주 할 일\n" +
+  "2~3개. 각 항목 한 문장으로 '무엇을 왜'. 이번 주 데이터로 뒷받침되지 않는 제안은 쓰지 않습니다.\n" +
+  "\n" +
+  "데이터 해석 규칙:\n" +
+  "- 전환·매출은 발송 후 24/48시간 내 '귀속' 실적입니다. 발송이 원인이라는 증거가 아니므로 '발송 덕분에 매출이 늘었다'처럼 인과로 단정하지 말고 '귀속 매출 X원'으로 씁니다. 순증분은 대조군 없이 알 수 없습니다.\n" +
+  "- 주 간 비교에서 발송량 자체가 크게 다르면 절대량(전환수·매출)보다 비율(전환율·ROAS)을 우선해 판단합니다.\n" +
+  "- 주 후반(금·토) 발송은 아직 집계 중일 수 있습니다. 진행중=true면 몇 일치 데이터인지 한 줄로 명시하고, 전주와의 절대량 비교를 단정하지 않습니다.\n" +
+  "- 클릭률이 100%를 넘으면 여러 캠페인이 같은 단축 URL을 공유해 클릭이 중복 집계된 것입니다. 성과로 해석하지 말고 그 사실을 표시합니다.\n" +
+  "- 발송 30명 미만 캠페인·세그먼트의 비율은 표본이 작아 크게 흔들립니다. 단정하지 않습니다.\n" +
+  "- JSON에 없는 수치는 만들지 않습니다. 모르면 '데이터 없음'이라고 씁니다.\n" +
+  "- 금액은 원 단위 천단위 구분, 비율은 소수 1자리로 씁니다.\n" +
+  "\n" +
+  "톤: 실무 보고. 미사여구·서론 없이 짧게, 표와 짧은 문장 위주로 전체 800단어 이내. 요청한 8개 섹션 외에는 아무것도 덧붙이지 않습니다.";
 
 // 마크다운 → HTML (서버에서 처리 — 프론트 코드는 템플릿 리터럴 안이라 정규식 백슬래시를 못 씀)
 function mdEsc(s) {
@@ -2396,16 +2454,19 @@ function mdToHtml(md) {
 }
 
 // Claude 호출. 반환: { md, model, usage, servedBy, refused }
-async function callBriefingModel(pkg) {
+async function callBriefingModel(pkg, period) {
   var Mod = require("@anthropic-ai/sdk");
   var Anthropic = Mod.default || Mod;
   var client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
-  var userMsg = "아래는 " + pkg.date + "(" + (pkg.weekday || "") + ") 발송 성과 데이터입니다. 데일리 브리핑을 작성해주세요.\n\n" +
-    JSON.stringify(pkg, null, 1);
+  var week = isWeekPeriod(period);
+  var userMsg = (week
+    ? "아래는 " + (pkg.주차 || "") + " (" + pkg.weekStart + "~" + pkg.weekEnd + ") 주간 발송 성과 데이터입니다. 위클리 브리핑을 작성해주세요."
+    : "아래는 " + pkg.date + "(" + (pkg.weekday || "") + ") 발송 성과 데이터입니다. 데일리 브리핑을 작성해주세요.") +
+    "\n\n" + JSON.stringify(pkg, null, 1);
   var base = {
     model: "claude-opus-5",
     max_tokens: 16000,   // 사고+본문 합산 상한. 브리핑 본문은 1~2천 토큰이라 여유 충분.
-    system: BRIEFING_SYSTEM,
+    system: week ? BRIEFING_WEEKLY_SYSTEM : BRIEFING_SYSTEM,
     messages: [{ role: "user", content: userMsg }]
   };
   var res;
@@ -2435,23 +2496,24 @@ async function callBriefingModel(pkg) {
   return { md: md, model: res.model, usage: res.usage, servedBy: servedBy, refused: false };
 }
 
-async function runBriefingJob(dateStr, pkg) {
+async function runBriefingJob(key, pkg, period) {
   try {
-    var r = await callBriefingModel(pkg);
+    var r = await callBriefingModel(pkg, period);
     if (r.refused) {
       briefingJob.error = "모델이 응답을 거절했습니다 (분류: " + r.category + "). 데이터에 민감한 내용이 있는지 확인해주세요.";
       console.log("[브리핑] 거절:", r.category);
       return;
     }
     if (!r.md) { briefingJob.error = "브리핑 본문이 비어 있습니다. 다시 시도해주세요."; return; }
-    briefingStore[dateStr] = {
+    briefingStore[key] = {
       md: r.md, html: mdToHtml(r.md), createdAt: nowKstStr(), source: "api",
+      period: isWeekPeriod(period) ? "week" : "day",
       model: r.model, servedBy: r.servedBy,
       usage: r.usage ? { input: r.usage.input_tokens, output: r.usage.output_tokens } : null,
-      campaigns: (pkg.campaigns || []).length
+      campaigns: briefingCampCount(pkg)
     };
     saveBriefings();
-    console.log("[브리핑] " + dateStr + " 생성 완료 (" + r.model + ", 캠페인 " + ((pkg.campaigns || []).length) + "건)");
+    console.log("[브리핑] " + key + " 생성 완료 (" + r.model + ", 캠페인 " + briefingCampCount(pkg) + "건)");
   } catch (e) {
     var msg = e.message || String(e);
     if (e.status === 401 || /authentication/i.test(msg)) msg = "ANTHROPIC_API_KEY가 없거나 잘못되었습니다. 서버 환경변수를 확인해주세요.";
@@ -4204,17 +4266,27 @@ function generateHTML() {
     </style>
 
     <div class="panel" style="border:1px solid #c7d2fe;background:#f5f7ff">
-      <div class="panel-title" style="color:#3730a3">🤖 AI 데일리 브리핑</div>
-      <p class="an-note">
+      <div class="panel-title" style="color:#3730a3">🤖 AI 브리핑 <span style="font-size:11px;font-weight:500;color:#6366f1">데일리 · 위클리</span></div>
+      <p class="an-note" id="brIntroDay">
         하루치 발송 내역과 성과를 <b>Claude</b>가 요약합니다 — 발송 내역 → <b>Good · Bad · Lesson</b> → 매출 기여 → 오늘 할 일 순으로.
         Good/Bad는 실행이 아니라 <b>숫자로 나온 결과</b>만, 나쁜 결과도 다듬지 않고 그대로 씁니다.
         화면의 그래프와 <b>같은 집계값</b>을 넘기므로 숫자가 어긋나지 않습니다.
       </p>
+      <p class="an-note" id="brIntroWeek" style="display:none">
+        한 주(일~토) 성과를 <b>Claude</b>가 요약합니다 — 주간 실적 → 목적별 성과 → <b>Good · Bad · 추세</b> → 매출 기여 → 다음 주 할 일 순으로.
+        비교 기준은 <b>전주 · 직전 4주 평균 · 최근 8주 추이</b>이고, 3주 이상 이어진 변화만 '추세'로 부릅니다.
+        화면의 그래프와 <b>같은 집계값</b>을 넘기므로 숫자가 어긋나지 않습니다.
+      </p>
       <div class="an-row" style="margin-top:12px">
-        <label>대상일</label>
-        <input type="date" id="brDate">
-        <button class="an-q" onclick="brShift(-1)">◀ 전일</button>
-        <button class="an-q" onclick="brShift(1)">다음일 ▶</button>
+        <label>단위</label>
+        <button class="an-pill active" id="brModeDay" onclick="brSetMode('day')">데일리</button>
+        <button class="an-pill" id="brModeWeek" onclick="brSetMode('week')">위클리</button>
+        <span class="an-sep"></span>
+        <label id="brDateLabel" style="min-width:auto">대상일</label>
+        <input type="date" id="brDate" onchange="brDateChanged()">
+        <span class="br-meta" id="brRange"></span>
+        <button class="an-q" id="brPrevBtn" onclick="brShift(-1)">◀ 전일</button>
+        <button class="an-q" id="brNextBtn" onclick="brShift(1)">다음일 ▶</button>
         <button class="btn btn-primary" id="btnBrief" onclick="brRun(false)" style="margin-left:4px">브리핑 생성</button>
         <button class="an-q" id="btnBriefRegen" onclick="brRun(true)">다시 생성</button>
         <span class="br-meta" id="brMeta"></span>
@@ -5639,22 +5711,72 @@ function anRenderSumTable(series, grand){
   document.getElementById('anSumTbl').innerHTML = h;
 }
 
-// ═══ AI 데일리 브리핑 ═══
+// ═══ AI 브리핑 (데일리 / 위클리) ═══
 // 집계는 여기서(그래프와 동일한 함수로) 계산해 서버에 넘기고, 서버는 Claude 호출만 한다.
 // → 브리핑에 적힌 숫자와 아래 그래프의 숫자가 항상 일치한다.
-var brPolling = false, brTries = 0;
+// 주간은 일~토(대시보드 [주별] 그래프와 같은 경계)이고, 키 날짜는 그 주 일요일이다.
+var brPolling = false, brTries = 0, brMode = 'day';
+var brVal = { day:'', week:'' };   // 단위별로 선택 날짜를 따로 기억 (토글해도 서로 안 건드림)
 
+function brIsWeek(){ return brMode === 'week'; }
+function brWeekStartOf(dateStr){ var d = dpYMD(dateStr); d.setDate(d.getDate() - d.getDay()); return dpDS(d); }
+function brWeekEndOf(wsStr){ var d = dpYMD(wsStr); d.setDate(d.getDate() + 6); return dpDS(d); }
+function brWeekTitle(wsStr){
+  var s = dpYMD(wsStr), e = dpYMD(brWeekEndOf(wsStr));
+  return dpWN(s) + '주차 (' + dpMD(s) + '~' + dpMD(e) + ')';
+}
+// 화면 입력값 → 실제 대상 날짜. 주간이면 그 주 일요일로 맞춘다.
+function brTargetDate(){
+  var v = document.getElementById('brDate').value;
+  if (!v) return '';
+  return brIsWeek() ? brWeekStartOf(v) : v;
+}
 function brDefaultDate(){
+  var y = new Date(); y.setDate(y.getDate() - 1);                      // 일간 기본: 어제
+  brVal.day = dpDS(y);
+  var w = new Date(); w.setDate(w.getDate() - w.getDay() - 7);         // 주간 기본: 지난주(끝난 주)
+  brVal.week = dpDS(w);
+  brSyncModeUI();
+}
+// 단위 토글 · 입력칸 · 안내문구를 현재 모드에 맞춘다
+function brSyncModeUI(){
+  var wk = brIsWeek();
+  document.getElementById('brModeDay').classList.toggle('active', !wk);
+  document.getElementById('brModeWeek').classList.toggle('active', wk);
+  document.getElementById('brIntroDay').style.display = wk ? 'none' : '';
+  document.getElementById('brIntroWeek').style.display = wk ? '' : 'none';
+  document.getElementById('brDateLabel').textContent = wk ? '대상 주' : '대상일';
+  document.getElementById('brPrevBtn').textContent = wk ? '◀ 전주' : '◀ 전일';
+  document.getElementById('brNextBtn').textContent = wk ? '다음주 ▶' : '다음일 ▶';
   var el = document.getElementById('brDate');
-  if (!el || el.value) return;
-  var y = new Date(); y.setDate(y.getDate() - 1);   // 기본값: 어제
-  el.value = dpDS(y);
+  el.value = brVal[brMode] || '';
+  var rng = document.getElementById('brRange');
+  if (!el.value){ rng.textContent = ''; return; }
+  if (wk){
+    var ws = brWeekStartOf(el.value);
+    rng.textContent = brWeekTitle(ws) + (brWeekEndOf(ws) >= dpDS(new Date()) ? ' · 진행 중' : '');
+  } else {
+    rng.textContent = '(' + DP_WD[dpYMD(el.value).getDay()] + ')';
+  }
+}
+function brSetMode(m){
+  if (brMode === m) return;
+  brMode = m;
+  brSyncModeUI();
+  brLoadCached();
+}
+function brDateChanged(){
+  var el = document.getElementById('brDate');
+  brVal[brMode] = brIsWeek() ? brWeekStartOf(el.value || dpDS(new Date())) : el.value;
+  brSyncModeUI();
+  brLoadCached();
 }
 function brShift(n){
-  var el = document.getElementById('brDate');
-  if (!el.value) { brDefaultDate(); return; }
-  var d = dpYMD(el.value); d.setDate(d.getDate() + n);
-  el.value = dpDS(d);
+  if (!brVal[brMode]) { brDefaultDate(); brLoadCached(); return; }
+  var d = dpYMD(brVal[brMode]);
+  d.setDate(d.getDate() + (brIsWeek() ? n * 7 : n));
+  brVal[brMode] = dpDS(d);
+  brSyncModeUI();
   brLoadCached();
 }
 function brRate(num, den){ return den ? Math.round(num / den * 1000) / 10 : null; }   // % 소수1자리
@@ -5757,11 +5879,128 @@ function brBuildPkg(dateStr){
   };
 }
 
+// 주간 패키지 — 한 주(wsStr=일요일 ~ +6일) 합계 + 목적/세그먼트별 + 전주·4주평균 비교 + 8주 추이
+// 캠페인은 한 주에 수십 건이라 상위 20건만 싣고 나머지는 합계 한 줄로 접는다(토큰 절약).
+function brBuildWeekPkg(wsStr){
+  var camps = anCampsAll();
+  function agg(list){ var o = anCell(); list.forEach(function(c){ anAdd(o, c); }); return o; }
+  function inRange(from, to){
+    return camps.filter(function(c){ var d = c.send_date.slice(0,10); return d >= from && d <= to; });
+  }
+  function weekAt(back){   // back=0 이번 주, 1 전주 …
+    var s = dpYMD(wsStr); s.setDate(s.getDate() - back*7);
+    var e = new Date(s.getTime()); e.setDate(e.getDate() + 6);
+    return { from: dpDS(s), to: dpDS(e), label: dpWN(s) + '주차(' + dpMD(s) + '~' + dpMD(e) + ')' };
+  }
+  function head(s, n){ s = (s||'').split(String.fromCharCode(10)).join(' '); return s.length > n ? s.slice(0, n) + '…' : s; }
+
+  var wk = weekAt(0);
+  var week = inRange(wk.from, wk.to);
+  var todayStr = dpDS(new Date());
+  var 진행중 = wk.to >= todayStr;
+
+  // 일별(7일 전부 — 발송이 없던 날도 보여야 주 패턴이 읽힌다)
+  var daily = [];
+  for (var i = 0; i < 7; i++){
+    var dd = dpYMD(wk.from); dd.setDate(dd.getDate() + i);
+    var ds = dpDS(dd);
+    if (ds > todayStr) break;
+    var o = agg(camps.filter(function(c){ return c.send_date.slice(0,10) === ds; }));
+    daily.push({ 일자: ds, 요일: DP_WD[dd.getDay()], 캠페인수: o.n, 발송: o.s,
+      클릭률: brRate(o.clk, o.s), 전환: o.cv, 전환율: brRate(o.cv, o.s), 매출: o.rev });
+  }
+
+  // 목적별 / 세그먼트별 합계
+  var byPur = {}, bySeg = {};
+  week.forEach(function(c){
+    var p = c.purpose || '기타'; byPur[p] = byPur[p] || anCell(); anAdd(byPur[p], c);
+    var g = dpSegOf(c.target);   bySeg[g] = bySeg[g] || anCell(); anAdd(bySeg[g], c);
+  });
+  function packList(map, keyName, order){
+    var keys = order ? order(Object.keys(map)) : Object.keys(map).sort(function(a,b){ return map[b].s - map[a].s; });
+    return keys.map(function(k){ var r = brPack(map[k]); r[keyName] = k; return r; });
+  }
+
+  // 직전 4주(대상주 제외) 주평균
+  var prev4 = [], p4n = 0;
+  for (var b = 1; b <= 4; b++){
+    var w = weekAt(b), list = inRange(w.from, w.to);
+    if (list.length) p4n++;
+    prev4 = prev4.concat(list);
+  }
+  var p4 = agg(prev4);
+  var p4avg = p4n ? { 캠페인수: Math.round(p4.n/p4n*10)/10, 발송: Math.round(p4.s/p4n), 클릭: Math.round(p4.clk/p4n),
+    클릭률: brRate(p4.clk, p4.s), 전환: Math.round(p4.cv/p4n*10)/10, 전환율: brRate(p4.cv, p4.s),
+    매출: Math.round(p4.rev/p4n), 비용: Math.round(p4.cost/p4n),
+    ROAS: p4.cost ? brRate(p4.rev, p4.cost) : null,
+    전환당비용: p4.cv ? Math.round(p4.cost/p4.cv) : null, 발송주수: p4n } : null;
+
+  // 최근 8주 추이(대상주 포함)
+  var trend = [];
+  for (var t = 7; t >= 0; t--){
+    var wt = weekAt(t), lo = agg(inRange(wt.from, wt.to));
+    trend.push({ 주차: wt.label, 캠페인수: lo.n, 발송: lo.s, 클릭률: brRate(lo.clk, lo.s),
+      전환: lo.cv, 전환율: brRate(lo.cv, lo.s), 매출: lo.rev,
+      ROAS: lo.cost ? brRate(lo.rev, lo.cost) : null });
+  }
+
+  // 이번 주 발송한 세그먼트의 최근 4주 주간 추이
+  var segsWeek = {};
+  week.forEach(function(c){ segsWeek[dpSegOf(c.target)] = 1; });
+  var segTrend = dpSegSort(Object.keys(segsWeek)).map(function(sg){
+    return {
+      세그먼트: sg,
+      주간: [3,2,1,0].map(function(back){
+        var w2 = weekAt(back);
+        var o2 = agg(camps.filter(function(c){
+          var d = c.send_date.slice(0,10);
+          return d >= w2.from && d <= w2.to && dpSegOf(c.target) === sg;
+        }));
+        return { 주차: w2.label, 발송: o2.s, 클릭률: brRate(o2.clk, o2.s), 전환율: brRate(o2.cv, o2.s) };
+      })
+    };
+  });
+
+  var sorted = week.slice().sort(function(a,b){ return (b.send_count||0) - (a.send_count||0); });
+  var TOP = 20;
+  var rest = sorted.slice(TOP);
+
+  return {
+    period: 'week',
+    weekStart: wk.from, weekEnd: wk.to, 주차: wk.label, 진행중: 진행중,
+    지표정의: '전환·매출은 발송 후 24/48시간 내 귀속 실적(캠페인 저장값), 클릭은 Bitly 총 클릭. 비율은 합계÷합계(발송수 가중). 주 경계는 일~토.',
+    campaigns: sorted.slice(0, TOP).map(function(c){
+      var o = anCell(); anAdd(o, c);
+      var dt = dpYMD(c.send_date.slice(0,10));
+      return {
+        일자: c.send_date.slice(0,10) + '(' + DP_WD[dt.getDay()] + ')',
+        목적: c.purpose || null, 세그먼트: dpSegOf(c.target), 채널: c.channel || null,
+        소구점: head(c.incentive, 40),
+        발송: o.s, 클릭: o.clk, 클릭률: brRate(o.clk, o.s),
+        전환: o.cv, 전환율: brRate(o.cv, o.s), 매출: o.rev, 비용: o.cost,
+        ROAS: o.cost ? brRate(o.rev, o.cost) : null
+      };
+    }),
+    기타캠페인: rest.length ? { 건수: rest.length, 합계: brPack(agg(rest)) } : null,
+    합계: brPack(agg(week)),
+    일별: daily,
+    목적별: packList(byPur, '목적'),
+    세그먼트별: packList(bySeg, '세그먼트', dpSegSort),
+    비교: {
+      전주: { 주차: weekAt(1).label, 값: brPack(agg(inRange(weekAt(1).from, weekAt(1).to))) },
+      직전4주주평균: p4avg
+    },
+    주간추이: trend,
+    세그먼트_주간추이: segTrend
+  };
+}
+
 function brRender(b){
   var box = document.getElementById('brResult');
   if (!b){ box.innerHTML = ''; return; }
   var src = b.source === 'claude-code' ? 'Claude Code(구독)' : (b.source === 'api' || b.model ? 'Claude API' : '');
-  var meta = '생성 ' + (b.createdAt || '') + (src ? ' · ' + src : '') + (b.model ? ' · ' + b.model : '') +
+  var meta = (b.period === 'week' ? '위클리 · ' : '') +
+    '생성 ' + (b.createdAt || '') + (src ? ' · ' + src : '') + (b.model ? ' · ' + b.model : '') +
     (b.usage ? ' · 토큰 in ' + b.usage.input.toLocaleString() + ' / out ' + b.usage.output.toLocaleString() : '') +
     (b.campaigns != null ? ' · 캠페인 ' + b.campaigns + '건' : '');
   document.getElementById('brMeta').textContent = meta;
@@ -5771,10 +6010,12 @@ function brRender(b){
 }
 // 구독(Claude Code) 경로 안내 — 서버에 API 키가 없을 때
 function brShowCcGuide(d, n){
-  var cmd = '/daily-briefing ' + d;
+  var wk = brIsWeek();
+  var cmd = '/daily-briefing ' + (wk ? '--weekly ' : '') + d;
   document.getElementById('brResult').innerHTML =
     '<div style="border:1px solid #93c5fd;background:#eff6ff;border-radius:8px;padding:14px 16px">' +
-    '<div style="font-weight:700;color:#1d4ed8;font-size:13px">집계 데이터를 서버에 올렸습니다 (' + d + ' · 캠페인 ' + n + '건)</div>' +
+    '<div style="font-weight:700;color:#1d4ed8;font-size:13px">집계 데이터를 서버에 올렸습니다 (' +
+    (wk ? brWeekTitle(d) : d) + ' · 캠페인 ' + n + '건)</div>' +
     '<p class="an-note" style="margin-top:8px">이 서버에는 Claude API 키가 없어 <b>구독(Claude Code)으로 작성</b>하는 방식입니다. 본인 PC의 Claude Code에서 아래를 실행하면 브리핑이 이 화면에 저장됩니다.</p>' +
     '<div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
     '<code style="background:#111827;color:#fff;padding:7px 12px;border-radius:5px;font-size:13px">' + cmd + '</code>' +
@@ -5787,31 +6028,36 @@ function brCopyCmd(btn){
   var t = '/daily-briefing ' + btn.getAttribute('data-cmd');
   if (navigator.clipboard) navigator.clipboard.writeText(t).then(function(){ btn.textContent = '복사됨'; setTimeout(function(){ btn.textContent = '명령어 복사'; }, 1500); });
 }
+function brPeriodParam(){ return brIsWeek() ? '&period=week' : ''; }
+function brLabelOf(d){ return brIsWeek() ? brWeekTitle(d) : d; }
 function brLoadCached(){
-  var d = document.getElementById('brDate').value;
+  var d = brTargetDate();
   if (!d) return;
   document.getElementById('brMeta').textContent = '';
   document.getElementById('brResult').innerHTML = '<div class="an-empty">불러오는 중…</div>';
-  fetch('api/daily-briefing-status?date=' + encodeURIComponent(d)).then(function(r){ return r.json(); }).then(function(j){
+  fetch('api/daily-briefing-status?date=' + encodeURIComponent(d) + brPeriodParam())
+    .then(function(r){ return r.json(); }).then(function(j){
     if (j.briefing) brRender(j.briefing);
     else document.getElementById('brResult').innerHTML =
-      '<div class="an-empty">' + d + ' 브리핑이 없습니다. [브리핑 생성]을 눌러주세요.</div>';
+      '<div class="an-empty">' + brLabelOf(d) + ' 브리핑이 없습니다. [브리핑 생성]을 눌러주세요.</div>';
   }).catch(function(){ document.getElementById('brResult').innerHTML = ''; });
 }
 async function brRun(force){
-  var d = document.getElementById('brDate').value;
-  if (!d){ alert('대상일을 선택해주세요.'); return; }
+  var d = brTargetDate();
+  if (!d){ alert(brIsWeek() ? '대상 주를 선택해주세요.' : '대상일을 선택해주세요.'); return; }
+  var wk = brIsWeek();
   var btn = document.getElementById('btnBrief'), btn2 = document.getElementById('btnBriefRegen');
   if (!cdLoaded){ await loadCampaignDashboard(); }
-  var pkg = brBuildPkg(d);
-  if (!pkg.campaigns.length && !force){
+  var pkg = wk ? brBuildWeekPkg(d) : brBuildPkg(d);
+  var nCamp = (pkg.합계 && pkg.합계.캠페인수) || pkg.campaigns.length;
+  if (!nCamp && !force){
     document.getElementById('brResult').innerHTML =
-      '<div class="an-empty">' + d + '에 발송된 캠페인이 없습니다. 다른 날짜를 선택해주세요.</div>';
+      '<div class="an-empty">' + brLabelOf(d) + '에 발송된 캠페인이 없습니다. 다른 ' + (wk ? '주' : '날짜') + '를 선택해주세요.</div>';
     return;
   }
   btn.disabled = true; btn2.disabled = true; btn.textContent = '생성 중…';
   document.getElementById('brResult').innerHTML =
-    '<div class="an-empty">Claude가 작성 중입니다… (20~60초, 캠페인 ' + pkg.campaigns.length + '건)</div>';
+    '<div class="an-empty">Claude가 작성 중입니다… (20~60초, 캠페인 ' + nCamp + '건)</div>';
   function done(){ btn.disabled = false; btn2.disabled = false; btn.textContent = '브리핑 생성'; brPolling = false; }
   async function readJson(res){
     var ct = res.headers.get('content-type') || '';
@@ -5820,19 +6066,19 @@ async function brRun(force){
   }
   try {
     var r = await fetch('api/daily-briefing', { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ date: d, force: !!force, data: pkg }) });
+      body: JSON.stringify({ date: d, period: wk ? 'week' : 'day', force: !!force, data: pkg }) });
     var j = await readJson(r);
     if (j.error) throw new Error(j.error);
     if (j.cached && j.briefing){ brRender(j.briefing); done(); return; }
-    if (j.busy){ throw new Error('다른 날짜(' + j.date + ') 브리핑이 생성 중입니다. 잠시 후 다시 시도해주세요.'); }
+    if (j.busy){ throw new Error('다른 브리핑(' + (j.period === 'week' ? '주간 ' : '') + j.date + ')이 생성 중입니다. 잠시 후 다시 시도해주세요.'); }
     // API 키가 없는 서버 = 구독(Claude Code) 경로. 집계는 올라갔으니 로컬에서 작성하면 된다.
-    if (j.mode === 'claude-code'){ brShowCcGuide(d, pkg.campaigns.length); done(); return; }
+    if (j.mode === 'claude-code'){ brShowCcGuide(d, nCamp); done(); return; }
     brPolling = true; brTries = 0;
     async function poll(){
       if (!brPolling) return;
       brTries++;
       try {
-        var s = await fetch('api/daily-briefing-status?date=' + encodeURIComponent(d));
+        var s = await fetch('api/daily-briefing-status?date=' + encodeURIComponent(d) + (wk ? '&period=week' : ''));
         var sj = await readJson(s);
         if (sj.error){ document.getElementById('brResult').innerHTML =
             '<div class="an-empty" style="color:#b91c1c">' + escHtml(sj.error) + '</div>'; done(); return; }
@@ -10726,78 +10972,90 @@ var server = http.createServer(async function (req, res) {
       return;
     }
 
-    // ── AI 데일리 브리핑: 생성 시작(즉시 응답 + 백그라운드) ──
+    // ── AI 브리핑(데일리/위클리): 생성 시작(즉시 응답 + 백그라운드) ──
+    // period=week면 date는 그 주의 '일요일'(주 시작일)이고, 저장 키는 "W"+date가 된다.
     if (pathname === "/api/daily-briefing" && req.method === "POST") {
       var dbBody = await parseBody(req);
       var dbDate = (dbBody && dbBody.date) || "";
+      var dbPeriod = (dbBody && dbBody.period) === "week" ? "week" : "day";
       if (!/^\d{4}-\d{2}-\d{2}$/.test(dbDate)) {
         res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ error: "date(YYYY-MM-DD)가 필요합니다." }));
+        res.end(JSON.stringify({ error: "date(YYYY-MM-DD)가 필요합니다." + (dbPeriod === "week" ? " (주간은 그 주 일요일)" : "") }));
         return;
       }
+      var dbKey = briefingKey(dbPeriod, dbDate);
       // 집계 패키지는 항상 저장해둔다 — Claude Code 경로에서 이걸 받아가고, 재생성 때도 재사용
       if (dbBody.data && dbBody.data.campaigns) {
-        briefingData[dbDate] = { uploadedAt: nowKstStr(), data: dbBody.data };
+        briefingData[dbKey] = { uploadedAt: nowKstStr(), period: dbPeriod, data: dbBody.data };
         saveBriefingData();
       }
       // 저장본이 있으면 재호출 없이 그대로 (force일 때만 다시 생성 → 불필요한 API 비용 방지)
-      if (!dbBody.force && briefingStore[dbDate]) {
+      if (!dbBody.force && briefingStore[dbKey]) {
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: true, cached: true, briefing: briefingStore[dbDate] }));
+        res.end(JSON.stringify({ ok: true, cached: true, briefing: briefingStore[dbKey] }));
         return;
       }
       if (briefingJob.running) {
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: true, started: false, busy: true, date: briefingJob.date }));
+        res.end(JSON.stringify({ ok: true, started: false, busy: true, date: briefingJob.date, period: briefingJob.period }));
         return;
       }
       // API 키가 없으면 Claude Code(구독) 경로로 안내 — 집계 패키지는 이미 위에서 저장됐다
       if (!env.ANTHROPIC_API_KEY) {
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ ok: true, mode: "claude-code", dataReady: true, date: dbDate }));
+        res.end(JSON.stringify({ ok: true, mode: "claude-code", dataReady: true, date: dbDate, period: dbPeriod }));
         return;
       }
-      briefingJob = { running: true, date: dbDate, startedAt: nowKstStr(), finishedAt: null, error: null };
-      runBriefingJob(dbDate, dbBody.data || { date: dbDate });   // 백그라운드 (await 안 함)
+      briefingJob = { running: true, key: dbKey, date: dbDate, period: dbPeriod, startedAt: nowKstStr(), finishedAt: null, error: null };
+      runBriefingJob(dbKey, dbBody.data || { date: dbDate }, dbPeriod);   // 백그라운드 (await 안 함)
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: true, started: true, mode: "api", date: dbDate }));
+      res.end(JSON.stringify({ ok: true, started: true, mode: "api", date: dbDate, period: dbPeriod }));
       return;
     }
     if (pathname === "/api/daily-briefing-status" && req.method === "GET") {
-      var dbQDate = parsedUrl.searchParams.get("date") || briefingJob.date || "";
+      var dbQPeriod = parsedUrl.searchParams.get("period") === "week" ? "week" : "day";
+      var dbQDate = parsedUrl.searchParams.get("date") || "";
+      var dbQKey = dbQDate ? briefingKey(dbQPeriod, dbQDate) : (briefingJob.key || "");
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({
-        running: briefingJob.running, date: briefingJob.date,
+        running: briefingJob.running, date: briefingJob.date, period: briefingJob.period,
         startedAt: briefingJob.startedAt, finishedAt: briefingJob.finishedAt,
         error: briefingJob.error,
         mode: env.ANTHROPIC_API_KEY ? "api" : "claude-code",
-        dataReady: !!briefingData[dbQDate],
-        briefing: briefingStore[dbQDate] || null
+        dataReady: !!briefingData[dbQKey],
+        briefing: briefingStore[dbQKey] || null
       }));
       return;
     }
 
     // ── 집계 패키지 조회 (로컬 Claude Code가 받아간다) ──
     if (pathname === "/api/daily-briefing/data" && req.method === "GET") {
+      var bdPeriod = parsedUrl.searchParams.get("period") === "week" ? "week" : "day";
       var bdDate = parsedUrl.searchParams.get("date") || "";
-      var rec = briefingData[bdDate];
+      var bdKey = briefingKey(bdPeriod, bdDate);
+      var rec = briefingData[bdKey];
       if (!rec) {
+        var bdWhat = bdPeriod === "week" ? "주간(" + bdDate + " 시작) " : bdDate + " ";
         res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({
-          error: bdDate + " 집계 패키지가 없습니다. 대시보드 [성과 분석] 탭에서 해당 날짜로 [브리핑 생성]을 한 번 눌러 올려주세요.",
-          available: Object.keys(briefingData).sort()
+          error: bdWhat + "집계 패키지가 없습니다. 대시보드 [성과 분석] 탭에서 해당 " +
+            (bdPeriod === "week" ? "주" : "날짜") + "로 [브리핑 생성]을 한 번 눌러 올려주세요.",
+          available: Object.keys(briefingData).filter(function (k) {
+            return (k.charAt(0) === "W") === (bdPeriod === "week");
+          }).map(function (k) { return k.charAt(0) === "W" ? k.slice(1) : k; }).sort()
         }));
         return;
       }
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: true, date: bdDate, uploadedAt: rec.uploadedAt, data: rec.data }));
+      res.end(JSON.stringify({ ok: true, date: bdDate, period: bdPeriod, uploadedAt: rec.uploadedAt, data: rec.data }));
       return;
     }
 
     // ── 브리핑 규격(시스템 프롬프트) — API 경로와 Claude Code 경로가 같은 규격을 쓰도록 ──
     if (pathname === "/api/daily-briefing/spec" && req.method === "GET") {
+      var spPeriod = parsedUrl.searchParams.get("period") === "week" ? "week" : "day";
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: true, spec: BRIEFING_SYSTEM }));
+      res.end(JSON.stringify({ ok: true, period: spPeriod, spec: spPeriod === "week" ? BRIEFING_WEEKLY_SYSTEM : BRIEFING_SYSTEM }));
       return;
     }
 
@@ -10806,21 +11064,23 @@ var server = http.createServer(async function (req, res) {
       var svBody = await parseBody(req);
       var svDate = (svBody && svBody.date) || "";
       var svMd = (svBody && svBody.md) || "";
+      var svPeriod = (svBody && svBody.period) === "week" ? "week" : "day";
       if (!/^\d{4}-\d{2}-\d{2}$/.test(svDate) || !svMd.trim()) {
         res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ error: "date(YYYY-MM-DD)와 md(브리핑 본문)가 필요합니다." }));
         return;
       }
-      briefingStore[svDate] = {
+      var svKey = briefingKey(svPeriod, svDate);
+      briefingStore[svKey] = {
         md: svMd, html: mdToHtml(svMd), createdAt: nowKstStr(),
-        source: svBody.source || "claude-code",
+        source: svBody.source || "claude-code", period: svPeriod,
         model: svBody.model || null, usage: null,
-        campaigns: (briefingData[svDate] && briefingData[svDate].data && (briefingData[svDate].data.campaigns || []).length) || null
+        campaigns: (briefingData[svKey] && briefingCampCount(briefingData[svKey].data)) || null
       };
       saveBriefings();
-      console.log("[브리핑] " + svDate + " 외부 저장 (" + briefingStore[svDate].source + ", " + svMd.length + "자)");
+      console.log("[브리핑] " + svKey + " 외부 저장 (" + briefingStore[svKey].source + ", " + svMd.length + "자)");
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ ok: true, date: svDate, briefing: briefingStore[svDate] }));
+      res.end(JSON.stringify({ ok: true, date: svDate, period: svPeriod, briefing: briefingStore[svKey] }));
       return;
     }
 
