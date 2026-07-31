@@ -4033,6 +4033,7 @@ function generateHTML() {
         .ab-winner-badge{background:#059669;color:#fff;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;margin-left:4px}
         .ab-loser{color:#999}
         .ab-draw{background:#fffbeb}
+        .ab-mode-btn.on{background:#1e293b;color:#fff;border-color:#1e293b}
         .ab-cumul{margin-top:20px}
         .ab-cumul-title{font-size:15px;font-weight:700;margin-bottom:12px;padding-bottom:8px;border-bottom:2px solid #1e293b}
         .ab-cumul-table{width:100%;border-collapse:collapse;font-size:12px}
@@ -4040,7 +4041,12 @@ function generateHTML() {
         .ab-cumul-table td{padding:8px;text-align:center;border:1px solid #e2e8f0}
       </style>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-        <h2 style="margin:0;font-size:16px">A/B 테스트 주차별 결과 <span style="font-size:12px;font-weight:400;color:#999">동일 추출이력 기반 A/B 분할 캠페인 자동 감지</span></h2>
+        <h2 style="margin:0;font-size:16px">A/B 테스트 결과 <span style="font-size:12px;font-weight:400;color:#999">동일 추출이력 기반 A/B 분할 캠페인 자동 감지</span></h2>
+        <div style="display:flex;gap:6px;align-items:center">
+          <span style="font-size:12px;color:#666">기간 단위</span>
+          <button class="btn ab-mode-btn" id="abModeWeek" style="padding:4px 12px;font-size:12px" onclick="setAbMode('week')">주간</button>
+          <button class="btn ab-mode-btn" id="abModeDay" style="padding:4px 12px;font-size:12px" onclick="setAbMode('day')">일간</button>
+        </div>
       </div>
       <div id="abTestContent"><div style="text-align:center;padding:40px;color:#999">로딩 중...</div></div>
     </div>
@@ -9841,13 +9847,33 @@ async function loadAbTest() {
   }
 }
 
+// 기간 단위 전환 — 서버가 weekAbMap/dayAbMap을 둘 다 내려주므로 재조회 없이 다시 그린다.
+var abLastData = null;
+var abMode = 'week';
+function setAbMode(m) {
+  abMode = m;
+  if (abLastData) renderAbTest(abLastData);
+}
+
 function renderAbTest(data) {
-  var weekNums = Object.keys(data.weekAbMap).map(Number).sort(function(a,b){return b-a;});
+  abLastData = data;
+  var isDay = abMode === 'day';
+  var pMap = (isDay ? data.dayAbMap : data.weekAbMap) || {};
+  var pKeys = Object.keys(pMap).sort(function(a,b){
+    if (isDay) return a < b ? 1 : (a > b ? -1 : 0);   // 날짜 문자열 내림차순
+    return Number(b) - Number(a);                      // 주차 번호 내림차순
+  });
+  var bw = document.getElementById('abModeWeek'), bd = document.getElementById('abModeDay');
+  if (bw && bd) {
+    bw.className = 'btn ab-mode-btn' + (isDay ? '' : ' on');
+    bd.className = 'btn ab-mode-btn' + (isDay ? ' on' : '');
+  }
   var pClasses = {"당일 샘플 전환":"sample","원주문 전환":"order","답례품 전환":"gift","부가 상품 전환":"addon","이용권 전환":"voucher"};
   var html = '';
+  if (!pKeys.length) html += '<div style="text-align:center;padding:30px;color:#999">A/B 분할로 발송된 캠페인이 없습니다.</div>';
 
-  weekNums.forEach(function(wn) {
-    var wg = data.weekAbMap[wn];
+  pKeys.forEach(function(wn) {
+    var wg = pMap[wn];
     var testsHtml = '';
 
     wg.tests.forEach(function(test) {
@@ -9892,7 +9918,7 @@ function renderAbTest(data) {
       testsHtml += '</tbody></table></div>';
     });
 
-    html += '<div class="ab-week"><div class="ab-week-header"><span>' + wg.week.label + '</span><span class="ab-date">' + wg.week.range + '</span></div>' + testsHtml + '</div>';
+    html += '<div class="ab-week"><div class="ab-week-header"><span>' + escHtml(wg.label || wg.week.label) + '</span><span class="ab-date">' + escHtml(wg.range || wg.week.range) + '</span></div>' + testsHtml + '</div>';
   });
 
   // 누적 인사이트
@@ -10991,6 +11017,13 @@ var server = http.createServer(async function (req, res) {
         return { num: wn, label: "W" + wn, range: fmt(start) + "~" + fmt(end) };
       }
 
+      var abWD = ["일", "월", "화", "수", "목", "금", "토"];
+      function abGetDay(dateStr) {
+        var ds = (dateStr || "").replace("T", " ").slice(0, 10);
+        var dt = new Date(ds);
+        return { key: ds, num: ds, label: (dt.getMonth() + 1) + "/" + dt.getDate() + "(" + abWD[dt.getDay()] + ")", range: ds };
+      }
+
       // extraction_id + 발송일 + 목적으로 A/B 쌍 그룹핑
       var abGroups = {};
       abCamps.forEach(function(c) {
@@ -11002,54 +11035,59 @@ var server = http.createServer(async function (req, res) {
       // 2개 이상인 그룹만 = A/B 테스트
       var abPairs = Object.values(abGroups).filter(function(g) { return g.length >= 2; });
 
-      // 주차별로 다시 그룹핑
-      var weekAbMap = {};
-      abPairs.forEach(function(pair) {
-        var w = abGetWeek(pair[0].send_date);
-        if (!weekAbMap[w.num]) weekAbMap[w.num] = { week: w, tests: [] };
+      // 기간 단위(주/일)로 다시 그룹핑. 쌍은 이미 발송일 단위라 버킷 함수만 바꾸면 된다.
+      // 같은 버킷 안에서 목적+소구포인트 조합이 같으면 합산한다 — 주간은 여러 날이 합쳐지고, 일간은 같은 날 여러 발송만 합쳐진다.
+      function abGroupByBucket(bucketFn) {
+        var out = {};
+        abPairs.forEach(function(pair) {
+          var b = bucketFn(pair[0].send_date);
+          if (!out[b.key]) out[b.key] = { week: b, label: b.label, range: b.range, tests: [] };
 
-        // 동일 목적+소구포인트 쌍을 주차 내에서 합산
-        var purpose = pair[0].purpose || "기타";
-        var target = (pair[0].target || "").replace(/\n/g, " ");
-        var splitMap = {};
-        pair.forEach(function(c) {
-          var sp = c.extraction_split;
-          if (!splitMap[sp]) splitMap[sp] = { split: sp, incentive: c.incentive || "", sent: 0, clk: 0, conv1d: 0, conv2d: 0, days: [] };
-          splitMap[sp].sent += c.send_count || 0;
-          if (c.clicks && c.clicks.total) splitMap[sp].clk += parseInt(c.clicks.total.count) || 0;
-          var cv = c.conversions || {};
-          splitMap[sp].conv1d += cv["1d"] ? parseInt(cv["1d"].count) || 0 : 0;
-          splitMap[sp].conv2d += cv["2d"] ? parseInt(cv["2d"].count) || 0 : 0;
-          splitMap[sp].days.push((c.send_date || "").slice(0, 10));
+          var purpose = pair[0].purpose || "기타";
+          var target = (pair[0].target || "").replace(/\n/g, " ");
+          var splitMap = {};
+          pair.forEach(function(c) {
+            var sp = c.extraction_split;
+            if (!splitMap[sp]) splitMap[sp] = { split: sp, incentive: c.incentive || "", sent: 0, clk: 0, conv1d: 0, conv2d: 0, days: [] };
+            splitMap[sp].sent += c.send_count || 0;
+            if (c.clicks && c.clicks.total) splitMap[sp].clk += parseInt(c.clicks.total.count) || 0;
+            var cv = c.conversions || {};
+            splitMap[sp].conv1d += cv["1d"] ? parseInt(cv["1d"].count) || 0 : 0;
+            splitMap[sp].conv2d += cv["2d"] ? parseInt(cv["2d"].count) || 0 : 0;
+            splitMap[sp].days.push((c.send_date || "").slice(0, 10));
+          });
+
+          var incentiveKey = Object.values(splitMap).map(function(s){return s.split+":"+s.incentive;}).sort().join("|");
+          var existingTest = null;
+          for (var ti = 0; ti < out[b.key].tests.length; ti++) {
+            var t = out[b.key].tests[ti];
+            if (t.purpose === purpose && t._incentiveKey === incentiveKey) { existingTest = t; break; }
+          }
+          if (existingTest) {
+            Object.keys(splitMap).forEach(function(sp) {
+              if (existingTest.splits[sp]) {
+                existingTest.splits[sp].sent += splitMap[sp].sent;
+                existingTest.splits[sp].clk += splitMap[sp].clk;
+                existingTest.splits[sp].conv1d += splitMap[sp].conv1d;
+                existingTest.splits[sp].conv2d += splitMap[sp].conv2d;
+                existingTest.splits[sp].days = existingTest.splits[sp].days.concat(splitMap[sp].days);
+              } else {
+                existingTest.splits[sp] = splitMap[sp];
+              }
+            });
+            existingTest.dayCount = new Set(Object.values(existingTest.splits).reduce(function(a, s) { return a.concat(s.days); }, [])).size;
+          } else {
+            out[b.key].tests.push({
+              purpose: purpose, target: target, splits: splitMap, _incentiveKey: incentiveKey,
+              dayCount: new Set(Object.values(splitMap).reduce(function(a, s) { return a.concat(s.days); }, [])).size
+            });
+          }
         });
+        return out;
+      }
 
-        // 동일 목적+소구포인트 조합이면 합산 (소구포인트 쌍으로 매칭)
-        var incentiveKey = Object.values(splitMap).map(function(s){return s.split+":"+s.incentive;}).sort().join("|");
-        var existingTest = null;
-        for (var ti = 0; ti < weekAbMap[w.num].tests.length; ti++) {
-          var t = weekAbMap[w.num].tests[ti];
-          if (t.purpose === purpose && t._incentiveKey === incentiveKey) { existingTest = t; break; }
-        }
-        if (existingTest) {
-          Object.keys(splitMap).forEach(function(sp) {
-            if (existingTest.splits[sp]) {
-              existingTest.splits[sp].sent += splitMap[sp].sent;
-              existingTest.splits[sp].clk += splitMap[sp].clk;
-              existingTest.splits[sp].conv1d += splitMap[sp].conv1d;
-              existingTest.splits[sp].conv2d += splitMap[sp].conv2d;
-              existingTest.splits[sp].days = existingTest.splits[sp].days.concat(splitMap[sp].days);
-            } else {
-              existingTest.splits[sp] = splitMap[sp];
-            }
-          });
-          existingTest.dayCount = new Set(Object.values(existingTest.splits).reduce(function(a, s) { return a.concat(s.days); }, [])).size;
-        } else {
-          weekAbMap[w.num].tests.push({
-            purpose: purpose, target: target, splits: splitMap, _incentiveKey: incentiveKey,
-            dayCount: new Set(Object.values(splitMap).reduce(function(a, s) { return a.concat(s.days); }, [])).size
-          });
-        }
-      });
+      var weekAbMap = abGroupByBucket(function (d) { var w = abGetWeek(d); w.key = w.num; return w; });
+      var dayAbMap = abGroupByBucket(abGetDay);
 
       // 누적 인사이트 계산 (동일 소구 전체 기간 합산)
       var cumulMap = {};
@@ -11071,7 +11109,7 @@ var server = http.createServer(async function (req, res) {
       });
 
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ weekAbMap: weekAbMap, cumulMap: cumulMap }));
+      res.end(JSON.stringify({ weekAbMap: weekAbMap, dayAbMap: dayAbMap, cumulMap: cumulMap }));
       return;
     }
 
