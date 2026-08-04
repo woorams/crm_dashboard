@@ -3873,11 +3873,19 @@ function generateHTML() {
         .tr-purpose-header{padding:10px 16px;color:#fff;font-size:13px;font-weight:700;display:flex;justify-content:space-between;align-items:center}
         .tr-h-sample{background:#1a73e8}.tr-h-order{background:#137333}.tr-h-gift{background:#e37400}.tr-h-addon{background:#7b1fa2}.tr-h-voucher{background:#c2185b}.tr-h-letterb{background:#0891b2}.tr-h-etc{background:#64748b}
         .tr-purpose-header .tr-purpose-stat{font-size:11px;font-weight:400;opacity:.92}
-        .tr-table{width:100%;border-collapse:collapse;font-size:11px;background:#fff}
+        /* 일간 + 긴 기간이면 열이 화면을 넘어간다 — 표만 가로로 스크롤시키고 첫 열(소구 포인트)은 고정한다.
+           sticky를 쓰려면 border-collapse:collapse가 아니라 separate여야 경계선이 같이 스크롤되지 않는다.
+           그래서 합계행 윗선은 tr이 아니라 td에 건다(separate에서는 tr의 border가 그려지지 않는다). */
+        .tr-scroll{overflow-x:auto}
+        .tr-table{min-width:100%;border-collapse:separate;border-spacing:0;font-size:11px;background:#fff}
         .tr-table th{padding:6px 8px;text-align:center;border-bottom:1px solid #e2e8f0;background:#f8fafc;font-size:10px;color:#475569;white-space:nowrap}
-        .tr-table td{padding:5px 8px;border-bottom:1px solid #f1f5f9;text-align:center;line-height:1.3}
-        .tr-table td.tr-ince{text-align:left;font-weight:600;color:#0f172a;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-        .tr-table tr:hover{background:#fafbfc}
+        .tr-table td{padding:5px 8px;border-bottom:1px solid #f1f5f9;text-align:center;line-height:1.3;white-space:nowrap;background:#fff}
+        .tr-table td.tr-ince{text-align:left;font-weight:600;color:#0f172a;min-width:200px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        /* box-shadow로 경계선을 그어 밑으로 스크롤돼 들어간 셀이 잘린 게 아니라 가려진 것으로 읽히게 한다 */
+        .tr-table th.tr-ince-h,.tr-table td.tr-ince{position:sticky;left:0;z-index:2;box-shadow:1px 0 0 #e2e8f0}
+        .tr-table th.tr-ince-h{z-index:3;text-align:left;min-width:200px}
+        .tr-table tbody tr:hover td{background:#fafbfc}
+        .tr-table tr.tr-total td{border-top:2px solid #cbd5e1;background:#f1f5f9;font-weight:700}
         .tr-cell{display:inline-block;min-width:62px;padding:2px 4px;border-radius:4px;font-weight:600}
         .tr-cell-empty{color:#cbd5e1}
         .tr-cell-sub{font-size:9px;color:#94a3b8;font-weight:400;display:block;margin-top:1px}
@@ -6520,7 +6528,7 @@ function renderTrend(){
     var headerClass = (trGroupBy==='target'?(hMapTarget[p]||'tr-h-etc'):(hMap[p]||'tr-h-etc'));
     html += '<div class="tr-purpose-section">';
     html += '<div class="tr-purpose-header '+headerClass+'"><span>'+p+' <span style="opacity:.7;font-weight:400;font-size:11px">('+incentives.length+'종)</span></span><span class="tr-purpose-stat">기간 합계 발송 '+pTotalSend.toLocaleString()+' / 2d 전환 '+pTotalC2.toLocaleString()+'건 / CVR '+pCvr+'%</span></div>';
-    html += '<table class="tr-table"><thead><tr><th style="text-align:left;min-width:200px">소구 포인트</th>';
+    html += '<div class="tr-scroll"><table class="tr-table"><thead><tr><th class="tr-ince-h">소구 포인트</th>';
     buckets.forEach(function(w){
       var head = isDay ? trDayLabel(w) : ('W'+w);
       var sub  = isDay ? trDayWeekday(w) : trWeekRange(w);
@@ -6570,7 +6578,7 @@ function renderTrend(){
         if (cell) { totalRow[w].send+=cell.send; totalRow[w].clk24+=cell.clk24; totalRow[w].c1d+=cell.c1d; totalRow[w].c2d+=cell.c2d; }
       });
     });
-    html += '<tr style="background:#f1f5f9;border-top:2px solid #cbd5e1;font-weight:700"><td class="tr-ince" style="color:#0f172a">'+(isDay?'일자':'주차')+' 합계 <span style="font-size:9px;color:#64748b;font-weight:400">'+(trGroupBy==='target'?'대상자':'목적')+' 전체 기준</span></td>';
+    html += '<tr class="tr-total"><td class="tr-ince" style="color:#0f172a">'+(isDay?'일자':'주차')+' 합계 <span style="font-size:9px;color:#64748b;font-weight:400">'+(trGroupBy==='target'?'대상자':'목적')+' 전체 기준</span></td>';
     var totalValues=[];
     buckets.forEach(function(w){
       var c = totalRow[w];
@@ -6600,7 +6608,7 @@ function renderTrend(){
       }
     }
     html += '<td>'+tTrend+'</td></tr>';
-    html += '</tbody></table></div>';
+    html += '</tbody></table></div></div>';   // tr-scroll + tr-purpose-section
   });
   if (!html) html = '<div style="padding:40px;text-align:center;color:#94a3b8">표시할 데이터가 없습니다. 최소 발송수 조건을 낮추거나 기간·선택 필터를 넓혀보세요.</div>';
   document.getElementById('trContent').innerHTML = html;
