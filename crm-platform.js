@@ -3886,7 +3886,7 @@ function generateHTML() {
         .tr-table th.tr-ince-h{z-index:3;text-align:left;min-width:200px}
         .tr-table tbody tr:hover td{background:#fafbfc}
         .tr-table tr.tr-total td{border-top:2px solid #cbd5e1;background:#f1f5f9;font-weight:700}
-        .tr-cell{display:inline-block;min-width:62px;padding:2px 4px;border-radius:4px;font-weight:600}
+        .tr-cell{display:inline-block;min-width:76px;padding:2px 4px;border-radius:4px;font-weight:600}
         .tr-cell-empty{color:#cbd5e1}
         .tr-cell-sub{font-size:9px;color:#94a3b8;font-weight:400;display:block;margin-top:1px}
         .tr-sparkline{display:inline-flex;align-items:flex-end;gap:1px;height:18px;vertical-align:middle}
@@ -3901,6 +3901,11 @@ function generateHTML() {
         .tr-chip:hover{background:#eff6ff;border-color:#93c5fd}
         .tr-chip.active{background:#1a73e8;color:#fff;border-color:#1a73e8}
         .tr-chip-n{opacity:.6;font-size:10px}
+        .tr-ex{border:none;background:none;color:#cbd5e1;cursor:pointer;font-size:13px;line-height:1;padding:0 5px 0 0;font-weight:700}
+        .tr-ex:hover{color:#dc2626}
+        .tr-exbar{padding:6px 10px;background:#fff7ed;border-top:1px solid #fed7aa;font-size:10px;color:#9a3412;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+        .tr-exchip{border:1px solid #fdba74;background:#fff;border-radius:999px;padding:2px 9px;font-size:10px;color:#9a3412;cursor:pointer}
+        .tr-exchip:hover{background:#ffedd5}
       </style>
       <h3 style="margin:0 0 12px;font-size:16px;color:#1e3a5f">소구 포인트 × <span id="trAxisLabel">주차</span> 전환률 매트릭스</h3>
       <div class="tr-toolbar">
@@ -3931,7 +3936,7 @@ function generateHTML() {
         <label>최소 발송수:</label>
         <input id="trMinSend" type="number" min="0" step="10" value="30" oninput="trMinSendChanged()">
         <span class="tr-hint">건 이상 · 0 = 제한없음</span>
-        <label style="margin-left:auto;font-size:11px;color:#64748b">셀: 백분율 / 발송수 — 빈셀: 해당 <span id="trAxisLabel2">주차</span>에 미사용</label>
+        <label style="margin-left:auto;font-size:11px;color:#64748b">셀: 백분율 / 발송수 · 지표건수 — 빈셀: 해당 <span id="trAxisLabel2">주차</span>에 미사용</label>
       </div>
       <div class="tr-filterbar" id="trFilterBar"></div>
       <div id="trContent">로딩 중...</div>
@@ -6307,6 +6312,19 @@ var trGroupBy = 'purpose';
 var trBucket = 'week';                          // 'week' | 'day'
 var trSelected = {purpose:{}, target:{}};       // 그룹 모드별 선택된 그룹. 비어 있으면 전체.
 var trGroupList = [];                           // 칩 인덱스 → 그룹명 (이름에 따옴표·괄호가 섞여 onclick에 직접 못 넣는다)
+var trExcluded = {};                            // 개별 소구 제외. 키: 그룹모드|그룹|소구
+var trRowReg = [];                              // 행 인덱스 → {g,i}. 그룹명과 같은 이유로 onclick엔 인덱스만 넘긴다
+function trExKey(g,i){ return trGroupBy+'|'+g+'|'+i; }
+function trMetricLabel(){ return trMetric==='cvr2'?'전환(2d)':trMetric==='cvr1'?'전환(1d)':'클릭(24h)'; }
+function trRateName(){ return trMetric==='ctr'?'CTR':'CVR'; }
+function trToggleRow(idx){
+  var r = trRowReg[idx];
+  if (!r) return;
+  var k = trExKey(r.g, r.i);
+  if (trExcluded[k]) delete trExcluded[k]; else trExcluded[k]=1;
+  renderTrend();
+}
+function trClearExcluded(){ trExcluded = {}; renderTrend(); }
 function trSetMetric(m){ trMetric=m; ['cvr2','cvr1','ctr'].forEach(function(k){var b=document.getElementById('trMetric'+(k==='cvr2'?'Cvr2':k==='cvr1'?'Cvr1':'Ctr'));if(b)b.classList.toggle('active',k===m);}); renderTrend(); }
 function trSetGroup(g){ trGroupBy=g; document.getElementById('trGroupPurpose').classList.toggle('active',g==='purpose'); document.getElementById('trGroupTarget').classList.toggle('active',g==='target'); renderTrend(); }
 function trSetBucket(b){
@@ -6461,6 +6479,7 @@ function renderTrend(){
   if (isNaN(minSend) || minSend < 0) minSend = 0;
   var isDay = trBucket==='day';
   var bucketOf = isDay ? trDayKey : trWeekNum;
+  trRowReg = [];   // onclick 인덱스는 매 렌더마다 새로 매긴다
   // 버킷(주차 또는 일자) 수집
   var allB = {};
   camps.forEach(function(c){var k=bucketOf(c.send_date); if(k!=null)allB[k]=1;});
@@ -6516,18 +6535,30 @@ function renderTrend(){
     // 소구 포인트 정렬: 최근 버킷 발송량 내림차순
     var lastWeek = buckets[buckets.length-1];
     var incentives = Object.keys(matrix[p]).map(function(i){
-      var totalSend=0,totalC2=0;
-      buckets.forEach(function(w){var cell=matrix[p][i][w];if(cell){totalSend+=cell.send;totalC2+=cell.c2d;}});
-      return {name:i, totalSend:totalSend, totalC2:totalC2, recentSend:(matrix[p][i][lastWeek]?matrix[p][i][lastWeek].send:0)};
+      var totalSend=0,totalC2=0,totalC1=0,totalClk=0;
+      buckets.forEach(function(w){var cell=matrix[p][i][w];if(cell){totalSend+=cell.send;totalC2+=cell.c2d;totalC1+=cell.c1d;totalClk+=cell.clk24;}});
+      return {name:i, totalSend:totalSend, totalC2:totalC2, totalC1:totalC1, totalClk:totalClk,
+              totalNum:(trMetric==='cvr2'?totalC2:trMetric==='cvr1'?totalC1:totalClk),
+              recentSend:(matrix[p][i][lastWeek]?matrix[p][i][lastWeek].send:0)};
     }).filter(function(o){return o.totalSend>=minSend;}).sort(function(a,b){return b.totalSend-a.totalSend;});
-    if (incentives.length===0) return;
-    // 목적 합계
-    var pTotalSend=0,pTotalC2=0;
-    incentives.forEach(function(o){pTotalSend+=o.totalSend;pTotalC2+=o.totalC2;});
-    var pCvr = pTotalSend>0?(pTotalC2/pTotalSend*100).toFixed(2):'-';
+    // 개별 소구 제외 — 표에서 빼는 데 그치지 않고 합계에서도 빠져야 의미가 있다
+    var kept = incentives.filter(function(o){return !trExcluded[trExKey(p,o.name)];});
+    var dropped = incentives.filter(function(o){return trExcluded[trExKey(p,o.name)];});
+    if (kept.length===0 && dropped.length===0) return;
+    // 목적 합계 (제외분 반영)
+    var pTotalSend=0,pTotalNum=0;
+    kept.forEach(function(o){pTotalSend+=o.totalSend;pTotalNum+=o.totalNum;});
+    var pRate = pTotalSend>0?(pTotalNum/pTotalSend*100).toFixed(2):'-';
     var headerClass = (trGroupBy==='target'?(hMapTarget[p]||'tr-h-etc'):(hMap[p]||'tr-h-etc'));
     html += '<div class="tr-purpose-section">';
-    html += '<div class="tr-purpose-header '+headerClass+'"><span>'+p+' <span style="opacity:.7;font-weight:400;font-size:11px">('+incentives.length+'종)</span></span><span class="tr-purpose-stat">기간 합계 발송 '+pTotalSend.toLocaleString()+' / 2d 전환 '+pTotalC2.toLocaleString()+'건 / CVR '+pCvr+'%</span></div>';
+    html += '<div class="tr-purpose-header '+headerClass+'"><span>'+p+' <span style="opacity:.7;font-weight:400;font-size:11px">('+kept.length+'종'+(dropped.length?' · '+dropped.length+'종 제외':'')+')</span></span><span class="tr-purpose-stat">기간 합계 발송 '+pTotalSend.toLocaleString()+' / '+trMetricLabel()+' '+pTotalNum.toLocaleString()+'건 / '+trRateName()+' '+pRate+'%</span></div>';
+    // 남은 소구가 하나도 없으면 빈 표(전부 '—')를 그리는 대신 복원 수단만 보여준다
+    if (kept.length === 0) {
+      html += '<div style="padding:14px;text-align:center;color:#94a3b8;font-size:11px">이 기간의 소구를 모두 제외했습니다.</div>';
+      html += trExcludedBar(p, dropped);
+      html += '</div>';
+      return;
+    }
     html += '<div class="tr-scroll"><table class="tr-table"><thead><tr><th class="tr-ince-h">소구 포인트</th>';
     buckets.forEach(function(w){
       var head = isDay ? trDayLabel(w) : ('W'+w);
@@ -6535,9 +6566,10 @@ function renderTrend(){
       html+='<th>'+head+'<div style="font-size:9px;font-weight:400;color:#94a3b8">'+sub+'</div></th>';
     });
     html += '<th>추세</th></tr></thead><tbody>';
-    incentives.forEach(function(o){
+    kept.forEach(function(o){
       var i = o.name;
-      html += '<tr><td class="tr-ince" title="'+i+'">'+i+'<div style="font-size:9px;color:#94a3b8;font-weight:400">총 발송 '+o.totalSend.toLocaleString()+' / 2d '+o.totalC2+'건</div></td>';
+      var ridx = trRowReg.length; trRowReg.push({g:p, i:i});
+      html += '<tr><td class="tr-ince" title="'+escHtml(i)+'"><button class="tr-ex" onclick="trToggleRow('+ridx+')" title="이 소구를 표와 합계에서 제외">×</button>'+i+'<div style="font-size:9px;color:#94a3b8;font-weight:400">총 발송 '+o.totalSend.toLocaleString()+' / '+trMetricLabel()+' '+o.totalNum.toLocaleString()+'건</div></td>';
       var values = [];
       buckets.forEach(function(w){
         var cell = matrix[p][i][w];
@@ -6548,7 +6580,8 @@ function renderTrend(){
         else val = cell.send>0?cell.clk24/cell.send:0;
         values.push(val);
         var st = trCellColor(val, trMetric);
-        html += '<td><span class="tr-cell" style="background:'+st.bg+';color:'+st.color+'">'+(val*100).toFixed(2)+'%<span class="tr-cell-sub">'+cell.send.toLocaleString()+'건</span></span></td>';
+        var numer = trMetric==='cvr2'?cell.c2d:trMetric==='cvr1'?cell.c1d:cell.clk24;
+        html += '<td><span class="tr-cell" style="background:'+st.bg+';color:'+st.color+'">'+(val*100).toFixed(2)+'%<span class="tr-cell-sub">'+cell.send.toLocaleString()+'건 / '+numer.toLocaleString()+'건</span></span></td>';
       });
       // 추세: 최근 2주 평균 vs 직전 2주 평균
       var valid = values.map(function(v,idx){return v!=null?{v:v,idx:idx}:null;}).filter(Boolean);
@@ -6572,7 +6605,7 @@ function renderTrend(){
     // 버킷 합계 (목적별)
     var totalRow = {};
     buckets.forEach(function(w){totalRow[w]={send:0,clk24:0,c1d:0,c2d:0};});
-    incentives.forEach(function(o){
+    kept.forEach(function(o){
       buckets.forEach(function(w){
         var cell = matrix[p][o.name][w];
         if (cell) { totalRow[w].send+=cell.send; totalRow[w].clk24+=cell.clk24; totalRow[w].c1d+=cell.c1d; totalRow[w].c2d+=cell.c2d; }
@@ -6608,10 +6641,22 @@ function renderTrend(){
       }
     }
     html += '<td>'+tTrend+'</td></tr>';
-    html += '</tbody></table></div></div>';   // tr-scroll + tr-purpose-section
+    html += '</tbody></table></div>';   // tr-scroll 닫기
+    html += trExcludedBar(p, dropped);
+    html += '</div>';   // tr-purpose-section 닫기
   });
   if (!html) html = '<div style="padding:40px;text-align:center;color:#94a3b8">표시할 데이터가 없습니다. 최소 발송수 조건을 낮추거나 기간·선택 필터를 넓혀보세요.</div>';
   document.getElementById('trContent').innerHTML = html;
+}
+// 제외한 소구를 되돌릴 수 있게 표 아래에 칩으로 남긴다
+function trExcludedBar(group, dropped){
+  if (!dropped.length) return '';
+  var h = '<div class="tr-exbar"><b>합계에서 제외됨</b>';
+  dropped.forEach(function(o){
+    var ri = trRowReg.length; trRowReg.push({g:group, i:o.name});
+    h += '<button class="tr-exchip" onclick="trToggleRow('+ri+')" title="다시 포함">'+escHtml(o.name)+' <span style="opacity:.6">발송 '+o.totalSend.toLocaleString()+'</span> ↺</button>';
+  });
+  return h + '</div>';
 }
 // 목적/대상자 선택 칩. 아무것도 선택 안 하면 전체를 본다.
 function trRenderFilterBar(keys, matrix, buckets, sel){
@@ -6626,6 +6671,9 @@ function trRenderFilterBar(keys, matrix, buckets, sel){
     Object.keys(matrix[g]).forEach(function(i){ buckets.forEach(function(w){ if(matrix[g][i][w]) tot+=matrix[g][i][w].send; }); });
     h += '<button class="tr-chip'+(sel[g]?' active':'')+'" onclick="trToggleFilterIdx('+idx+')" title="'+escHtml(g)+'">'+escHtml(g)+' <span class="tr-chip-n">'+tot.toLocaleString()+'</span></button>';
   });
+  // 소구 제외는 표 안에서 하지만, 몇 개 걸려 있는지는 여기서 한눈에 보이고 한 번에 풀 수 있어야 한다
+  var nEx = Object.keys(trExcluded).filter(function(k){return k.indexOf(trGroupBy+'|')===0;}).length;
+  if (nEx) h += '<button class="tr-exchip" style="margin-left:8px" onclick="trClearExcluded()">소구 제외 '+nEx+'개 모두 해제 ↺</button>';
   bar.innerHTML = h;
 }
 
