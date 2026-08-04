@@ -3527,7 +3527,7 @@ function generateHTML() {
     <!-- 서브탭 -->
     <div style="display:flex;gap:8px;margin-bottom:16px;border-bottom:2px solid #e0e0e0;padding-bottom:8px">
       <button class="cd-subtab active" data-sub="overview" onclick="cdSwitchSub('overview')">성과 대시보드</button>
-      <button class="cd-subtab" data-sub="trend" onclick="cdSwitchSub('trend')">소구 포인트 주간 추이</button>
+      <button class="cd-subtab" data-sub="trend" onclick="cdSwitchSub('trend')">소구 포인트 추이</button>
       <button class="cd-subtab" data-sub="daily" onclick="cdSwitchSub('daily')">일자별 성과</button>
       <button class="cd-subtab" data-sub="ab-test" onclick="cdSwitchSub('ab-test');loadAbTest()">A/B 테스트 결과</button>
       <button class="cd-subtab" data-sub="compose" onclick="cdSwitchSub('compose')">메시지 작성</button>
@@ -3862,6 +3862,8 @@ function generateHTML() {
         .tr-toolbar{display:flex;gap:10px;align-items:center;margin-bottom:14px;padding:10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;flex-wrap:wrap}
         .tr-toolbar label{font-size:12px;color:#475569;font-weight:600}
         .tr-toolbar select{padding:4px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:12px;background:#fff}
+        .tr-toolbar input[type=number]{width:78px;padding:4px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:12px;background:#fff}
+        .tr-toolbar .tr-hint{font-size:11px;color:#94a3b8}
         .tr-metric-toggle{display:flex;gap:4px}
         .tr-metric-toggle button{padding:4px 12px;border:1px solid #cbd5e1;background:#fff;font-size:11px;cursor:pointer;color:#64748b}
         .tr-metric-toggle button:first-child{border-radius:6px 0 0 6px}
@@ -3885,9 +3887,20 @@ function generateHTML() {
         .tr-spark-down{color:#dc2626;font-weight:700;font-size:10px}
         .tr-spark-flat{color:#94a3b8;font-size:10px}
         .tr-note{margin-top:12px;padding:10px;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;font-size:11px;color:#78350f;line-height:1.6}
+        .tr-filterbar{display:flex;gap:6px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+        .tr-fl-label{font-size:12px;color:#475569;font-weight:600;margin-right:2px}
+        .tr-chip{padding:3px 10px;border:1px solid #cbd5e1;background:#fff;border-radius:999px;font-size:11px;cursor:pointer;color:#475569;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .tr-chip:hover{background:#eff6ff;border-color:#93c5fd}
+        .tr-chip.active{background:#1a73e8;color:#fff;border-color:#1a73e8}
+        .tr-chip-n{opacity:.6;font-size:10px}
       </style>
-      <h3 style="margin:0 0 12px;font-size:16px;color:#1e3a5f">소구 포인트 × 주차 전환률 매트릭스</h3>
+      <h3 style="margin:0 0 12px;font-size:16px;color:#1e3a5f">소구 포인트 × <span id="trAxisLabel">주차</span> 전환률 매트릭스</h3>
       <div class="tr-toolbar">
+        <label>단위:</label>
+        <div class="tr-metric-toggle">
+          <button id="trBucketWeek" class="active" onclick="trSetBucket('week')">주간</button>
+          <button id="trBucketDay" onclick="trSetBucket('day')">일간</button>
+        </div>
         <label>그룹:</label>
         <div class="tr-metric-toggle">
           <button id="trGroupPurpose" class="active" onclick="trSetGroup('purpose')">목적별</button>
@@ -3899,8 +3912,8 @@ function generateHTML() {
           <button id="trMetricCvr1" onclick="trSetMetric('cvr1')">CVR(1d)</button>
           <button id="trMetricCtr" onclick="trSetMetric('ctr')">CTR(24h)</button>
         </div>
-        <label>주차:</label>
-        <select id="trWeekRange" onchange="renderTrend()">
+        <label id="trRangeLabel">주차:</label>
+        <select id="trRangeSel" onchange="renderTrend()">
           <option value="4">최근 4주</option>
           <option value="6" selected>최근 6주</option>
           <option value="8">최근 8주</option>
@@ -3908,17 +3921,14 @@ function generateHTML() {
           <option value="0">전체</option>
         </select>
         <label>최소 발송수:</label>
-        <select id="trMinSend" onchange="renderTrend()">
-          <option value="0">제한없음</option>
-          <option value="30" selected>30+</option>
-          <option value="100">100+</option>
-          <option value="300">300+</option>
-        </select>
-        <label style="margin-left:auto;font-size:11px;color:#64748b">셀: 백분율 / 발송수 — 빈셀: 해당 주차에 미사용</label>
+        <input id="trMinSend" type="number" min="0" step="10" value="30" oninput="trMinSendChanged()">
+        <span class="tr-hint">건 이상 · 0 = 제한없음</span>
+        <label style="margin-left:auto;font-size:11px;color:#64748b">셀: 백분율 / 발송수 — 빈셀: 해당 <span id="trAxisLabel2">주차</span>에 미사용</label>
       </div>
+      <div class="tr-filterbar" id="trFilterBar"></div>
       <div id="trContent">로딩 중...</div>
       <div class="tr-note">
-        <b>해석 가이드</b>: 셀 색상은 CVR(2d) 절대값 — 진녹 ≥5%, 녹 2~5%, 노랑 0.5~2%, 회색 ≤0.5%. 답례품/부가상품은 카테고리 베이스라인이 낮아(0.1~0.3%) 노랑이라도 정상. 추세 화살표(↑/↓)는 최근 2주 vs 직전 2주 차이.
+        <b>해석 가이드</b>: 셀 색상은 CVR(2d) 절대값 — 진녹 ≥5%, 녹 2~5%, 노랑 0.5~2%, 회색 ≤0.5%. 답례품/부가상품은 카테고리 베이스라인이 낮아(0.1~0.3%) 노랑이라도 정상. 추세 화살표(↑/↓)는 <span id="trTrendNote">최근 2주 vs 직전 2주</span> 차이.
       </div>
     </div>
 
@@ -6286,8 +6296,42 @@ function renderPerfSummary(mode){
 // ═══ 소구 포인트 × 주차 추이 ═══
 var trMetric = 'cvr2';
 var trGroupBy = 'purpose';
+var trBucket = 'week';                          // 'week' | 'day'
+var trSelected = {purpose:{}, target:{}};       // 그룹 모드별 선택된 그룹. 비어 있으면 전체.
+var trGroupList = [];                           // 칩 인덱스 → 그룹명 (이름에 따옴표·괄호가 섞여 onclick에 직접 못 넣는다)
 function trSetMetric(m){ trMetric=m; ['cvr2','cvr1','ctr'].forEach(function(k){var b=document.getElementById('trMetric'+(k==='cvr2'?'Cvr2':k==='cvr1'?'Cvr1':'Ctr'));if(b)b.classList.toggle('active',k===m);}); renderTrend(); }
 function trSetGroup(g){ trGroupBy=g; document.getElementById('trGroupPurpose').classList.toggle('active',g==='purpose'); document.getElementById('trGroupTarget').classList.toggle('active',g==='target'); renderTrend(); }
+function trSetBucket(b){
+  if (trBucket===b) return;
+  trBucket=b;
+  document.getElementById('trBucketWeek').classList.toggle('active',b==='week');
+  document.getElementById('trBucketDay').classList.toggle('active',b==='day');
+  // 기간 선택지를 단위에 맞게 갈아끼운다
+  // 주차와 마찬가지로 '발송이 있었던' 버킷만 열로 세운다 — 발송 없는 날은 빈 열로 끼지 않는다
+  var opts = b==='day'
+    ? [[7,'최근 7일(발송일)'],[14,'최근 14일(발송일)'],[30,'최근 30일(발송일)'],[60,'최근 60일(발송일)'],[0,'전체']]
+    : [[4,'최근 4주'],[6,'최근 6주'],[8,'최근 8주'],[12,'최근 12주'],[0,'전체']];
+  var sel = document.getElementById('trRangeSel');
+  sel.innerHTML = opts.map(function(o){return '<option value="'+o[0]+'">'+o[1]+'</option>';}).join('');
+  sel.value = b==='day' ? '14' : '6';
+  var ax = b==='day' ? '일자' : '주차';
+  document.getElementById('trRangeLabel').textContent = (b==='day'?'기간:':'주차:');
+  document.getElementById('trAxisLabel').textContent = ax;
+  document.getElementById('trAxisLabel2').textContent = ax;
+  document.getElementById('trTrendNote').textContent = (b==='day'?'최근 2일 vs 직전 2일':'최근 2주 vs 직전 2주');
+  renderTrend();
+}
+function trToggleFilterIdx(idx){
+  var g = trGroupList[idx];
+  if (g == null) return;
+  var sel = trSelected[trGroupBy] || (trSelected[trGroupBy] = {});
+  if (sel[g]) delete sel[g]; else sel[g]=1;
+  renderTrend();
+}
+function trClearFilter(){ trSelected[trGroupBy] = {}; renderTrend(); }
+// 최소 발송수는 자유 입력이라 한 글자씩 칠 때마다 다시 그리지 않도록 살짝 늦춘다
+var trMinSendTimer = null;
+function trMinSendChanged(){ clearTimeout(trMinSendTimer); trMinSendTimer = setTimeout(renderTrend, 200); }
 function trStripParens(s){
   // 괄호 안 내용 반복 제거
   var prev = null;
@@ -6376,6 +6420,15 @@ function trWeekRange(wn){
   function f(d){return (d.getMonth()+1).toString().padStart(2,'0')+'.'+d.getDate().toString().padStart(2,'0');}
   return f(s)+'~'+f(e);
 }
+// 일간 버킷 키 = 'YYYY-MM-DD'. 정규식을 안 쓰는 이유는 위 trStripTrailingDate 주석과 같다.
+function trDayKey(sd){
+  var s = String(sd||'').slice(0,10);
+  if (s.length !== 10) return null;
+  if (isNaN(new Date(s).getTime())) return null;
+  return s;
+}
+function trDayLabel(k){ var d=new Date(k); return (d.getMonth()+1)+'.'+d.getDate(); }
+function trDayWeekday(k){ var d=new Date(k); return ['일','월','화','수','목','금','토'][d.getDay()]+'요일'; }
 function trCellColor(val, metric){
   // CVR(2d) 절대값 기준 — 카테고리별 베이스라인 차이 있음
   if (val == null) return {bg:'#f1f5f9',color:'#cbd5e1'};
@@ -6394,19 +6447,26 @@ function trCellColor(val, metric){
 }
 function renderTrend(){
   var camps = getCampaigns().filter(function(c){return c.type!=='취소'&&(c.send_count||0)>0;});
-  var weekRange = parseInt(document.getElementById('trWeekRange').value);
-  var minSend = parseInt(document.getElementById('trMinSend').value);
-  // 주차 수집
-  var allWeeks = {};
-  camps.forEach(function(c){var w=trWeekNum(c.send_date); if(w!=null)allWeeks[w]=1;});
-  var weeks = Object.keys(allWeeks).map(Number).sort(function(a,b){return a-b;});
-  if (weekRange>0) weeks = weeks.slice(-weekRange);
-  var weekSet = {}; weeks.forEach(function(w){weekSet[w]=1;});
-  // 그룹키(목적 또는 대상자) × 소구 × 주차 집계
-  var matrix = {}; // matrix[group][incentive][week] = {send,clk24,c1d,c2d}
+  var range = parseInt(document.getElementById('trRangeSel').value);
+  // 입력칸을 비우거나 음수를 넣으면 제한없음으로 본다 (NaN이면 아래 비교가 전부 false라 표가 통째로 빈다)
+  var minSend = parseInt(document.getElementById('trMinSend').value, 10);
+  if (isNaN(minSend) || minSend < 0) minSend = 0;
+  var isDay = trBucket==='day';
+  var bucketOf = isDay ? trDayKey : trWeekNum;
+  // 버킷(주차 또는 일자) 수집
+  var allB = {};
+  camps.forEach(function(c){var k=bucketOf(c.send_date); if(k!=null)allB[k]=1;});
+  // 일자는 'YYYY-MM-DD' 문자열이라 사전순 = 시간순, 주차는 숫자 정렬
+  var buckets = Object.keys(allB);
+  if (isDay) buckets.sort();
+  else buckets = buckets.map(Number).sort(function(a,b){return a-b;});
+  if (range>0) buckets = buckets.slice(-range);
+  var bSet = {}; buckets.forEach(function(w){bSet[w]=1;});
+  // 그룹키(목적 또는 대상자) × 소구 × 버킷 집계
+  var matrix = {}; // matrix[group][incentive][bucket] = {send,clk24,c1d,c2d}
   camps.forEach(function(c){
-    var w = trWeekNum(c.send_date);
-    if (!weekSet[w]) return;
+    var w = bucketOf(c.send_date);
+    if (!bSet[w]) return;
     var g = trGroupBy==='target' ? trNormalizeTarget(c.target||'') : (c.purpose || '기타');
     var i = trNormalizeIncentive(c.incentive);
     if (!matrix[g]) matrix[g]={};
@@ -6429,20 +6489,27 @@ function renderTrend(){
   if (trGroupBy === 'target') {
     groupKeys = Object.keys(matrix).map(function(g){
       var total=0;
-      Object.keys(matrix[g]).forEach(function(i){ weeks.forEach(function(w){if(matrix[g][i][w])total+=matrix[g][i][w].send;});});
+      Object.keys(matrix[g]).forEach(function(i){ buckets.forEach(function(w){if(matrix[g][i][w])total+=matrix[g][i][w].send;});});
       return {g:g,t:total};
     }).sort(function(a,b){return b.t-a.t;}).map(function(o){return o.g;});
   } else {
     groupKeys = PURPOSE_ORDER.concat(Object.keys(matrix).filter(function(p){return PURPOSE_ORDER.indexOf(p)<0;}));
   }
+  // 실제 데이터가 있는 그룹만 남긴다 (PURPOSE_ORDER에는 이번 기간에 없는 목적도 들어 있다)
+  groupKeys = groupKeys.filter(function(g){return matrix[g];});
+  // 필터 칩은 전체 그룹 기준으로 그리고, 표는 선택된 그룹만 그린다 (선택 없으면 전체)
+  var sel = trSelected[trGroupBy] || (trSelected[trGroupBy] = {});
+  trRenderFilterBar(groupKeys, matrix, buckets, sel);
+  var picked = groupKeys.filter(function(g){return sel[g];});
+  var visibleKeys = picked.length ? picked : groupKeys;
   var html = '';
-  groupKeys.forEach(function(p){
+  visibleKeys.forEach(function(p){
     if (!matrix[p]) return;
-    // 소구 포인트 정렬: 최근 주차 발송량 내림차순
-    var lastWeek = weeks[weeks.length-1];
+    // 소구 포인트 정렬: 최근 버킷 발송량 내림차순
+    var lastWeek = buckets[buckets.length-1];
     var incentives = Object.keys(matrix[p]).map(function(i){
       var totalSend=0,totalC2=0;
-      weeks.forEach(function(w){var cell=matrix[p][i][w];if(cell){totalSend+=cell.send;totalC2+=cell.c2d;}});
+      buckets.forEach(function(w){var cell=matrix[p][i][w];if(cell){totalSend+=cell.send;totalC2+=cell.c2d;}});
       return {name:i, totalSend:totalSend, totalC2:totalC2, recentSend:(matrix[p][i][lastWeek]?matrix[p][i][lastWeek].send:0)};
     }).filter(function(o){return o.totalSend>=minSend;}).sort(function(a,b){return b.totalSend-a.totalSend;});
     if (incentives.length===0) return;
@@ -6454,13 +6521,17 @@ function renderTrend(){
     html += '<div class="tr-purpose-section">';
     html += '<div class="tr-purpose-header '+headerClass+'"><span>'+p+' <span style="opacity:.7;font-weight:400;font-size:11px">('+incentives.length+'종)</span></span><span class="tr-purpose-stat">기간 합계 발송 '+pTotalSend.toLocaleString()+' / 2d 전환 '+pTotalC2.toLocaleString()+'건 / CVR '+pCvr+'%</span></div>';
     html += '<table class="tr-table"><thead><tr><th style="text-align:left;min-width:200px">소구 포인트</th>';
-    weeks.forEach(function(w){html+='<th>W'+w+'<div style="font-size:9px;font-weight:400;color:#94a3b8">'+trWeekRange(w)+'</div></th>';});
+    buckets.forEach(function(w){
+      var head = isDay ? trDayLabel(w) : ('W'+w);
+      var sub  = isDay ? trDayWeekday(w) : trWeekRange(w);
+      html+='<th>'+head+'<div style="font-size:9px;font-weight:400;color:#94a3b8">'+sub+'</div></th>';
+    });
     html += '<th>추세</th></tr></thead><tbody>';
     incentives.forEach(function(o){
       var i = o.name;
       html += '<tr><td class="tr-ince" title="'+i+'">'+i+'<div style="font-size:9px;color:#94a3b8;font-weight:400">총 발송 '+o.totalSend.toLocaleString()+' / 2d '+o.totalC2+'건</div></td>';
       var values = [];
-      weeks.forEach(function(w){
+      buckets.forEach(function(w){
         var cell = matrix[p][i][w];
         if (!cell || cell.send===0) { html+='<td><span class="tr-cell tr-cell-empty">—</span></td>'; values.push(null); return; }
         var val;
@@ -6490,18 +6561,18 @@ function renderTrend(){
       }
       html += '<td>'+trendCell+'</td></tr>';
     });
-    // 주차 합계 (목적별)
+    // 버킷 합계 (목적별)
     var totalRow = {};
-    weeks.forEach(function(w){totalRow[w]={send:0,clk24:0,c1d:0,c2d:0};});
+    buckets.forEach(function(w){totalRow[w]={send:0,clk24:0,c1d:0,c2d:0};});
     incentives.forEach(function(o){
-      weeks.forEach(function(w){
+      buckets.forEach(function(w){
         var cell = matrix[p][o.name][w];
         if (cell) { totalRow[w].send+=cell.send; totalRow[w].clk24+=cell.clk24; totalRow[w].c1d+=cell.c1d; totalRow[w].c2d+=cell.c2d; }
       });
     });
-    html += '<tr style="background:#f1f5f9;border-top:2px solid #cbd5e1;font-weight:700"><td class="tr-ince" style="color:#0f172a">주차 합계 <span style="font-size:9px;color:#64748b;font-weight:400">'+(trGroupBy==='target'?'대상자':'목적')+' 전체 기준</span></td>';
+    html += '<tr style="background:#f1f5f9;border-top:2px solid #cbd5e1;font-weight:700"><td class="tr-ince" style="color:#0f172a">'+(isDay?'일자':'주차')+' 합계 <span style="font-size:9px;color:#64748b;font-weight:400">'+(trGroupBy==='target'?'대상자':'목적')+' 전체 기준</span></td>';
     var totalValues=[];
-    weeks.forEach(function(w){
+    buckets.forEach(function(w){
       var c = totalRow[w];
       if (c.send===0) { html+='<td><span class="tr-cell tr-cell-empty">—</span></td>'; totalValues.push(null); return; }
       var val;
@@ -6531,8 +6602,23 @@ function renderTrend(){
     html += '<td>'+tTrend+'</td></tr>';
     html += '</tbody></table></div>';
   });
-  if (!html) html = '<div style="padding:40px;text-align:center;color:#94a3b8">표시할 데이터가 없습니다. 최소 발송수 조건을 낮춰보세요.</div>';
+  if (!html) html = '<div style="padding:40px;text-align:center;color:#94a3b8">표시할 데이터가 없습니다. 최소 발송수 조건을 낮추거나 기간·선택 필터를 넓혀보세요.</div>';
   document.getElementById('trContent').innerHTML = html;
+}
+// 목적/대상자 선택 칩. 아무것도 선택 안 하면 전체를 본다.
+function trRenderFilterBar(keys, matrix, buckets, sel){
+  trGroupList = keys;
+  var bar = document.getElementById('trFilterBar');
+  if (!bar) return;
+  var nSel = Object.keys(sel).filter(function(g){return keys.indexOf(g)>=0;}).length;
+  var h = '<span class="tr-fl-label">'+(trGroupBy==='target'?'대상자':'목적')+' 선택:</span>';
+  h += '<button class="tr-chip'+(nSel===0?' active':'')+'" onclick="trClearFilter()">전체</button>';
+  keys.forEach(function(g,idx){
+    var tot=0;
+    Object.keys(matrix[g]).forEach(function(i){ buckets.forEach(function(w){ if(matrix[g][i][w]) tot+=matrix[g][i][w].send; }); });
+    h += '<button class="tr-chip'+(sel[g]?' active':'')+'" onclick="trToggleFilterIdx('+idx+')" title="'+escHtml(g)+'">'+escHtml(g)+' <span class="tr-chip-n">'+tot.toLocaleString()+'</span></button>';
+  });
+  bar.innerHTML = h;
 }
 
 // ═══ 주차별 베스트 성과 ═══
