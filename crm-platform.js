@@ -3886,9 +3886,13 @@ function generateHTML() {
         .tr-table th.tr-ince-h{z-index:3;text-align:left;min-width:200px}
         .tr-table tbody tr:hover td{background:#fafbfc}
         .tr-table tr.tr-total td{border-top:2px solid #cbd5e1;background:#f1f5f9;font-weight:700}
-        .tr-cell{display:inline-block;min-width:76px;padding:2px 4px;border-radius:4px;font-weight:600}
+        .tr-cell{display:inline-block;min-width:88px;padding:3px 5px;border-radius:4px;font-weight:600}
         .tr-cell-empty{color:#cbd5e1}
-        .tr-cell-sub{font-size:9px;color:#94a3b8;font-weight:400;display:block;margin-top:1px}
+        /* 셀 안의 시선 배분 — 비율 50 : 지표건수(전환·클릭) 35 : 발송수 15.
+           색은 셀 색을 물려받고 opacity로만 낮춘다. 고정 회색을 쓰면 진녹 배경에서 탁해진다. */
+        .tr-v1{font-size:14px;font-weight:700;line-height:1.1;letter-spacing:-.2px}
+        .tr-v2{font-size:11px;font-weight:700;opacity:.82;margin-left:4px}
+        .tr-v3{display:block;font-size:9px;font-weight:400;opacity:.5;line-height:1.1;margin-top:1px}
         .tr-sparkline{display:inline-flex;align-items:flex-end;gap:1px;height:18px;vertical-align:middle}
         .tr-sparkline-bar{width:5px;background:#3b82f6;border-radius:1px;min-height:1px;cursor:pointer}
         .tr-spark-up{color:#059669;font-weight:700;font-size:10px}
@@ -3936,7 +3940,7 @@ function generateHTML() {
         <label>최소 발송수:</label>
         <input id="trMinSend" type="number" min="0" step="10" value="30" oninput="trMinSendChanged()">
         <span class="tr-hint">건 이상 · 0 = 제한없음</span>
-        <label style="margin-left:auto;font-size:11px;color:#64748b">셀: 백분율 / 발송수 · 지표건수 — 빈셀: 해당 <span id="trAxisLabel2">주차</span>에 미사용</label>
+        <label style="margin-left:auto;font-size:11px;color:#64748b">셀: <b>비율</b> · 지표건수 · <span style="opacity:.6">발송수</span> — 빈셀: 해당 <span id="trAxisLabel2">주차</span>에 미사용</label>
       </div>
       <div class="tr-filterbar" id="trFilterBar"></div>
       <div id="trContent">로딩 중...</div>
@@ -6581,7 +6585,7 @@ function renderTrend(){
         values.push(val);
         var st = trCellColor(val, trMetric);
         var numer = trMetric==='cvr2'?cell.c2d:trMetric==='cvr1'?cell.c1d:cell.clk24;
-        html += '<td><span class="tr-cell" style="background:'+st.bg+';color:'+st.color+'">'+(val*100).toFixed(2)+'%<span class="tr-cell-sub">'+cell.send.toLocaleString()+'건 / '+numer.toLocaleString()+'건</span></span></td>';
+        html += '<td><span class="tr-cell" style="background:'+st.bg+';color:'+st.color+'"><span class="tr-v1">'+(val*100).toFixed(2)+'%</span><span class="tr-v2">'+numer.toLocaleString()+'건</span><span class="tr-v3">발송 '+cell.send.toLocaleString()+'</span></span></td>';
       });
       // 추세: 최근 2주 평균 vs 직전 2주 평균
       var valid = values.map(function(v,idx){return v!=null?{v:v,idx:idx}:null;}).filter(Boolean);
@@ -6623,7 +6627,7 @@ function renderTrend(){
       totalValues.push(val);
       var st = trCellColor(val, trMetric);
       var numerator = trMetric==='cvr2'?c.c2d:trMetric==='cvr1'?c.c1d:c.clk24;
-      html += '<td><span class="tr-cell" style="background:'+st.bg+';color:'+st.color+';font-weight:700">'+(val*100).toFixed(2)+'%<span class="tr-cell-sub" style="color:#475569">'+c.send.toLocaleString()+'건 / '+numerator+'건 ('+(val*100).toFixed(2)+'%)</span></span></td>';
+      html += '<td><span class="tr-cell" style="background:'+st.bg+';color:'+st.color+'"><span class="tr-v1">'+(val*100).toFixed(2)+'%</span><span class="tr-v2">'+numerator.toLocaleString()+'건</span><span class="tr-v3">발송 '+c.send.toLocaleString()+'</span></span></td>';
     });
     // 주차 합계 추세
     var validT = totalValues.map(function(v){return v!=null?v:null;}).filter(function(v){return v!=null;});
