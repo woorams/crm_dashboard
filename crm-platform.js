@@ -1003,19 +1003,20 @@ function buildExtractionExcel(rows) {
   return XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
 }
 
+// message_upload 1행 가이드. 발송 어드민이 요구하는 문구 그대로라 손대지 않는다.
+var ADMIN_UPLOAD_GUIDE =
+  "\u25A0 엑셀 업로드 양식 입력 가이드\n" +
+  "    * 필수 입력 항목 : 이름(띄어쓰기 포함 최대 20자), 휴대전화번호(숫자, '-' 부호 가능)   /   * 선택 입력 항목 : 변수(띄어쓰기 포함 최대 20자)\n" +
+  "    * 최대 5만 건 입력 권장   /   * 첨부 가능 파일: .xlsx   \n" +
+  "    * 입력 가이드(1행), 공란(2행), 구분(3행), 예시(4행)은 삭제하지 말고 5행부터 받는 사람 정보를 입력해주셔야 정상적으로 파일이 등록됩니다.";
+
 function buildAdminExcel(rows, campaignName) {
   var wb = XLSX.utils.book_new();
 
   // === 시트1: message_upload (어드민 업로드 양식) ===
   var wsData = [];
   // 행0: 입력 가이드 (머지됨)
-  wsData.push([
-    "\u25A0 엑셀 업로드 양식 입력 가이드\n" +
-    "    * 필수 입력 항목 : 이름(띄어쓰기 포함 최대 20자), 휴대전화번호(숫자, '-' 부호 가능)   /   * 선택 입력 항목 : 변수(띄어쓰기 포함 최대 20자)\n" +
-    "    * 최대 5만 건 입력 권장   /   * 첨부 가능 파일: .xlsx   \n" +
-    "    * 입력 가이드(1행), 공란(2행), 구분(3행), 예시(4행)은 삭제하지 말고 5행부터 받는 사람 정보를 입력해주셔야 정상적으로 파일이 등록됩니다.",
-    "", "", "", "", "", "", ""
-  ]);
+  wsData.push([ADMIN_UPLOAD_GUIDE, "", "", "", "", "", "", ""]);
   // 행1: 캠페인명 (공란 행)
   wsData.push([campaignName || "", "", "", "", "", "", "", ""]);
   // 행2: 구분 헤더
@@ -1066,6 +1067,169 @@ function buildAdminExcel(rows, campaignName) {
   XLSX.utils.book_append_sheet(wb, ws1, "message_upload");
   XLSX.utils.book_append_sheet(wb, ws2, "\uB300\uC0C1\uC790 raw");
   return XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+}
+
+// \u2500\u2500 \uBC14\uB978\uC190\uCE74\uB4DC \uC5B4\uB4DC\uBBFC \uCD94\uCD9C\uD30C\uC77C \u2192 \uBC1C\uC1A1\uC591\uC2DD \uBCC0\uD658 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// \uC7A5\uBC14\uAD6C\uB2C8 D+N\uCC98\uB7FC \uB300\uC2DC\uBCF4\uB4DC\uAC00 \uC544\uB2CC '\uBC14\uB978\uC190\uCE74\uB4DC \uC5B4\uB4DC\uBBFC'\uC5D0\uC11C \uBF51\uB294 \uBA85\uB2E8\uC774 \uC788\uB2E4.
+// \uADF8 \uD30C\uC77C\uC740 [\uC774\uB984 | \uC5F0\uB77D\uCC98 | \uD68C\uC6D0ID | \uC81C\uD488\uBA85 | \uB2F4\uC740\uC77C\uC2DC | \uC138\uADF8\uBA3C\uD2B8] \uD615\uD0DC\uB77C
+// \uBC1C\uC1A1 \uC5B4\uB4DC\uBBFC\uC774 \uBC1B\uB294 \uC591\uC2DD(message_upload + \uB300\uC0C1\uC790 raw)\uC73C\uB85C \uB9E4\uBC88 \uC190\uC73C\uB85C \uC62E\uACA8\uC57C \uD588\uB2E4.
+// \uC5EC\uAE30\uC11C \uADF8 \uBCC0\uD658\uC744 \uB300\uC2E0\uD55C\uB2E4. raw \uC2DC\uD2B8\uB294 \uC6D0\uBCF8 \uC5F4\uC744 \uADF8\uB300\uB85C \uBCF4\uC874\uD558\uBBC0\uB85C
+// \uC5F4 \uAD6C\uC131\uC774 \uB2E4\uB978 \uCD94\uCD9C(\uC0D8\uD50C/\uC608\uC2DD\uC790 \uB4F1)\uC744 \uC62C\uB824\uB3C4 \uC815\uBCF4\uAC00 \uC0AC\uB77C\uC9C0\uC9C0 \uC54A\uB294\uB2E4.
+
+var ADMIN_NAME_KEYS = ["\uC774\uB984", "\uC131\uD568", "\uACE0\uAC1D\uBA85", "\uD68C\uC6D0\uBA85", "\uC218\uC2E0\uC790\uBA85", "\uC218\uC2E0\uC790"];
+var ADMIN_PHONE_KEYS = ["\uC5F0\uB77D\uCC98", "\uD734\uB300\uD3F0\uBC88\uD638", "\uD734\uB300\uC804\uD654\uBC88\uD638", "\uC804\uD654\uBC88\uD638", "\uD578\uB4DC\uD3F0", "\uC218\uC2E0\uBC88\uD638", "\uD734\uB300\uD3F0"];
+var ADMIN_UID_KEYS = ["\uD68C\uC6D0ID", "\uD68C\uC6D0 ID", "\uC544\uC774\uB514", "uid", "UID"];
+// {#A}\uC5D0 \uB123\uC744 \uAC12\uC73C\uB85C \uBA3C\uC800 \uC81C\uC548\uD560 \uC5F4 (\uC55E\uC5D0 \uC788\uC744\uC218\uB85D \uC6B0\uC120)
+var ADMIN_VAR_HINTS = ["\uC81C\uD488\uBA85", "\uC0C1\uD488\uBA85", "\uCE74\uB4DC\uBA85", "\uB2F4\uC740\uC0C1\uD488", "\uB9C8\uC9C0\uB9C9\uB2F4\uC740\uC0C1\uD488"];
+
+function _pickHeader(headers, keys) {
+  var i, k;
+  for (k = 0; k < keys.length; k++) {
+    for (i = 0; i < headers.length; i++) {
+      if (headers[i] === keys[k]) return headers[i];
+    }
+  }
+  for (k = 0; k < keys.length; k++) {          // \uBD80\uBD84\uC77C\uCE58\uB294 \uC644\uC804\uC77C\uCE58 \uB2E4\uC74C
+    for (i = 0; i < headers.length; i++) {
+      if (headers[i] && headers[i].indexOf(keys[k]) >= 0) return headers[i];
+    }
+  }
+  return null;
+}
+
+// \uC5B4\uB4DC\uBBFC \uC5D1\uC140\uC744 {headers, rows} \uB85C \uC77D\uB294\uB2E4.
+// \uC774\uBBF8 \uBCC0\uD658\uB41C \uBC1C\uC1A1\uC591\uC2DD\uC744 \uB2E4\uC2DC \uC62C\uB9B0 \uACBD\uC6B0\uB3C4 \uC788\uC5B4 '\uB300\uC0C1\uC790 raw' \uC2DC\uD2B8\uB97C \uC6B0\uC120\uD55C\uB2E4.
+function parseAdminExtract(buf) {
+  var wb;
+  try { wb = XLSX.read(buf, { type: "buffer" }); }
+  catch (e) { return { error: "\uC5D1\uC140 \uD30C\uC77C\uC744 \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: " + e.message }; }
+  if (!wb.SheetNames || !wb.SheetNames.length) return { error: "\uC2DC\uD2B8\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4." };
+  var sheetName = wb.SheetNames.indexOf("\uB300\uC0C1\uC790 raw") >= 0 ? "\uB300\uC0C1\uC790 raw" : wb.SheetNames[0];
+  var aoa = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, raw: false, defval: "" });
+
+  // \uD5E4\uB354 \uD589 = \uC774\uB984\u00B7\uC5F0\uB77D\uCC98\uB958\uAC00 \uD568\uAED8 \uC788\uB294 \uCCAB \uD589 (\uAC00\uC774\uB4DC 4\uD589\uC774 \uC55E\uC5D0 \uBD99\uC740 \uD30C\uC77C\uB3C4 \uD1B5\uACFC)
+  var headerRow = -1, headers = null;
+  for (var r = 0; r < Math.min(aoa.length, 12); r++) {
+    var cells = (aoa[r] || []).map(function (v) { return String(v == null ? "" : v).trim(); });
+    if (_pickHeader(cells, ADMIN_NAME_KEYS) && _pickHeader(cells, ADMIN_PHONE_KEYS)) {
+      headerRow = r; headers = cells; break;
+    }
+  }
+  if (headerRow < 0) {
+    return { error: "'\uC774\uB984'\uACFC '\uC5F0\uB77D\uCC98' \uC5F4\uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uC5B4\uB4DC\uBBFC\uC5D0\uC11C \uBC1B\uC740 \uC6D0\uBCF8 \uD30C\uC77C\uC778\uC9C0 \uD655\uC778\uD574\uC8FC\uC138\uC694.", sheetName: sheetName };
+  }
+  while (headers.length && !headers[headers.length - 1]) headers.pop();
+
+  var rows = [];
+  for (var i = headerRow + 1; i < aoa.length; i++) {
+    var arr = aoa[i] || [];
+    var obj = {}, any = false;
+    for (var c = 0; c < headers.length; c++) {
+      if (!headers[c]) continue;
+      var v = arr[c] == null ? "" : String(arr[c]).trim();
+      obj[headers[c]] = v;
+      if (v) any = true;
+    }
+    if (any) rows.push(obj);
+  }
+  return {
+    sheetName: sheetName,
+    headers: headers,
+    rows: rows,
+    nameCol: _pickHeader(headers, ADMIN_NAME_KEYS),
+    phoneCol: _pickHeader(headers, ADMIN_PHONE_KEYS),
+    uidCol: _pickHeader(headers, ADMIN_UID_KEYS),
+    varHint: _pickHeader(headers, ADMIN_VAR_HINTS),
+  };
+}
+
+// \uC218\uC2E0\uAC70\uBD80\u00B7\uC911\uBCF5\u00B7\uBC88\uD638\uC5C6\uC74C\uC744 \uAC78\uB7EC \uBC1C\uC1A1 \uB300\uC0C1\uB9CC \uB0A8\uAE34\uB2E4.
+function selectAdminRows(parsed, opts) {
+  opts = opts || {};
+  var stat = { input: parsed.rows.length, noPhone: 0, refused: 0, duplicated: 0 };
+  var seen = {}, out = [];
+  for (var i = 0; i < parsed.rows.length; i++) {
+    var r = parsed.rows[i];
+    var phoneRaw = parsed.phoneCol ? String(r[parsed.phoneCol] || "") : "";
+    var np = normalizePhone(phoneRaw);
+    if (!np) { stat.noPhone++; continue; }
+    if (opts.excludeRefuse !== false && refuseSet.size > 0 && refuseSet.has(np)) { stat.refused++; continue; }
+    if (opts.dedupe !== false) {
+      if (seen[np]) { stat.duplicated++; continue; }
+      seen[np] = true;
+    }
+    out.push({ name: parsed.nameCol ? (r[parsed.nameCol] || "") : "", phone: phoneRaw, src: r });
+  }
+  stat.output = out.length;
+  return { rows: out, stat: stat };
+}
+
+function buildUploadExcelFromAdmin(parsed, opts) {
+  opts = opts || {};
+  var sel = selectAdminRows(parsed, opts);
+  var varCols = (opts.varCols || []).slice(0, 4);
+  var wb = XLSX.utils.book_new();
+
+  // === \uC2DC\uD2B81: message_upload (1~4\uD589\uC740 \uBC1C\uC1A1 \uC5B4\uB4DC\uBBFC\uC774 \uC694\uAD6C\uD558\uB294 \uACE0\uC815 \uC11C\uC2DD) ===
+  var wsData = [];
+  wsData.push([ADMIN_UPLOAD_GUIDE, "", "", "", "", "", "", ""]);
+  wsData.push([opts.campaignName || "", "", "", "", "", "", "", ""]);
+  wsData.push(["{#\uC774\uB984}", "\uD734\uB300\uC804\uD654\uBC88\uD638", "{#A}", "{#B}", "{#C}", "{#D}", "", "\u2192 \uC120\uD0DD \uAC00\uB2A5\uD55C \uBCC0\uC218: {#\uC774\uB984} {#A} {#B} {#C} {#D}"]);
+  wsData.push(["\uD64D\uBC14\uB978", "01012345678", "\uBC14\uB978\uC190\uCE74\uB4DC", "\uC2A4\uD0C0\uBC85\uC2A4", "", "", "", "\u2192 \uC608\uC2DC"]);
+  for (var i = 0; i < sel.rows.length; i++) {
+    var it = sel.rows[i];
+    var vars = ["", "", "", ""];
+    for (var v = 0; v < varCols.length; v++) {
+      if (varCols[v]) vars[v] = it.src[varCols[v]] || "";
+    }
+    wsData.push([it.name, it.phone, vars[0], vars[1], vars[2], vars[3], "", i === 0 ? "\u2192 5\uD589\uBD80\uD130 \uC785\uB825\uD574\uC8FC\uC138\uC694." : ""]);
+  }
+  while (wsData.length < 999) wsData.push(["", "", "", "", "", "", "", ""]);
+
+  var ws1 = XLSX.utils.aoa_to_sheet(wsData);
+  ws1["!merges"] = [{ s: { c: 0, r: 0 }, e: { c: 21, r: 0 } }];
+  ws1["!cols"] = [
+    { wch: 12 }, { wch: 16 }, { wch: 24 }, { wch: 12 },
+    { wch: 12 }, { wch: 12 }, { wch: 4 }, { wch: 50 }
+  ];
+
+  // === \uC2DC\uD2B82: \uB300\uC0C1\uC790 raw (\uC6D0\uBCF8 \uC5F4 \uADF8\uB300\uB85C \u2014 \uD68C\uC6D0ID\u00B7\uB2F4\uC740\uC77C\uC2DC\u00B7\uC138\uADF8\uBA3C\uD2B8 \uBCF4\uC874) ===
+  var rawData = [parsed.headers.slice()];
+  for (var j = 0; j < sel.rows.length; j++) {
+    var s = sel.rows[j].src;
+    rawData.push(parsed.headers.map(function (h) { return s[h] == null ? "" : s[h]; }));
+  }
+  var ws2 = XLSX.utils.aoa_to_sheet(rawData);
+  ws2["!cols"] = parsed.headers.map(function (h) {
+    return { wch: h === parsed.phoneCol ? 16 : (h && h.length > 6 ? 22 : 12) };
+  });
+
+  XLSX.utils.book_append_sheet(wb, ws1, "message_upload");
+  XLSX.utils.book_append_sheet(wb, ws2, "\uB300\uC0C1\uC790 raw");
+  return {
+    buf: XLSX.write(wb, { type: "buffer", bookType: "xlsx" }),
+    stat: sel.stat,
+    rows: sel.rows,
+  };
+}
+
+// \uC5B4\uB4DC\uBBFC \uD30C\uC77C\uBA85\uC5D0\uC11C \uCEA0\uD398\uC778\uBA85\uC744 \uCD94\uC815\uD55C\uB2E4.
+// "\uC7A5\uBC14\uAD6C\uB2C8\uC774\uD0C8\uACE0\uAC1D_D+3_20260805.xlsx" \u2192 "260805_\uCCAD\uCCA9\uC7A5_\uC7A5\uBC14\uAD6C\uB2C8D+3"
+function suggestCampaignName(filename, parsed) {
+  var base = String(filename || "").replace(/\.[^.]+$/, "");
+  var ymd = base.match(/(20\d{2})(\d{2})(\d{2})/);
+  var stamp = ymd ? (ymd[1].slice(2) + ymd[2] + ymd[3])
+    : new Date().toISOString().slice(2, 10).replace(/-/g, "");
+  var seg = "";
+  var dm = base.match(/D\s*\+\s*(\d+)/i);
+  if (dm) seg = "D+" + dm[1];
+  if (!seg && parsed && parsed.rows.length) {                 // \uD30C\uC77C\uBA85\uC5D0 \uC5C6\uC73C\uBA74 \uC138\uADF8\uBA3C\uD2B8 \uC5F4\uC5D0\uC11C
+    var segCol = _pickHeader(parsed.headers, ["\uC138\uADF8\uBA3C\uD2B8", "\uAD6C\uBD84"]);
+    if (segCol) seg = String(parsed.rows[0][segCol] || "").trim();
+  }
+  var kind = /\uBD80\uAC00\uC0C1\uD488|\uB2F5\uB840\uD488/.test(base) ? "\uBD80\uAC00\uC0C1\uD488" : "\uCCAD\uCCA9\uC7A5";
+  if (/\uC7A5\uBC14\uAD6C\uB2C8/.test(base)) return stamp + "_" + kind + "_\uC7A5\uBC14\uAD6C\uB2C8" + seg;
+  return stamp + "_" + (base.replace(/[_\s]*20\d{6}$/, "") || "\uCD94\uCD9C");
 }
 
 // \u2500\u2500 \uBC1C\uC1A1 \uC804 \uC218\uC2E0\uAC70\uBD80 \uCCB4\uD06C \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -4764,6 +4928,47 @@ function generateHTML() {
           </select>
           <span style="font-size:12px;color:#888">앞에서부터 균등 분할 · 그룹별 파일 자동 생성</span>
         </label>
+      </div>
+    </div>
+
+    <div class="panel" style="border:1px solid #c4b5fd;background:#faf5ff;">
+      <div class="panel-title" style="color:#6d28d9;">🔄 어드민 추출파일 → 발송양식 변환</div>
+      <p style="font-size:13px;color:#6b7280;margin:6px 0 12px;line-height:1.75;">
+        장바구니 D+N처럼 <b>바른손카드 어드민에서 받은 명단</b>(예: 장바구니이탈고객_D+3_YYYYMMDD.xlsx)을 올리면
+        발송 어드민이 받는 양식(<b>message_upload</b> + <b>대상자 raw</b>)으로 바꿔 내려받습니다.<br>
+        080 수신거부 명단과 중복 번호는 자동으로 빠지고, 원본 열(회원ID·담은일시·세그먼트)은 raw 시트에 그대로 남습니다.
+      </p>
+      <div class="filter-row">
+        <div class="filter-label">어드민 파일</div>
+        <div class="filter-body">
+          <input type="file" id="acFile" accept=".xlsx,.xls" style="font-size:13px;" onchange="acInspect()">
+          <span style="font-size:12px;color:#888;">파일을 고르면 열 구성을 자동으로 읽습니다</span>
+        </div>
+      </div>
+      <div id="acPanel" style="display:none;">
+        <div class="filter-row">
+          <div class="filter-label">캠페인명</div>
+          <div class="filter-body">
+            <input type="text" id="acCampaign" placeholder="예: 260805_청첩장_장바구니D+3" style="padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;width:320px;">
+            <span style="font-size:12px;color:#888;">다운로드 파일명 · message_upload 2행에 들어갑니다</span>
+          </div>
+        </div>
+        <div class="filter-row">
+          <div class="filter-label">치환 변수</div>
+          <div class="filter-body" id="acVarBody" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;"></div>
+        </div>
+        <div class="filter-row">
+          <div class="filter-label">옵션</div>
+          <div class="filter-body" style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;font-size:13px;color:#374151;">
+            <label style="display:inline-flex;align-items:center;gap:5px;"><input type="checkbox" id="acExcludeRefuse" checked> 080 수신거부 제외</label>
+            <label style="display:inline-flex;align-items:center;gap:5px;"><input type="checkbox" id="acDedupe" checked> 중복 번호 제거</label>
+            <label style="display:inline-flex;align-items:center;gap:5px;"><input type="checkbox" id="acSaveHistory" checked> 추출 이력에 저장</label>
+          </div>
+        </div>
+        <div id="acInfo" style="font-size:13px;color:#374151;margin:10px 0;line-height:1.8;"></div>
+        <div class="btn-row">
+          <button class="btn btn-primary" id="acBtnDownload" onclick="acDownload()">발송양식 다운로드</button>
+        </div>
       </div>
     </div>
 
@@ -9247,6 +9452,124 @@ async function doAdminDownload() {
   finally { btnA.disabled = false; btnA.textContent = '어드민 발송양식 다운로드'; }
 }
 
+// ═══ 어드민 추출파일 → 발송양식 변환 ═══
+// 이 블록도 백틱 템플릿 안이라 백슬래시 이스케이프가 소실된다.
+// → 정규식 리터럴을 쓰지 않고 split/join으로 처리한다.
+var _acFileB64 = null, _acFileName = '';
+
+function _acEsc(s) {
+  return String(s == null ? '' : s)
+    .split('&').join('&amp;').split('<').join('&lt;')
+    .split('>').join('&gt;').split('"').join('&quot;');
+}
+
+async function acInspect() {
+  var input = document.getElementById('acFile');
+  var f = input.files && input.files[0];
+  var panel = document.getElementById('acPanel');
+  var info = document.getElementById('acInfo');
+  if (!f) { panel.style.display = 'none'; _acFileB64 = null; return; }
+  panel.style.display = 'block';
+  info.style.color = '#374151';
+  info.textContent = '파일을 읽는 중...';
+  try {
+    var buf = await f.arrayBuffer();
+    _acFileB64 = _abToB64(buf);
+    _acFileName = f.name;
+    var res = await fetch('api/admin-convert/inspect', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: f.name, dataB64: _acFileB64 })
+    });
+    var d = await res.json();
+    if (!res.ok || d.error) throw new Error(d.error || '파일을 읽지 못했습니다');
+    document.getElementById('acCampaign').value = d.campaignName || '';
+
+    // {#A}~{#D}에 넣을 원본 열 선택. {#A}는 제품명류가 있으면 미리 골라둔다.
+    var labels = ['{#A}', '{#B}', '{#C}', '{#D}'];
+    var html = '';
+    for (var i = 0; i < 4; i++) {
+      html += '<label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;">' + labels[i];
+      html += '<select id="acVar' + i + '" style="padding:5px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;">';
+      html += '<option value="">(비움)</option>';
+      for (var h = 0; h < d.headers.length; h++) {
+        var col = d.headers[h];
+        if (!col || col === d.nameCol || col === d.phoneCol) continue;
+        var sel = (i === 0 && col === d.varHint) ? ' selected' : '';
+        html += '<option value="' + _acEsc(col) + '"' + sel + '>' + _acEsc(col) + '</option>';
+      }
+      html += '</select></label>';
+    }
+    document.getElementById('acVarBody').innerHTML = html;
+
+    var s = d.stat;
+    var parts = [];
+    parts.push('시트 <b>' + _acEsc(d.sheetName) + '</b> · 이름=<b>' + _acEsc(d.nameCol || '?') +
+               '</b> · 연락처=<b>' + _acEsc(d.phoneCol || '?') + '</b>');
+    parts.push('원본 ' + s.input + '건 → 발송 대상 <b>' + s.output + '건</b>');
+    var ex = [];
+    if (s.noPhone) ex.push('번호없음 ' + s.noPhone);
+    if (s.refused) ex.push('수신거부 ' + s.refused);
+    if (s.duplicated) ex.push('중복 ' + s.duplicated);
+    if (ex.length) parts.push('제외 예정: ' + ex.join(' · '));
+    parts.push('<span style="color:#9ca3af;">등록된 080 수신거부 명단 ' + d.refuseListCount + '건</span>');
+    info.innerHTML = parts.join('<br>');
+  } catch (e) {
+    info.style.color = '#b91c1c';
+    info.textContent = '오류: ' + e.message;
+    _acFileB64 = null;
+  }
+}
+
+async function acDownload() {
+  if (!_acFileB64) { alert('먼저 어드민 파일을 선택해주세요.'); return; }
+  var btn = document.getElementById('acBtnDownload');
+  btn.disabled = true;
+  var old = btn.textContent;
+  btn.textContent = '변환 중...';
+  try {
+    var varCols = [];
+    for (var i = 0; i < 4; i++) {
+      var el = document.getElementById('acVar' + i);
+      varCols.push(el ? el.value : '');
+    }
+    var name = document.getElementById('acCampaign').value || '변환';
+    var res = await fetch('api/admin-convert', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: _acFileName,
+        dataB64: _acFileB64,
+        campaignName: name,
+        varCols: varCols,
+        excludeRefuse: document.getElementById('acExcludeRefuse').checked,
+        dedupe: document.getElementById('acDedupe').checked,
+        saveHistory: document.getElementById('acSaveHistory').checked
+      })
+    });
+    if (!res.ok) throw new Error((await res.json()).error || res.statusText);
+    var statHdr = res.headers.get('X-Convert-Stat');
+    var blob = await res.blob();
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = name + '.xlsx';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    if (statHdr) {
+      var st = JSON.parse(statHdr);
+      var info = document.getElementById('acInfo');
+      info.style.color = '#047857';
+      info.innerHTML = '다운로드 완료 — 발송 대상 <b>' + st.output + '건</b> (원본 ' + st.input +
+        '건 · 제외 ' + (st.input - st.output) + '건)';
+    }
+    if (document.getElementById('acSaveHistory').checked && typeof loadExtHistory === 'function') {
+      loadExtHistory();
+    }
+  } catch (e) {
+    alert('변환 실패: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = old;
+  }
+}
+
 function toggleSql() { document.getElementById('sqlBox').classList.toggle('hidden'); }
 
 // ═══ 카카오 브랜드메시지 성과 ═══
@@ -11126,6 +11449,83 @@ var server = http.createServer(async function (req, res) {
         "Content-Length": adminBuf.length,
       });
       res.end(adminBuf);
+      return;
+    }
+
+    // ── 어드민 추출파일 변환: 미리보기(열 구성·건수 확인) ──
+    if (pathname === "/api/admin-convert/inspect" && req.method === "POST") {
+      var acBody = await parseBody(req);
+      if (!acBody.dataB64) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "파일 데이터가 없습니다." }));
+        return;
+      }
+      var acParsed = parseAdminExtract(Buffer.from(acBody.dataB64, "base64"));
+      if (acParsed.error) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: acParsed.error }));
+        return;
+      }
+      var acSel = selectAdminRows(acParsed, {});
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({
+        ok: true,
+        sheetName: acParsed.sheetName,
+        headers: acParsed.headers,
+        nameCol: acParsed.nameCol,
+        phoneCol: acParsed.phoneCol,
+        uidCol: acParsed.uidCol,
+        varHint: acParsed.varHint,
+        stat: acSel.stat,
+        refuseListCount: refuseSet.size,
+        campaignName: suggestCampaignName(acBody.filename, acParsed),
+        sample: acParsed.rows.slice(0, 3),
+      }));
+      return;
+    }
+
+    // ── 어드민 추출파일 변환: 발송양식 다운로드 ──
+    if (pathname === "/api/admin-convert" && req.method === "POST") {
+      var cvBody = await parseBody(req);
+      if (!cvBody.dataB64) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "파일 데이터가 없습니다." }));
+        return;
+      }
+      var cvParsed = parseAdminExtract(Buffer.from(cvBody.dataB64, "base64"));
+      if (cvParsed.error) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: cvParsed.error }));
+        return;
+      }
+      var cvName = cvBody.campaignName || suggestCampaignName(cvBody.filename, cvParsed);
+      var cvOut = buildUploadExcelFromAdmin(cvParsed, {
+        campaignName: cvName,
+        varCols: Array.isArray(cvBody.varCols) ? cvBody.varCols : [],
+        excludeRefuse: cvBody.excludeRefuse !== false,
+        dedupe: cvBody.dedupe !== false,
+      });
+      // 변환분도 추출 이력에 남겨 [CRM 전환 추적]에서 그대로 불러올 수 있게 한다.
+      // addExtractionRecord는 이름/휴대폰번호/회원ID 키를 읽으므로 그 형태로 맞춰 넘긴다.
+      if (cvBody.saveHistory !== false && cvOut.stat.output > 0) {
+        addExtractionRecord(cvName, cvOut.rows.map(function (it) {
+          return {
+            "이름": it.name,
+            "휴대폰번호": it.phone,
+            "회원ID": cvParsed.uidCol ? (it.src[cvParsed.uidCol] || "") : "",
+          };
+        }));
+      }
+      console.log("[어드민변환] '" + (cvBody.filename || "") + "' → " + cvName +
+        ": 입력 " + cvOut.stat.input + " / 출력 " + cvOut.stat.output +
+        " (번호없음 " + cvOut.stat.noPhone + " · 수신거부 " + cvOut.stat.refused + " · 중복 " + cvOut.stat.duplicated + ")");
+      res.writeHead(200, {
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Disposition": "attachment; filename=" + encodeURIComponent(cvName + ".xlsx"),
+        "Content-Length": cvOut.buf.length,
+        "X-Convert-Stat": JSON.stringify(cvOut.stat),
+      });
+      res.end(cvOut.buf);
       return;
     }
 
