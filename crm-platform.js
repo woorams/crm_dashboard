@@ -1413,16 +1413,32 @@ var CLICK_WINDOWS = [
 ];
 // 타임시리즈(link_clicks: [{date, clicks}])를 발송일(sendDateStr) 기준 시간 윈도우별 누적 클릭수로 환산.
 // 발송일이 유효하지 않으면 total만 합산하고 윈도우는 0으로 둔다.
+// 성과 표시용 클릭 수. sent(발송 시각 이후)가 있으면 그것을, 없으면(구 데이터) total을 쓴다.
+// total은 링크 생성·검수 때 눌러본 클릭까지 포함하므로 실제 반응보다 부풀려진다.
+function sentClickCount(clicks) {
+  if (!clicks) return 0;
+  var s = clicks.sent, t = clicks.total;
+  var sv = (s && typeof s === "object") ? s.count : s;
+  var tv = (t && typeof t === "object") ? t.count : t;
+  if (sv !== undefined && sv !== null) return parseInt(sv) || 0;
+  return parseInt(tv) || 0;
+}
+
 function calcWindowClicks(linkClicks, sendDateStr) {
-  var result = { "1h": 0, "6h": 0, "12h": 0, "24h": 0, "48h": 0, "72h": 0, "7d": 0, "total": 0 };
+  var result = { "1h": 0, "6h": 0, "12h": 0, "24h": 0, "48h": 0, "72h": 0, "7d": 0, "total": 0, "sent": 0, "pre": 0 };
   if (!linkClicks || !linkClicks.length) return result;
   var validDate = sendDateStr && /^\d{4}-\d{2}-\d{2}/.test(sendDateStr);
   if (!validDate) {
     linkClicks.forEach(function (e) { result.total += e.clicks || 0; });
+    result.sent = result.total;   // 발송시각을 모르면 가릴 수 없다 → total과 동일 취급
     return result;
   }
   var sendTime = new Date(String(sendDateStr).replace(" ", "T") + "+09:00").getTime();
-  if (isNaN(sendTime)) { linkClicks.forEach(function (e) { result.total += e.clicks || 0; }); return result; }
+  if (isNaN(sendTime)) {
+    linkClicks.forEach(function (e) { result.total += e.clicks || 0; });
+    result.sent = result.total;
+    return result;
+  }
   sendTime = Math.floor(sendTime / 3600000) * 3600000;
   var nowTime = Date.now();
   var elapsedHours = (nowTime - sendTime) / (1000 * 60 * 60);
@@ -1434,10 +1450,15 @@ function calcWindowClicks(linkClicks, sendDateStr) {
     // 대시보드는 0으로 표시되던 문제 — send_date 상대 필터가 total까지 걸러내던 것.)
     result.total += clicks;
     if (entryTime >= sendTime) {
+      // sent = 발송 시각 이후 클릭 전체(윈도우 상한 없음). 성과 표시는 이 값을 쓴다.
+      // total은 링크 생성·검수 때 눌러본 클릭까지 포함해 실제 반응을 부풀린다.
+      result.sent += clicks;
       var diffHours = (entryTime - sendTime) / (1000 * 60 * 60);
       for (var wi = 0; wi < CLICK_WINDOWS.length; wi++) {
         if (diffHours < CLICK_WINDOWS[wi].hours) result[CLICK_WINDOWS[wi].key] += clicks;
       }
+    } else {
+      result.pre += clicks;   // 발송 전 클릭(대부분 링크 검수) — 성과에서 제외
     }
   });
   // 아직 도래하지 않은 윈도우(현재 진행 중 다음 구간부터)는 null로 표시
@@ -2165,7 +2186,7 @@ async function runBitlyAllJob(limitN) {
     }
     // 저장 직전 최신 파일에 병합(동시 저장분 보존)
     var cd2 = fs.existsSync(cdPath) ? JSON.parse(fs.readFileSync(cdPath, "utf8")) : { campaigns: [], records: [] };
-    var slotKeys = ["1h", "6h", "12h", "24h", "48h", "72h", "7d", "total"];
+    var slotKeys = ["1h", "6h", "12h", "24h", "48h", "72h", "7d", "total", "sent", "pre"];
     var updated = 0;
     (cd2.records || []).forEach(function (r) {
       if (r.bitly_url && clickMap[r.bitly_url] !== undefined) {
@@ -5479,7 +5500,16 @@ function dpSegSort(list){
 }
 function dpConv(c){var m=0,o=c.conversions||{};for(var k in o){var v=o[k]&&o[k].count;if(v>m)m=v;}return m;}
 function dpRev(c){var r=c.revenue;if(r==null)return 0;if(typeof r==='number')return r;var m=0;for(var k in r){if(typeof r[k]==='number'&&r[k]>m)m=r[k];}return m;}
-function dpClk(c){return (c.clicks&&c.clicks.total&&c.clicks.total.count)||0;}
+// 발송 후 클릭(sent) 우선, 구 데이터는 total 폴백. 서버 sentClickCount와 같은 규칙.
+function _clkSent(c){
+  var k=c&&c.clicks; if(!k) return 0;
+  var s=k.sent, t=k.total;
+  var sv=(s&&typeof s==="object")?s.count:s;
+  var tv=(t&&typeof t==="object")?t.count:t;
+  if(sv!==undefined&&sv!==null) return parseInt(sv)||0;
+  return parseInt(tv)||0;
+}
+function dpClk(c){return _clkSent(c);}
 function dpYMD(s){var p=s.split('-').map(Number);return new Date(p[0],p[1]-1,p[2]);}
 function dpDS(dt){return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');}
 function dpMD(dt){return (dt.getMonth()+1)+'/'+dt.getDate();}
@@ -6146,7 +6176,7 @@ function brBuildPkg(dateStr){
   return {
     date: dateStr,
     weekday: DP_WD[dt.getDay()],
-    지표정의: '전환·매출은 발송 후 24/48시간 내 귀속 실적(캠페인 저장값), 클릭은 Bitly 총 클릭. 비율은 합계÷합계(발송수 가중).',
+    지표정의: '전환·매출은 발송 후 24/48시간 내 귀속 실적(캠페인 저장값), 클릭은 발송 시각 이후 Bitly 클릭(링크 검수 등 발송 전 클릭 제외). 비율은 합계÷합계(발송수 가중).',
     campaigns: today.sort(function(a,b){ return (b.send_count||0) - (a.send_count||0); }).map(function(c){
       var o = anCell(); anAdd(o, c);
       return {
@@ -6258,7 +6288,7 @@ function brBuildWeekPkg(wsStr){
   return {
     period: 'week',
     weekStart: wk.from, weekEnd: wk.to, 주차: wk.label, 진행중: 진행중,
-    지표정의: '전환·매출은 발송 후 24/48시간 내 귀속 실적(캠페인 저장값), 클릭은 Bitly 총 클릭. 비율은 합계÷합계(발송수 가중). 주 경계는 일~토.',
+    지표정의: '전환·매출은 발송 후 24/48시간 내 귀속 실적(캠페인 저장값), 클릭은 발송 시각 이후 Bitly 클릭(링크 검수 등 발송 전 클릭 제외). 비율은 합계÷합계(발송수 가중). 주 경계는 일~토.',
     campaigns: sorted.slice(0, TOP).map(function(c){
       var o = anCell(); anAdd(o, c);
       var dt = dpYMD(c.send_date.slice(0,10));
@@ -7286,7 +7316,7 @@ function _renderDashboardInner() {
   filtered.forEach(function(c){
     var p=c.purpose||'기타';if(!pm[p])pm[p]={n:0,sent:0,clkTotal:0,convTotal:0,cost:0,rev:0};
     var m=pm[p];m.n++;m.sent+=c.send_count||0;m.cost+=c.cost||0;m.rev+=cdRevenue(c,'2d');
-    if(c.clicks&&c.clicks['total'])m.clkTotal+=parseInt(c.clicks['total'].count)||0;
+    m.clkTotal+=_clkSent(c);
     var cv1=c.conversions&&c.conversions['1d']?parseInt(c.conversions['1d'].count)||0:0;
     var cv2=c.conversions&&c.conversions['2d']?parseInt(c.conversions['2d'].count)||0:0;
     m.convTotal+=Math.max(cv1,cv2);
@@ -7308,7 +7338,7 @@ function _renderDashboardInner() {
     if(!d||d.length!==10||d.charAt(4)!=='-'||d.charAt(7)!=='-'||isNaN(parseInt(d)))return;
     if(!dm[d])dm[d]={n:0,sent:0,clkTotal:0,convTotal:0};
     var m=dm[d];m.n++;m.sent+=c.send_count||0;
-    if(c.clicks&&c.clicks['total'])m.clkTotal+=parseInt(c.clicks['total'].count)||0;
+    m.clkTotal+=_clkSent(c);
     var cv1=c.conversions&&c.conversions['1d']?parseInt(c.conversions['1d'].count)||0:0;
     var cv2=c.conversions&&c.conversions['2d']?parseInt(c.conversions['2d'].count)||0:0;
     m.convTotal+=Math.max(cv1,cv2);
@@ -7385,9 +7415,9 @@ function setTrendMode(m){
   });
   renderTrendChart();
 }
-// 캠페인 누적 클릭률(%) — clicks.total 우선, 없으면 24h (rate는 0~1 분수 저장)
+// 캠페인 누적 클릭률(%) — 발송 후 클릭(sent) ÷ 발송수. 값이 없으면 24h rate(0~1 분수) 폴백
 function _cdClickRate(c){
-  if(c.clicks&&c.clicks['total']){var r=parseFloat(c.clicks['total'].rate);if(!isNaN(r))return r*100;}
+  if(c.clicks){var sc=_clkSent(c),sn=parseInt(c.send_count||0);if(sn>0)return sc/sn*100;}
   if(c.clicks&&c.clicks['24h']){var r2=parseFloat(c.clicks['24h'].rate);if(!isNaN(r2))return r2*100;}
   return null;
 }
@@ -7714,7 +7744,7 @@ function kbCardHtml(c, idx){
   var incentive = (c.incentive||c.extra_condition||'').split(String.fromCharCode(10))[0].slice(0,32);
   var send = parseInt(c.send_count||0);
   var cl = c.clicks||{}, cv = c.conversions||{};
-  var clkTot = cl.total ? parseInt(cl.total.count||0) : 0;
+  var clkTot = _clkSent(c);
   var ctr = send>0 ? (clkTot/send*100) : 0;
   var cv2 = cv['2d'] ? parseInt(cv['2d'].count||0) : 0;
   var cv1 = cv['1d'] ? parseInt(cv['1d'].count||0) : 0;
@@ -7782,8 +7812,8 @@ function renderKanban(){
   // 정렬
   filtered.sort(function(a,b){
     var sa = parseInt(a.send_count||0), sb = parseInt(b.send_count||0);
-    var ctrA = sa>0 && a.clicks && a.clicks.total ? a.clicks.total.count/sa : 0;
-    var ctrB = sb>0 && b.clicks && b.clicks.total ? b.clicks.total.count/sb : 0;
+    var ctrA = sa>0 ? _clkSent(a)/sa : 0;
+    var ctrB = sb>0 ? _clkSent(b)/sb : 0;
     var cvrA = sa>0 && a.conversions && a.conversions['2d'] ? a.conversions['2d'].count/sa : 0;
     var cvrB = sb>0 && b.conversions && b.conversions['2d'] ? b.conversions['2d'].count/sb : 0;
     if (sort === 'date_asc') return (a.send_date||'').localeCompare(b.send_date||'');
@@ -11076,7 +11106,7 @@ var server = http.createServer(async function (req, res) {
       // 캠페인 메시지 내 비틀리 URL 클릭수: URL별 분리 저장 + 합산 모두 유지
       var campUpdated = 0;
       var bitlyRegex = /https?:\/\/bit\.ly\/\S+/g;
-      var slotKeys = ["1h","6h","12h","24h","48h","72h","7d","total"];
+      var slotKeys = ["1h","6h","12h","24h","48h","72h","7d","total","sent","pre"];
       (cdData5.campaigns || []).forEach(function (camp) {
         if (!camp.message) return;
         var matches = camp.message.match(bitlyRegex);
@@ -11916,7 +11946,7 @@ var server = http.createServer(async function (req, res) {
             var sp = c.extraction_split;
             if (!splitMap[sp]) splitMap[sp] = { split: sp, incentive: c.incentive || "", sent: 0, clk: 0, conv1d: 0, conv2d: 0, days: [] };
             splitMap[sp].sent += c.send_count || 0;
-            if (c.clicks && c.clicks.total) splitMap[sp].clk += parseInt(c.clicks.total.count) || 0;
+            splitMap[sp].clk += sentClickCount(c.clicks);
             var cv = c.conversions || {};
             splitMap[sp].conv1d += cv["1d"] ? parseInt(cv["1d"].count) || 0 : 0;
             splitMap[sp].conv2d += cv["2d"] ? parseInt(cv["2d"].count) || 0 : 0;
