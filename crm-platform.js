@@ -2576,6 +2576,7 @@ var BRIEFING_SYSTEM =
   "- 전환·매출은 발송 후 24/48시간 내 '귀속' 실적입니다. 발송이 원인이라는 증거가 아니므로 '발송 덕분에 매출이 늘었다'처럼 인과로 단정하지 말고 '귀속 매출 X원'으로 씁니다. 순증분은 대조군 없이 알 수 없습니다.\n" +
   "- 발송 당일·전일 캠페인은 아직 집계 중일 수 있습니다. 전환이 0이면 '집계 전일 가능성'을 함께 적습니다.\n" +
   "- 클릭률이 100%를 넘으면 여러 캠페인이 같은 단축 URL을 공유해 클릭이 중복 집계된 것입니다. 성과로 해석하지 말고 그 사실을 표시합니다.\n" +
+  "- 캠페인에 '링크경고'가 있으면 등록된 단축URL에 발송 후 클릭이 0건이라는 뜻입니다. 소재가 나빴다고 쓰지 말고 링크가 잘못 나갔을 가능성으로 적고, 그 캠페인의 클릭률은 성과 판단에서 제외합니다.\n" +
   "- 발송 30명 미만 캠페인의 비율은 표본이 작아 크게 흔들립니다. 단정하지 않습니다.\n" +
   "- JSON에 없는 수치는 만들지 않습니다. 모르면 '데이터 없음'이라고 씁니다.\n" +
   "- 금액은 원 단위 천단위 구분, 비율은 소수 1자리로 씁니다.\n" +
@@ -2618,6 +2619,7 @@ var BRIEFING_WEEKLY_SYSTEM =
   "- 주 간 비교에서 발송량 자체가 크게 다르면 절대량(전환수·매출)보다 비율(전환율·ROAS)을 우선해 판단합니다.\n" +
   "- 주 후반(금·토) 발송은 아직 집계 중일 수 있습니다. 진행중=true면 몇 일치 데이터인지 한 줄로 명시하고, 전주와의 절대량 비교를 단정하지 않습니다.\n" +
   "- 클릭률이 100%를 넘으면 여러 캠페인이 같은 단축 URL을 공유해 클릭이 중복 집계된 것입니다. 성과로 해석하지 말고 그 사실을 표시합니다.\n" +
+  "- 캠페인에 '링크경고'가 있으면 등록된 단축URL에 발송 후 클릭이 0건이라는 뜻입니다. 소재가 나빴다고 쓰지 말고 링크가 잘못 나갔을 가능성으로 적고, 그 캠페인의 클릭률은 성과 판단에서 제외합니다.\n" +
   "- 발송 30명 미만 캠페인·세그먼트의 비율은 표본이 작아 크게 흔들립니다. 단정하지 않습니다.\n" +
   "- JSON에 없는 수치는 만들지 않습니다. 모르면 '데이터 없음'이라고 씁니다.\n" +
   "- 금액은 원 단위 천단위 구분, 비율은 소수 1자리로 씁니다.\n" +
@@ -5510,6 +5512,24 @@ function _clkSent(c){
   return parseInt(tv)||0;
 }
 function dpClk(c){return _clkSent(c);}
+// 링크 점검: 캠페인에 단축URL이 등록돼 있는데 발송 후 클릭이 한 건도 없으면 의심 신호다.
+// 실제 사례(2026-08-06 당일 샘플 발송) — 등록 링크 2개가 클릭 0인 반면 직전 회차 링크가
+// 이 캠페인 발송 시각에 클릭됐다. 발송 메시지에 이전 링크가 들어간 것으로 보였다.
+// 발송량이 적으면 0클릭이 자연스러우므로 최소 기준을 둔다.
+function _linkWarn(c){
+  if(!c) return null;
+  var urls = c.url_clicks ? Object.keys(c.url_clicks) : [];
+  if(!urls.length) return null;                       // 링크 없는 캠페인(액션X 등)은 대상 아님
+  if((c.type||'')==='취소') return null;
+  var send = parseInt(c.send_count||0);
+  if(send < 30) return null;
+  if(_clkSent(c) > 0) return null;
+  // 클릭은 대부분 발송 직후 1시간에 몰린다(실측: 8/6 샘플 2일차 13클릭 중 8클릭이 발송 시각 버킷).
+  // 12시간이 지나도 0이면 집계 지연으로 보기 어렵다. 다음날 아침 브리핑에서 바로 잡히도록 12h로 둔다.
+  var sd = new Date(String(c.send_date||'').replace(' ','T'));
+  if(isNaN(sd.getTime()) || (new Date() - sd) < 12*3600000) return null;
+  return '등록 링크 '+urls.length+'개에 발송 후 클릭이 0건입니다. 실제 발송 메시지에 다른(이전 회차) 링크가 들어갔는지 확인해주세요.';
+}
 function dpYMD(s){var p=s.split('-').map(Number);return new Date(p[0],p[1]-1,p[2]);}
 function dpDS(dt){return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');}
 function dpMD(dt){return (dt.getMonth()+1)+'/'+dt.getDate();}
@@ -6185,7 +6205,9 @@ function brBuildPkg(dateStr){
         기간조건: head(c.target, 40), 소구점: head(c.incentive, 40), 카피앞부분: head(c.message, 60),
         발송: o.s, 클릭: o.clk, 클릭률: brRate(o.clk, o.s),
         전환: o.cv, 전환율: brRate(o.cv, o.s), 매출: o.rev, 비용: o.cost,
-        ROAS: o.cost ? brRate(o.rev, o.cost) : null
+        ROAS: o.cost ? brRate(o.rev, o.cost) : null,
+        // 값이 있으면 '클릭 0'을 성과 저하로 오독하지 않게 한다 (링크가 잘못 나갔을 가능성)
+        링크경고: _linkWarn(c)
       };
     }),
     합계: brPack(agg(today)),
@@ -6298,7 +6320,9 @@ function brBuildWeekPkg(wsStr){
         소구점: head(c.incentive, 40),
         발송: o.s, 클릭: o.clk, 클릭률: brRate(o.clk, o.s),
         전환: o.cv, 전환율: brRate(o.cv, o.s), 매출: o.rev, 비용: o.cost,
-        ROAS: o.cost ? brRate(o.rev, o.cost) : null
+        ROAS: o.cost ? brRate(o.rev, o.cost) : null,
+        // 값이 있으면 '클릭 0'을 성과 저하로 오독하지 않게 한다 (링크가 잘못 나갔을 가능성)
+        링크경고: _linkWarn(c)
       };
     }),
     기타캠페인: rest.length ? { 건수: rest.length, 합계: brPack(agg(rest)) } : null,
@@ -7758,8 +7782,10 @@ function kbCardHtml(c, idx){
   } else if (status === 'cancel') {
     stats = '<span style="color:#9ca3af">발송 취소</span>';
   } else {
+    var lw = _linkWarn(c);
     stats = '<span>발송 <b>'+send.toLocaleString()+'</b></span>'+
-            '<span>클릭 <b style="color:#1a73e8">'+ctr.toFixed(1)+'%</b></span>'+
+            '<span>클릭 <b style="color:#1a73e8">'+ctr.toFixed(1)+'%</b>'+
+              (lw ? ' <span title="'+escHtml(lw)+'" style="cursor:help">⚠️</span>' : '')+'</span>'+
             (status==='measuring'
               ? '<span>전환(1d) <b class="'+(cvr1>=1?'kb-stat-good':'kb-stat-warn')+'">'+cvr1.toFixed(1)+'%</b></span>'
               : '<span>전환(2d) <b class="'+cvrClass+'">'+cvr.toFixed(1)+'%</b></span>');
