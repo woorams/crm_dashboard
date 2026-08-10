@@ -4625,8 +4625,19 @@ function generateHTML() {
       .an-tbl th.lbl { text-align:left; }
       .an-tbl td.lbl { text-align:left; font-weight:600; color:#374151; white-space:nowrap; }
       .an-tbl .sum { background:#f9fafb; font-weight:600; }
+      .an-tbl th.sum { background:#16324f; color:#fff; }  /* 헤더는 흰 글씨라 회색 배경이면 안 보인다 */
       .an-tbl .den { color:#9ca3af; font-size:10px; display:block; }
       .an-tbl .nil { color:#d1d5db; }
+      /* 기간별 상세: 날짜를 가로(열)로 — 열이 최대 92개까지 늘어나므로 폭을 내용에 맞추고 가로 스크롤,
+         첫 열(계열)은 sticky로 고정해 스크롤해도 어느 계열인지 보이게 한다 */
+      .an-tbl.an-tbl-h { width:auto; min-width:100%; }
+      .an-tbl.an-tbl-h th, .an-tbl.an-tbl-h td { white-space:nowrap; }
+      .an-tbl.an-tbl-h th.lbl, .an-tbl.an-tbl-h td.lbl { position:sticky; left:0; }
+      .an-tbl.an-tbl-h th.lbl { z-index:5; }
+      .an-tbl.an-tbl-h td.lbl { z-index:1; background:#fff; box-shadow:1px 0 0 #e5e7eb; }
+      .an-tbl.an-tbl-h tr:hover td.lbl { background:#f8faff; }
+      .an-tbl.an-tbl-h td.lbl.sum, .an-tbl.an-tbl-h tr:hover td.lbl.sum { background:#f3f4f6; }
+      .an-tbl.an-tbl-h th .wd { display:block; font-size:10px; font-weight:400; color:#b8c7db; }
       .br-body { font-size:13.5px; color:#1f2937; line-height:1.8; }
       .br-body h2, .br-body h3 { font-size:14px; font-weight:700; color:#1e3a5f; margin:18px 0 8px; padding-bottom:5px; border-bottom:1px solid #e5e7eb; }
       .br-body h3:first-child, .br-body h2:first-child { margin-top:2px; }
@@ -5902,11 +5913,14 @@ function anPeriods(from,to){
   var guard = 0;
   while(dpDS(cur) <= to && guard++ < 900){
     if(anUnit === 'day'){
-      out.push({ k:dpDS(cur), label:dpMD(cur) + '(' + DP_WD[cur.getDay()] + ')', short:dpMD(cur) });
+      // head/sub: 기간별 상세 표에서 날짜가 '열 머리글'이라 두 줄(8/8 + 토)로 나눠 쓴다
+      out.push({ k:dpDS(cur), label:dpMD(cur) + '(' + DP_WD[cur.getDay()] + ')', short:dpMD(cur),
+                 head:dpMD(cur), sub:DP_WD[cur.getDay()] });
       cur.setDate(cur.getDate() + 1);
     } else {
       var e = new Date(cur.getTime()); e.setDate(e.getDate() + 6);
-      out.push({ k:dpDS(cur), label:dpWN(cur) + '주차 (' + dpMD(cur) + '~' + dpMD(e) + ')', short:dpMD(cur) });
+      out.push({ k:dpDS(cur), label:dpWN(cur) + '주차 (' + dpMD(cur) + '~' + dpMD(e) + ')', short:dpMD(cur),
+                 head:dpWN(cur) + '주차', sub:dpMD(cur) + '~' + dpMD(e) });
       cur.setDate(cur.getDate() + 7);
     }
   }
@@ -6125,23 +6139,41 @@ function anTd(metric, c, cls){
   if(metric === 'clickRate') sub = '<span class="den">' + c.clk.toLocaleString() + ' / ' + c.s.toLocaleString() + '</span>';
   return '<td class="' + cls + '">' + anFmt(metric, v) + sub + '</td>';
 }
+// 기간별 상세 — 날짜가 '열', 계열이 '행'(가로 정렬).
+// 세로로 늘어놓으면 날짜를 위아래로 훑어야 해서 추이가 안 읽힌다.
 function anRenderTable(periods, series, totals, metric){
-  var showSum = !(series.length === 1);   // 계열이 하나면 '전체' 열은 같은 값이라 생략
-  var h = '<table class="an-tbl"><thead><tr><th class="lbl">' + (anUnit === 'day' ? '일자' : '주차') + '</th>';
-  series.forEach(function(s){ h += '<th>' + escHtml(s.name) + '</th>'; });
-  if(showSum) h += '<th class="sum">전체</th>';
-  h += '</tr></thead><tbody>';
-  var rows = 0;
-  periods.forEach(function(p,i){
-    if(!totals[i]) return;   // 발송이 하나도 없던 구간은 표에서 생략(그래프에는 빈칸으로 남음)
-    rows++;
-    h += '<tr><td class="lbl">' + p.label + '</td>';
-    series.forEach(function(s){ h += anTd(metric, s.cells[i], ''); });
-    if(showSum) h += anTd(metric, totals[i], 'sum');
-    h += '</tr>';
+  var showSum = !(series.length === 1);   // 계열이 하나면 '전체' 행은 같은 값이라 생략
+  var cols = [];                          // 발송이 하나도 없던 구간은 표에서 생략(그래프에는 빈칸으로 남음)
+  periods.forEach(function(p,i){ if(totals[i]) cols.push(i); });
+  if(!cols.length){ document.getElementById('anTbl').innerHTML = '<div class="an-empty">표시할 구간이 없습니다</div>'; return; }
+
+  var h = '<table class="an-tbl an-tbl-h"><thead><tr><th class="lbl">계열</th>';
+  cols.forEach(function(i){
+    var p = periods[i];
+    h += '<th>' + escHtml(p.head || p.label) + (p.sub ? '<span class="wd">' + escHtml(p.sub) + '</span>' : '') + '</th>';
   });
+  h += '<th class="sum">합계</th></tr></thead><tbody>';
+
+  series.forEach(function(s){
+    h += '<tr><td class="lbl">' + escHtml(s.name) + '</td>';
+    cols.forEach(function(i){ h += anTd(metric, s.cells[i], ''); });
+    h += anTd(metric, s.tot, 'sum') + '</tr>';
+  });
+
+  if(showSum){
+    // 전체 행의 합계 칸 — 비율 지표는 '합계 ÷ 합계'라 계열 tot을 더한 뒤 계산해야 맞다
+    var g = { s:0, clk:0, cv:0, rev:0, cost:0, n:0 };
+    series.forEach(function(s){
+      g.s += s.tot.s; g.clk += s.tot.clk; g.cv += s.tot.cv;
+      g.rev += s.tot.rev; g.cost += s.tot.cost; g.n += s.tot.n;
+    });
+    h += '<tr><td class="lbl sum">전체</td>';
+    cols.forEach(function(i){ h += anTd(metric, totals[i], 'sum'); });
+    h += anTd(metric, g, 'sum') + '</tr>';
+  }
+
   h += '</tbody></table>';
-  document.getElementById('anTbl').innerHTML = rows ? h : '<div class="an-empty">표시할 구간이 없습니다</div>';
+  document.getElementById('anTbl').innerHTML = h;
 }
 function anRenderSumTable(series, grand){
   var h = '<table class="an-tbl"><thead><tr><th class="lbl">계열</th><th>캠페인</th><th>발송</th><th>클릭</th><th>클릭률</th><th>전환</th><th>전환율</th><th>매출</th><th>비용</th><th>ROAS</th><th>전환당 비용</th></tr></thead><tbody>';
